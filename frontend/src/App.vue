@@ -52,6 +52,29 @@ function textPart(part: unknown): part is { type: 'text'; text: string } {
   return typeof part === 'object' && part !== null && (part as { type?: string }).type === 'text';
 }
 
+function linkParts(text: string) {
+  const parts: Array<{ text: string; href?: string }> = [];
+  const urlPattern = /https?:\/\/[^\s<]+/g;
+  let cursor = 0;
+  for (const match of text.matchAll(urlPattern)) {
+    const start = match.index;
+    const rawUrl = match[0];
+    const url = rawUrl.replace(/[),.!?;:]+$/, '');
+    if (start > cursor) parts.push({ text: text.slice(cursor, start) });
+    parts.push({ text: url, href: url });
+    if (url.length < rawUrl.length) parts.push({ text: rawUrl.slice(url.length) });
+    cursor = start + rawUrl.length;
+  }
+  if (cursor < text.length) parts.push({ text: text.slice(cursor) });
+  return parts;
+}
+
+function publicUrl(container: ContainerInfo) {
+  return container.hostname && container.state === 'running' && container.ports.some((port) => port.protocol === 'tcp')
+    ? `https://${container.hostname}`
+    : undefined;
+}
+
 function toolPart(part: unknown) {
   if (typeof part !== 'object' || part === null) return null;
   const value = part as Record<string, unknown>;
@@ -294,7 +317,7 @@ onBeforeUnmount(() => {
           <article v-for="message in messages" :key="message.id" class="message" :class="message.role">
             <span class="message-author">{{ message.role === 'user' ? 'YOU' : 'HALFCLOUD' }}</span>
             <template v-for="(part, index) in message.parts" :key="index">
-              <p v-if="textPart(part)" class="message-text">{{ part.text }}</p>
+              <p v-if="textPart(part)" class="message-text"><template v-for="(content, contentIndex) in linkParts(part.text)" :key="contentIndex"><a v-if="content.href" :href="content.href" target="_blank" rel="noopener noreferrer">{{ content.text }}</a><template v-else>{{ content.text }}</template></template></p>
               <div v-else-if="toolPart(part)" class="tool-event" :class="toolState(toolPart(part)!)">
                 <span class="tool-icon">{{ toolState(toolPart(part)!) === 'complete' ? '✓' : toolState(toolPart(part)!) === 'failed' ? '!' : '·' }}</span>
                 <span>{{ toolLabel(toolPart(part)!) }}</span>
@@ -330,6 +353,7 @@ onBeforeUnmount(() => {
             <div><span>CPU</span><strong>{{ container.cpuPercent.toFixed(2) }}%</strong></div>
             <div><span>RAM</span><strong>{{ formatBytes(container.memoryUsed) }}</strong></div>
           </div>
+          <a v-if="publicUrl(container)" class="container-url" :href="publicUrl(container)" target="_blank" rel="noopener noreferrer">{{ publicUrl(container) }} <span aria-hidden="true">↗</span></a>
           <div class="container-actions">
             <button v-if="container.state !== 'running'" :disabled="actionId === container.id" @click="runAction(container, 'start')">Start</button>
             <button v-else :disabled="actionId === container.id" @click="runAction(container, 'stop')">Stop</button>
