@@ -67,9 +67,15 @@ function renderMarkdown(text: string) {
 }
 
 function publicUrl(container: ContainerInfo) {
-  return container.hostname && container.state === 'running' && container.ports.some((port) => port.protocol === 'tcp')
+  return container.hostname && container.ports.some((port) => port.protocol === 'tcp')
     ? `https://${container.hostname}`
     : undefined;
+}
+
+function privateAddresses(container: ContainerInfo) {
+  return container.internalPorts
+    .filter((port) => port.protocol === 'tcp')
+    .map((port) => `${container.name}:${port.port}`);
 }
 
 function toolPart(part: unknown) {
@@ -451,11 +457,22 @@ onBeforeUnmount(() => {
             <span class="state-label">{{ container.state }}</span>
           </div>
           <div class="container-data">
-            <div><span>PORTS</span><strong>{{ container.ports.length ? container.ports.map(p => `${p.host} → ${p.container}`).join(', ') : 'internal only' }}</strong></div>
+            <div><span>PUBLISHED</span><strong>{{ container.ports.length ? container.ports.map(p => `${p.host} → ${p.container}`).join(', ') : 'None' }}</strong></div>
             <div><span>CPU</span><strong>{{ container.cpuPercent.toFixed(2) }}%</strong></div>
             <div><span>RAM</span><strong>{{ formatBytes(container.memoryUsed) }}</strong></div>
           </div>
-          <a v-if="publicUrl(container)" class="container-url" :href="publicUrl(container)" target="_blank" rel="noopener noreferrer">{{ publicUrl(container) }} <span aria-hidden="true">↗</span></a>
+          <a v-if="publicUrl(container)" class="service-endpoint public" :href="publicUrl(container)" target="_blank" rel="noopener noreferrer">
+            <svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"></circle><path d="M3 12h18M12 3c2.4 2.5 3.6 5.5 3.6 9s-1.2 6.5-3.6 9c-2.4-2.5-3.6-5.5-3.6-9S9.6 5.5 12 3Z"></path></svg>
+            <span><small>PUBLIC URL</small><strong>{{ publicUrl(container) }}</strong></span>
+            <i aria-hidden="true">↗</i>
+          </a>
+          <div v-else class="service-endpoint private">
+            <svg aria-hidden="true" viewBox="0 0 24 24"><rect x="5" y="10" width="14" height="11" rx="2"></rect><path d="M8 10V7a4 4 0 0 1 8 0v3"></path></svg>
+            <span>
+              <small>PRIVATE NETWORK · USE IN ENV</small>
+              <strong>{{ privateAddresses(container).length ? privateAddresses(container).join(', ') : `${container.name}:<port>` }}</strong>
+            </span>
+          </div>
           <div class="container-actions">
             <button v-if="container.state !== 'running'" :disabled="actionId === container.id" @click="runAction(container, 'start')">Start</button>
             <button v-else :disabled="actionId === container.id" @click="runAction(container, 'stop')">Stop</button>

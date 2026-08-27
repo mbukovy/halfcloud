@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { assertManagedVolumeLabels, createOrReuseManagedVolume, managedBindPath, rootlessSocketPath, validateHostPort } from '../dist/backend/docker.js';
+import { assertManagedVolumeLabels, createOrReuseManagedNetwork, createOrReuseManagedVolume, managedBindPath, managedNetworkName, rootlessSocketPath, validateHostPort } from '../dist/backend/docker.js';
 
 test('requires an explicit rootless user Docker socket', () => {
   assert.equal(rootlessSocketPath('unix:///run/user/1001/docker.sock'), '/run/user/1001/docker.sock');
@@ -59,4 +59,44 @@ test('inspects the dockerode volume handle before validating labels', async () =
     'halfcloud.application': 'n8n',
     'halfcloud.volume': 'data',
   });
+});
+
+test('creates one managed bridge network when it does not exist', async () => {
+  let createOptions;
+  let exists = false;
+  const docker = {
+    async createNetwork(options) {
+      createOptions = options;
+      exists = true;
+    },
+    getNetwork(name) {
+      return {
+        async inspect() {
+          if (!exists) throw Object.assign(new Error('not found'), { statusCode: 404 });
+          return { Name: name, Id: 'network-id', Driver: 'bridge', Labels: { 'halfcloud.managed': 'true' } };
+        },
+      };
+    },
+  };
+
+  const network = await createOrReuseManagedNetwork(docker);
+  assert.equal(managedNetworkName, 'halfcloud');
+  assert.equal(network.Name, 'halfcloud');
+  assert.deepEqual(createOptions, {
+    Name: 'halfcloud',
+    CheckDuplicate: true,
+    Driver: 'bridge',
+    Labels: { 'halfcloud.managed': 'true' },
+  });
+});
+
+test('refuses to reuse an unmanaged network with the reserved name', async () => {
+  const docker = {
+    async createNetwork() {},
+    getNetwork() {
+      return { async inspect() { return { Name: 'halfcloud', Id: 'other', Driver: 'bridge', Labels: {} }; } };
+    },
+  };
+
+  await assert.rejects(createOrReuseManagedNetwork(docker), /not managed by HalfCloud/);
 });

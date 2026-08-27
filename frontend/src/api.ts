@@ -25,6 +25,7 @@ export interface ContainerInfo {
   status: string;
   hostname?: string;
   ports: Array<{ host: number; container: number; protocol: string }>;
+  internalPorts: Array<{ port: number; protocol: string }>;
   cpuPercent: number;
   memoryUsed: number;
   memoryLimit: number;

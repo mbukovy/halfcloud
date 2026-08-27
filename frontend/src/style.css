@@ -111,8 +111,8 @@ input:focus, textarea:focus { border-color: var(--ink); box-shadow: 0 0 0 3px #1
 .message-text table { display: block; max-width: 100%; overflow-x: auto; border-collapse: collapse; font-size: 12px; }
 .message-text th, .message-text td { padding: 6px 9px; border: 1px solid var(--line); text-align: left; }
 .message-text hr { border: 0; border-top: 1px solid var(--line); margin: 15px 0; }
-.message-text a, .container-url { color: #b74321; text-decoration-color: #ee5d2f66; text-underline-offset: 3px; }
-.message-text a:hover, .container-url:hover { color: var(--accent); text-decoration-color: currentColor; }
+.message-text a { color: #b74321; text-decoration-color: #ee5d2f66; text-underline-offset: 3px; }
+.message-text a:hover { color: var(--accent); text-decoration-color: currentColor; }
 .tool-event { display: flex; align-items: flex-start; gap: 9px; margin: 8px 0; border: 1px solid var(--line); border-radius: 3px; padding: 10px 11px; max-width: 520px; color: #59615c; font-size: 12px; }
 .tool-event small { margin-left: auto; font: 8px 'DM Mono', monospace; text-transform: uppercase; color: var(--muted); }
 .tool-event.complete .tool-icon { color: var(--green); }
@@ -165,8 +165,15 @@ input:focus, textarea:focus { border-color: var(--ink); box-shadow: 0 0 0 3px #1
 .container-data { display: grid; grid-template-columns: 1.4fr .6fr .7fr; gap: 10px; padding: 16px 0; margin-top: 15px; border-top: 1px solid #e1ded5; border-bottom: 1px solid #e1ded5; }
 .container-data div { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
 .container-data strong { font: 500 10px 'DM Mono', monospace; overflow-wrap: anywhere; }
-.container-url { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 11px 0 0; font: 500 10px 'DM Mono', monospace; overflow-wrap: anywhere; }
-.container-url span { flex: 0 0 auto; font-size: 12px; }
+.service-endpoint { display: grid; grid-template-columns: 24px minmax(0, 1fr) auto; align-items: center; gap: 10px; margin-top: 12px; padding: 10px 11px; border: 1px solid; border-radius: 3px; text-decoration: none; }
+.service-endpoint svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; justify-self: center; }
+.service-endpoint span { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.service-endpoint small { color: inherit; opacity: .72; font: 8px 'DM Mono', monospace; letter-spacing: .1em; }
+.service-endpoint strong { font: 500 10px 'DM Mono', monospace; overflow-wrap: anywhere; }
+.service-endpoint i { font: 12px 'DM Mono', monospace; font-style: normal; }
+.service-endpoint.public { color: #a94325; border-color: #e4c4b8; background: #fff8f3; }
+.service-endpoint.public:hover { color: var(--accent); border-color: #d7a08d; background: #fff; }
+.service-endpoint.private { grid-template-columns: 24px minmax(0, 1fr); color: #426055; border-color: #cbd8d1; background: #f1f6f2; }
 .container-actions { display: flex; gap: 5px; padding-top: 13px; }
 .container-actions button { flex: 1; border: 1px solid var(--line); background: transparent; border-radius: 2px; font-size: 9px; padding: 7px 3px; cursor: pointer; }
 .container-actions button:hover { border-color: #8c908b; background: #fff; }

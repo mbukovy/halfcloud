@@ -68,7 +68,8 @@ Rules:
 - Only modify containers carrying the HalfCloud managed label. The tools enforce this boundary.
 - Before creating an application, list applications to understand names and published ports. createApplication performs the final port check.
 - Choose a sensible short container name when intent is clear. Use official images and explicit image tags (usually :latest) unless the user names another image.
-- For common web images, infer their standard internal port. The ports object maps a localhost host port in the 10000-19999 range to a container port.
+- All applications share the private halfcloud Docker network and can reach each other by container name on their internal ports. Use an empty ports object for databases, queues, workers, and other private-only services; do not publish a host port or assign a hostname unless the user explicitly needs public access.
+- For public web images, infer their standard internal port. The ports object maps a localhost host port in the 10000-19999 range to a container port.
 - Deployments run on rootless Docker. Never request privileged mode, host networking, devices, Docker sockets, or arbitrary host paths.
 - If an application requires privileged host access, explain that it cannot currently be deployed safely by HalfCloud. Never suggest silently elevating it.
 - When application data must survive container recreation, use namedVolumes by default and mount each volume at the path expected by the image. This includes databases, uploads, application state, configuration state, and persistent caches.
@@ -82,7 +83,7 @@ Rules:
 - After every application creation, inspect its logs and list applications again to verify that it remains running. If Docker reports health for the image, verify that status too. A successful start alone is not success.
 - If post-creation checks reveal a problem, diagnose and fix it when the correction is safe and consistent with the requested deployment. Prefer fixes that preserve the intended architecture, persistence, security, and private service exposure; do not call a deployment successful if the fix risks data loss after recreation or unnecessarily exposes a service.
 - Explain important failures plainly. Never expose API keys or claim success unless the tool result confirms it.
-- Keep responses concise and operational. After creating an application, state its name and public HTTPS URL.`;
+- Keep responses concise and operational. After creating a public application, state its name and public HTTPS URL. For a private service, state its container name and internal port instead.`;
 
 export async function createChatResponse(
   settings: AiSettings,
@@ -101,11 +102,11 @@ export async function createChatResponse(
       execute: () => docker.listContainers(),
     }),
     createApplication: tool({
-      description: 'Deploy a rootless HalfCloud application, expose it through Caddy HTTPS, and verify it started.',
+      description: 'Deploy a rootless HalfCloud application on the shared private network, optionally expose a published TCP port through Caddy HTTPS, and verify it started.',
       inputSchema: z.object({
         name: z.string().min(1),
         image: z.string().min(1),
-        ports: z.record(z.string(), z.string()).describe('Map of localhost host port (10000-19999) to container port, e.g. {"10023":"5678"}'),
+        ports: z.record(z.string(), z.string()).describe('Map of localhost host port (10000-19999) to container port, e.g. {"10023":"5678"}; use {} for a private-only service'),
         environment: z.record(z.string(), z.string()).optional(),
         namedVolumes: z.record(z.string(), z.string()).optional().describe('Map of application-local volume name to absolute container path; preferred for persistent application data'),
         volumes: z.record(z.string(), z.string()).optional().describe('Map of application-relative host path to absolute container path; use only when host filesystem access is needed'),

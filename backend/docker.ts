@@ -20,6 +20,37 @@ interface ManagedVolumeClient {
   getVolume(name: string): { inspect(): Promise<Docker.VolumeInspectInfo> };
 }
 
+interface ManagedNetworkClient {
+  createNetwork(options: Docker.NetworkCreateOptions): Promise<unknown>;
+  getNetwork(name: string): { inspect(): Promise<Docker.NetworkInspectInfo> };
+}
+
+export const managedNetworkName = 'halfcloud';
+
+export async function createOrReuseManagedNetwork(docker: ManagedNetworkClient) {
+  let network: Docker.NetworkInspectInfo;
+  try {
+    network = await docker.getNetwork(managedNetworkName).inspect();
+  } catch (error) {
+    if ((error as { statusCode?: number }).statusCode !== 404) throw error;
+    try {
+      await docker.createNetwork({
+        Name: managedNetworkName,
+        CheckDuplicate: true,
+        Driver: 'bridge',
+        Labels: { 'halfcloud.managed': 'true' },
+      });
+    } catch (createError) {
+      if ((createError as { statusCode?: number }).statusCode !== 409) throw createError;
+    }
+    network = await docker.getNetwork(managedNetworkName).inspect();
+  }
+  if (network.Driver !== 'bridge' || network.Labels?.['halfcloud.managed'] !== 'true') {
+    throw new Error(`Docker network ${managedNetworkName} already exists and is not managed by HalfCloud`);
+  }
+  return network;
+}
+
 export function assertManagedVolumeLabels(volume: Docker.VolumeInspectInfo, application: string, localName: string) {
   if (
     volume.Labels?.['halfcloud.managed'] !== 'true'
@@ -107,6 +138,16 @@ export class DockerService {
     return info;
   }
 
+  async ensureNetwork() {
+    const network = await createOrReuseManagedNetwork(this.docker);
+    const attached = new Set(Object.keys(network.Containers ?? {}));
+    const containers = await this.docker.listContainers({ all: true, filters: { label: ['halfcloud.managed=true'] } });
+    for (const container of containers) {
+      if (!attached.has(container.Id)) await this.docker.getNetwork(network.Id).connect({ Container: container.Id });
+    }
+    return { name: network.Name, driver: network.Driver, connectedContainers: containers.length };
+  }
+
   async listContainers(includeStats = true) {
     const containers = await this.docker.listContainers({
       all: true,
@@ -118,6 +159,10 @@ export class DockerService {
         container: port.PrivatePort,
         protocol: port.Type,
       }));
+      const internalPorts = [...new Map((container.Ports ?? []).map((port) => [
+        `${port.PrivatePort}/${port.Type}`,
+        { port: port.PrivatePort, protocol: port.Type },
+      ])).values()];
       let stats = { cpuPercent: 0, memoryUsed: 0, memoryLimit: 0 };
       if (includeStats && container.State === 'running') {
         try {
@@ -134,6 +179,7 @@ export class DockerService {
         status: container.Status,
         hostname: container.Labels?.['halfcloud.hostname'],
         ports,
+        internalPorts,
         ...stats,
       };
     }));
@@ -147,6 +193,8 @@ export class DockerService {
     if (input.hostname && !/^(?=.{1,253}$)(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$/.test(input.hostname)) {
       throw new Error('Invalid application hostname');
     }
+
+    await this.ensureNetwork();
 
     const existing = await this.docker.listContainers({ all: true, filters: { name: [`^/${name}$`] } });
     if (existing.length) throw new Error(`A Docker container named ${name} already exists`);
@@ -249,6 +297,7 @@ export class DockerService {
       Labels: { 'halfcloud.managed': 'true', 'halfcloud.name': name, ...(input.hostname ? { 'halfcloud.hostname': input.hostname } : {}) },
       ExposedPorts: exposedPorts,
       HostConfig: {
+        NetworkMode: managedNetworkName,
         PortBindings: portBindings,
         RestartPolicy: { Name: 'unless-stopped' },
         LogConfig: { Type: 'json-file', Config: { 'max-size': '10m', 'max-file': '3' } },
@@ -267,7 +316,7 @@ export class DockerService {
         image,
         running: inspection.State.Running,
         ports: input.ports,
-        steps: ['Validated rootless deployment policy', 'Checked published ports', pulled ? `Pulled ${image}` : `Found ${image} locally`, 'Created container', 'Started container'],
+        steps: ['Validated rootless deployment policy', `Connected to ${managedNetworkName} network`, 'Checked published ports', pulled ? `Pulled ${image}` : `Found ${image} locally`, 'Created container', 'Started container'],
       };
     } catch (error) {
       await container.remove({ force: true }).catch(() => undefined);
@@ -401,6 +450,7 @@ export class DockerService {
       return [entry.slice(0, separator), entry.slice(separator + 1)];
     }));
     environment.set(key, value);
+    await createOrReuseManagedNetwork(this.docker);
     const backupName = `${name}-halfcloud-backup-${Date.now()}`;
     const wasRunning = inspection.State.Running;
     if (wasRunning) await container.stop({ t: 10 });
@@ -418,6 +468,7 @@ export class DockerService {
         Labels: inspection.Config.Labels,
         ExposedPorts: inspection.Config.ExposedPorts,
         HostConfig: {
+          NetworkMode: managedNetworkName,
           PortBindings: inspection.HostConfig.PortBindings,
           Binds: inspection.HostConfig.Binds,
           RestartPolicy: inspection.HostConfig.RestartPolicy,

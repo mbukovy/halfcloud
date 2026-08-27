@@ -18,6 +18,7 @@ const auth = await AuthService.create();
 const settings = new SettingsStore();
 const docker = new ApplicationService(new DockerService());
 await docker.assertRootless();
+await docker.ensureNetwork();
 await docker.syncRoutes();
 const loginAttempts = new Map<string, { count: number; resetAt: number }>();
 

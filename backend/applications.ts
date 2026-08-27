@@ -10,6 +10,7 @@ export class ApplicationService {
   ping() { return this.docker.ping(); }
   getRuntimeInfo() { return this.docker.getRuntimeInfo(); }
   assertRootless() { return this.docker.assertRootless(); }
+  ensureNetwork() { return this.docker.ensureNetwork(); }
   listContainers(includeStats = true) { return this.docker.listContainers(includeStats); }
   getContainerLogs(id: string, tail?: number) { return this.docker.getContainerLogs(id, tail); }
   getContainerStats(id: string) { return this.docker.getContainerStats(id); }
@@ -26,11 +27,13 @@ export class ApplicationService {
   }
 
   async createContainer(input: CreateContainerInput) {
-    const hostname = input.hostname ?? this.defaultHostname(input.name);
+    const hasPublicTcpPort = Object.values(input.ports).some((target) => !target.includes('/') || target.endsWith('/tcp'));
+    if (input.hostname && !hasPublicTcpPort) throw new Error('A hostname requires a published TCP port');
+    const hostname = input.hostname ?? (hasPublicTcpPort ? this.defaultHostname(input.name) : undefined);
     const result = await this.docker.createContainer({ ...input, hostname });
     try {
       await this.syncRoutes();
-      return { ...result, hostname, url: `https://${hostname}` };
+      return { ...result, ...(hostname ? { hostname, url: `https://${hostname}` } : {}) };
     } catch (error) {
       await this.docker.deleteContainer(result.id).catch(() => undefined);
       throw error;
