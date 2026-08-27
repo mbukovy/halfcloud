@@ -35,6 +35,16 @@ Open the HTTPS URL printed by the installer, sign in with your access code and c
 
 HalfCloud 0.1 requires a clean installation. It deliberately refuses to install while a host Docker daemon is active; migration from an existing privileged installation is not supported.
 
+### Update
+
+To update an existing installation to the latest `main` release, run:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/mbukovy/halfcloud/main/update.sh | sudo bash
+```
+
+The updater downloads and builds the new release before stopping `halfcloud.service`. It does not restart Docker, Caddy, or application containers. Persistent configuration, credentials, and application data under `/home/halfcloudrunner/.halfcloud` are not replaced. If the new control plane fails its health check, the updater restores and starts the previous release automatically.
+
 ### Uninstall
 
 This permanently removes HalfCloud, all applications and data, and its Docker, Caddy, and Node.js installation. Run it from a sudo-capable account other than `halfcloudrunner`:
@@ -68,8 +78,11 @@ Useful host commands:
 ```bash
 systemctl status halfcloud caddy
 journalctl -u halfcloud
+journalctl -u halfcloud -f
 sudo -u halfcloudrunner docker info
 ```
+
+Chat failures include a request ID and redacted Azure response details in the UI. Use the same request ID in `journalctl -u halfcloud` to find the corresponding server-side stack trace.
 
 Application deployments are validated in code. HalfCloud does not expose an arbitrary shell or Docker command tool and cannot request privileged containers, host networking, host devices, Docker socket mounts, or bind mounts outside `/home/halfcloudrunner/.halfcloud/apps`.
 

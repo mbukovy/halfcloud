@@ -79,6 +79,9 @@ input:focus, textarea:focus { border-color: var(--ink); box-shadow: 0 0 0 3px #1
 .section-heading h2 { font-size: 22px; }
 .section-heading sup { font: 10px 'DM Mono', monospace; color: var(--muted); vertical-align: super; margin-left: 5px; }
 .section-heading.compact { padding-bottom: 20px; position: sticky; top: 0; background: #eeece5eF; backdrop-filter: blur(8px); z-index: 1; }
+.chat-heading-actions { display: flex; align-items: center; gap: 18px; }
+.new-conversation-button { border: 1px solid var(--line); background: transparent; border-radius: 3px; padding: 7px 10px; color: #59615c; font: 10px 'DM Mono', monospace; cursor: pointer; }
+.new-conversation-button:hover { border-color: #8c908b; color: var(--ink); background: #fff; }
 .thinking { font: 9px 'DM Mono', monospace; letter-spacing: .1em; color: var(--green); }
 .thinking span { display: inline-block; margin-left: 8px; width: 6px; height: 6px; border-radius: 50%; background: var(--green); animation: blink 1s infinite; }
 @keyframes blink { 50% { opacity: .2; } }
@@ -100,7 +103,7 @@ input:focus, textarea:focus { border-color: var(--ink); box-shadow: 0 0 0 3px #1
 .tool-event.complete .tool-icon { color: var(--green); }
 .tool-event.failed { border-color: #dba99a; color: #9f3b25; }
 .tool-icon { font: 14px 'DM Mono', monospace; }
-.chat-error { padding: 10px; background: #fff0eb; }
+.chat-error { padding: 10px; background: #fff0eb; white-space: pre-wrap; overflow-wrap: anywhere; }
 .composer { margin: 0 30px 24px; border: 1px solid #c7c4ba; background: #fffefb; border-radius: 5px; display: flex; align-items: end; padding: 8px; box-shadow: 0 8px 28px #19231f0c; }
 .composer:focus-within { border-color: var(--ink); }
 .composer textarea { border: 0; resize: none; background: transparent; padding: 8px; line-height: 1.45; box-shadow: none; }

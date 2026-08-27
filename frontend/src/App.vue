@@ -28,7 +28,7 @@ const authenticatedFetch: typeof fetch = async (input, init) => {
   return response;
 };
 
-const { messages, sendMessage, status, error: chatError, stop } = useChat({
+const { messages, sendMessage, status, error: chatError, stop, clearError } = useChat({
   transport: new DefaultChatTransport({ api: '/api/chat', fetch: authenticatedFetch }),
 });
 
@@ -177,6 +177,13 @@ async function submitPrompt() {
   await sendMessage({ text });
 }
 
+async function newConversation() {
+  await stop();
+  messages.value = [];
+  prompt.value = '';
+  clearError();
+}
+
 async function runAction(container: ContainerInfo, action: 'start' | 'stop' | 'restart' | 'delete') {
   if (action === 'delete' && !window.confirm(`Delete ${container.name}? The container will be permanently removed; its image will remain.`)) return;
   actionId.value = container.id;
@@ -268,7 +275,10 @@ onBeforeUnmount(() => {
       <section class="chat-panel">
         <div class="section-heading">
           <div><p class="eyebrow">AI OPERATOR</p><h1>Ask HalfCloud</h1></div>
-          <span v-if="chatBusy" class="thinking">WORKING<span></span></span>
+          <div class="chat-heading-actions">
+            <span v-if="chatBusy" class="thinking">WORKING<span></span></span>
+            <button class="new-conversation-button" type="button" @click="newConversation">New conversation</button>
+          </div>
         </div>
         <div ref="transcript" class="transcript">
           <div v-if="messages.length === 0" class="empty-chat">
@@ -292,7 +302,7 @@ onBeforeUnmount(() => {
               </div>
             </template>
           </article>
-          <p v-if="chatError" class="form-error chat-error">{{ chatError.message }}</p>
+          <pre v-if="chatError" class="form-error chat-error">{{ chatError.message }}</pre>
         </div>
         <form class="composer" @submit.prevent="submitPrompt">
           <textarea v-model="prompt" :disabled="!settings?.configured" rows="2" :placeholder="settings?.configured ? 'Tell HalfCloud what should be running…' : 'Configure Azure OpenAI to start…'" @keydown.enter.exact.prevent="submitPrompt"></textarea>

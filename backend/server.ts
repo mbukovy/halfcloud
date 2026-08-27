@@ -1,4 +1,5 @@
 import { Readable } from 'node:stream';
+import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import cookieParser from 'cookie-parser';
@@ -102,6 +103,8 @@ app.put('/api/containers/:id/environment/:key', async (request, response) => {
 });
 
 app.post('/api/chat', async (request, response) => {
+  const requestId = randomUUID();
+  response.setHeader('x-request-id', requestId);
   const aiSettings = await settings.get();
   if (!aiSettings) {
     response.status(409).json({ error: 'Configure Azure OpenAI before using chat' });
@@ -113,7 +116,8 @@ app.post('/api/chat', async (request, response) => {
   response.once('close', () => {
     if (!response.writableFinished) abortController.abort();
   });
-  const webResponse = await createChatResponse(aiSettings, docker, messages, abortController.signal);
+  console.log(`[chat:${requestId}] Starting Azure OpenAI request (endpoint=${aiSettings.endpoint}, deployment=${aiSettings.deployment}, messages=${messages.length})`);
+  const webResponse = await createChatResponse(aiSettings, docker, messages, abortController.signal, requestId);
   response.status(webResponse.status);
   webResponse.headers.forEach((value, key) => response.setHeader(key, value));
   if (!webResponse.body) {
@@ -121,7 +125,10 @@ app.post('/api/chat', async (request, response) => {
     return;
   }
   const stream = Readable.fromWeb(webResponse.body as import('node:stream/web').ReadableStream);
-  stream.once('error', () => abortController.abort());
+  stream.once('error', (error) => {
+    console.error(`[chat:${requestId}] Response stream failed`, error);
+    abortController.abort();
+  });
   stream.pipe(response);
 });
 
