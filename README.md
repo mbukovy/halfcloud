@@ -35,6 +35,22 @@ Open the HTTPS URL printed by the installer, sign in with your access code and c
 
 HalfCloud 0.1 requires a clean installation. It deliberately refuses to install while a host Docker daemon is active; migration from an existing privileged installation is not supported.
 
+### Uninstall
+
+The uninstaller permanently removes HalfCloud, all deployed applications and data, the `halfcloud` user, and the Docker, Caddy, and Node.js installation used by HalfCloud. It is intended for a dedicated HalfCloud server and requires an explicit interactive confirmation.
+
+```bash
+sudo /home/halfcloud/halfcloud/uninstall.sh
+```
+
+If an installation failed before that file was installed, download and run the uninstaller directly:
+
+```bash
+curl -fsSLO https://raw.githubusercontent.com/mbukovy/halfcloud/main/uninstall.sh
+chmod +x uninstall.sh
+sudo ./uninstall.sh
+```
+
 ## Runtime architecture
 
 The installer is the only component that runs as root. It creates a dedicated `halfcloud` Linux user with no `sudo` or `docker` group membership, installs that user's rootless Docker daemon, enables user lingering, and installs HalfCloud as a host systemd service.
