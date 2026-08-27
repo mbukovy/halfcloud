@@ -63,8 +63,10 @@ function toolLabel(part: Record<string, unknown>) {
   const type = String(part.type);
   const name = type === 'dynamic-tool' ? String(part.toolName ?? 'tool') : type.slice(5);
   const labels: Record<string, string> = {
-    listContainers: 'Inspecting containers', createContainer: 'Creating container', startContainer: 'Starting container',
-    stopContainer: 'Stopping container', restartContainer: 'Restarting container', deleteContainer: 'Deleting container',
+    listContainers: 'Inspecting applications', createApplication: 'Creating application', startApplication: 'Starting application',
+    stopApplication: 'Stopping application', restartApplication: 'Restarting application', deleteApplication: 'Deleting application',
+    getApplicationLogs: 'Reading application logs', getApplicationStatus: 'Inspecting application', getHostStatus: 'Inspecting host',
+    setEnvironmentVariable: 'Updating application environment',
     getContainerLogs: 'Reading logs', getContainerStats: 'Reading container metrics', getServerStats: 'Reading server metrics',
   };
   return labels[name] ?? name;

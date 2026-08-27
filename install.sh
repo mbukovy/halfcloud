@@ -1,127 +1,192 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-readonly INSTALL_DIR="/opt/halfcloud"
+readonly HALFCLOUD_USER="halfcloud"
+readonly HALFCLOUD_HOME="/home/${HALFCLOUD_USER}"
+readonly INSTALL_DIR="${HALFCLOUD_HOME}/halfcloud"
+readonly DATA_DIR="${HALFCLOUD_HOME}/.halfcloud"
 readonly REPOSITORY="mbukovy/halfcloud"
-readonly RAW_URL="https://raw.githubusercontent.com/${REPOSITORY}/main"
+readonly SOURCE_URL="https://github.com/${REPOSITORY}/archive/refs/heads/main.tar.gz"
 
 info() { printf '%s\n' "$1"; }
 success() { printf '✓ %s\n' "$1"; }
 fail() { printf 'Error: %s\n' "$1" >&2; exit 1; }
+run_user() {
+  runuser -u "${HALFCLOUD_USER}" -- env \
+    HOME="${HALFCLOUD_HOME}" \
+    USER="${HALFCLOUD_USER}" \
+    XDG_RUNTIME_DIR="${runtime_dir}" \
+    DBUS_SESSION_BUS_ADDRESS="unix:path=${runtime_dir}/bus" \
+    DOCKER_HOST="unix://${docker_socket}" \
+    PATH="${HALFCLOUD_HOME}/bin:/usr/local/bin:/usr/bin:/bin" \
+    "$@"
+}
 
-if [[ "$(uname -s)" != "Linux" ]]; then
-  fail "HalfCloud 0.1 supports Linux only."
-fi
-
-if [[ "${EUID}" -ne 0 ]]; then
-  fail "Run the installer as root (for example: curl ... | sudo bash)."
-fi
-
-if [[ ! -r /etc/os-release ]]; then
-  fail "Cannot identify this Linux distribution. Ubuntu 22.04 or newer is required."
-fi
-
+[[ "$(uname -s)" == "Linux" ]] || fail "HalfCloud 0.1 supports Linux only."
+[[ "${EUID}" -eq 0 ]] || fail "Run the installer as root (for example: curl ... | sudo bash)."
+[[ -r /etc/os-release ]] || fail "Cannot identify this Linux distribution. Ubuntu 22.04 or newer is required."
 # shellcheck disable=SC1091
 source /etc/os-release
-if [[ "${ID:-}" != "ubuntu" ]]; then
-  fail "HalfCloud 0.1 supports Ubuntu only (detected ${PRETTY_NAME:-unknown})."
-fi
-
+[[ "${ID:-}" == "ubuntu" ]] || fail "HalfCloud 0.1 supports Ubuntu only (detected ${PRETTY_NAME:-unknown})."
 major_version="${VERSION_ID%%.*}"
-if [[ ! "${major_version}" =~ ^[0-9]+$ ]] || (( major_version < 22 )); then
-  fail "Ubuntu 22.04 or newer is required (detected ${VERSION_ID:-unknown})."
-fi
+[[ "${major_version}" =~ ^[0-9]+$ ]] && (( major_version >= 22 )) || fail "Ubuntu 22.04 or newer is required (detected ${VERSION_ID:-unknown})."
+[[ "$(uname -m)" == "x86_64" || "$(uname -m)" == "aarch64" ]] || fail "HalfCloud supports amd64 and arm64 servers only."
+[[ -d /run/systemd/system ]] || fail "HalfCloud requires systemd."
+[[ ! -S /var/run/docker.sock ]] || fail "A host Docker daemon is active. HalfCloud 0.1 requires a clean installation."
 
-info "Installing HalfCloud..."
-info ""
-
+info "Installing HalfCloud with rootless Docker..."
 export DEBIAN_FRONTEND=noninteractive
-if ! command -v curl >/dev/null 2>&1; then
-  apt-get update -qq
-  apt-get install -y -qq curl ca-certificates
-fi
+apt-get update -qq
+apt-get install -y -qq ca-certificates curl dbus-user-session git uidmap slirp4netns fuse-overlayfs jq openssl gnupg
 
-if ! command -v docker >/dev/null 2>&1; then
-  apt-get update -qq
-  apt-get install -y -qq ca-certificates curl
+if ! id "${HALFCLOUD_USER}" >/dev/null 2>&1; then
+  useradd --create-home --shell /bin/bash "${HALFCLOUD_USER}"
+fi
+halfcloud_uid="$(id -u "${HALFCLOUD_USER}")"
+runtime_dir="/run/user/${halfcloud_uid}"
+docker_socket="${runtime_dir}/docker.sock"
+if ! grep -q "^${HALFCLOUD_USER}:" /etc/subuid; then printf '%s:100000:65536\n' "${HALFCLOUD_USER}" >> /etc/subuid; fi
+if ! grep -q "^${HALFCLOUD_USER}:" /etc/subgid; then printf '%s:100000:65536\n' "${HALFCLOUD_USER}" >> /etc/subgid; fi
+loginctl enable-linger "${HALFCLOUD_USER}"
+systemctl start "user@${halfcloud_uid}.service"
+success "Dedicated halfcloud user configured"
+
+if ! command -v dockerd-rootless-setuptool.sh >/dev/null 2>&1; then
   curl -fsSL https://get.docker.com | sh
-  systemctl enable --now docker
-  success "Docker installed"
-else
-  systemctl enable --now docker >/dev/null 2>&1 || true
-  success "Docker available"
+fi
+apt-get install -y -qq docker-ce-rootless-extras docker-compose-plugin
+systemctl disable --now docker.service docker.socket >/dev/null 2>&1 || true
+rm -f /var/run/docker.sock
+run_user dockerd-rootless-setuptool.sh install --force
+run_user systemctl --user enable --now docker.service
+for _ in {1..30}; do
+  [[ -S "${docker_socket}" ]] && run_user docker info >/dev/null 2>&1 && break
+  sleep 1
+done
+[[ -S "${docker_socket}" ]] || fail "Rootless Docker did not create ${docker_socket}."
+[[ "$(stat -c %U "${docker_socket}")" == "${HALFCLOUD_USER}" ]] || fail "The Docker socket is not owned by halfcloud."
+run_user docker info --format '{{json .SecurityOptions}}' | grep -q rootless || fail "Docker did not report rootless mode."
+success "Rootless Docker is running"
+
+node_major="0"
+if command -v node >/dev/null 2>&1; then node_major="$(node --version | tr -d v | cut -d. -f1)"; fi
+if (( node_major < 22 )); then
+  curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
+  apt-get install -y -qq nodejs
 fi
 
-if ! docker compose version >/dev/null 2>&1; then
-  apt-get update -qq
-  apt-get install -y -qq docker-compose-plugin || fail "Docker Compose v2 is required."
-fi
-
-install -d -m 700 "${INSTALL_DIR}/data"
 temporary_dir="$(mktemp -d)"
 trap 'rm -rf "${temporary_dir}"' EXIT
-curl -fsSL "${RAW_URL}/compose.yaml" -o "${temporary_dir}/compose.yaml"
-curl -fsSL "${RAW_URL}/Caddyfile" -o "${temporary_dir}/Caddyfile"
-install -m 644 "${temporary_dir}/compose.yaml" "${INSTALL_DIR}/compose.yaml"
-install -m 644 "${temporary_dir}/Caddyfile" "${INSTALL_DIR}/Caddyfile"
+curl -fsSL "${SOURCE_URL}" -o "${temporary_dir}/source.tar.gz"
+tar -xzf "${temporary_dir}/source.tar.gz" -C "${temporary_dir}"
+rm -rf "${INSTALL_DIR}"
+install -d -o "${HALFCLOUD_USER}" -g "${HALFCLOUD_USER}" -m 755 "${INSTALL_DIR}"
+cp -a "${temporary_dir}/halfcloud-main/." "${INSTALL_DIR}/"
+chown -R "${HALFCLOUD_USER}:${HALFCLOUD_USER}" "${INSTALL_DIR}"
+run_user npm --prefix "${INSTALL_DIR}" ci
+run_user npm --prefix "${INSTALL_DIR}" run build
+run_user npm --prefix "${INSTALL_DIR}" prune --omit=dev
+install -d -o "${HALFCLOUD_USER}" -g "${HALFCLOUD_USER}" -m 700 \
+  "${DATA_DIR}/config" "${DATA_DIR}/data" "${DATA_DIR}/apps" "${DATA_DIR}/logs" "${DATA_DIR}/secrets"
 
 public_ip="$(curl --ipv4 -fsS --max-time 10 https://api.ipify.org || curl --ipv4 -fsS --max-time 10 https://ifconfig.me/ip || true)"
 public_ip="${public_ip//$'\n'/}"
-if [[ ! "${public_ip}" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
-  fail "Could not determine the VPS public IPv4 address."
-fi
+[[ "${public_ip}" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || fail "Could not determine the VPS public IPv4 address."
 IFS='.' read -r -a octets <<< "${public_ip}"
-for octet in "${octets[@]}"; do
-  if (( 10#${octet} > 255 )); then fail "Received an invalid public IPv4 address."; fi
-done
-
-hostname="${public_ip//./-}.sslip.io"
+for octet in "${octets[@]}"; do (( 10#${octet} <= 255 )) || fail "Received an invalid public IPv4 address."; done
+base_domain="${public_ip}.nip.io"
+hostname="halfcloud.${base_domain}"
 random_hex="$(od -An -N6 -tx1 /dev/urandom | tr -d ' \n' | tr '[:lower:]' '[:upper:]')"
 access_code="${random_hex:0:6}-${random_hex:6:6}"
-session_secret="$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')"
-printf '%s\n' "${access_code}" > "${INSTALL_DIR}/data/access-code"
-chmod 600 "${INSTALL_DIR}/data/access-code"
-cat > "${INSTALL_DIR}/.env" <<EOF
-HALFCLOUD_HOSTNAME=${hostname}
+session_secret="$(openssl rand -hex 32)"
+printf '%s\n' "${access_code}" > "${DATA_DIR}/secrets/access-code"
+cat > "${DATA_DIR}/config/service.env" <<EOF
+NODE_ENV=production
+PORT=9000
+HOME=${HALFCLOUD_HOME}
+HALFCLOUD_DATA_DIR=${DATA_DIR}/data
+HALFCLOUD_APPS_DIR=${DATA_DIR}/apps
+HALFCLOUD_ACCESS_CODE_FILE=${DATA_DIR}/secrets/access-code
 HALFCLOUD_SESSION_SECRET=${session_secret}
-HALFCLOUD_IMAGE=ghcr.io/${REPOSITORY}:latest
+HALFCLOUD_HOSTNAME=${hostname}
+HALFCLOUD_BASE_DOMAIN=${base_domain}
+DOCKER_HOST=unix://${docker_socket}
 EOF
-chmod 600 "${INSTALL_DIR}/.env"
-success "HalfCloud files installed"
+chown -R "${HALFCLOUD_USER}:${HALFCLOUD_USER}" "${DATA_DIR}"
+chmod 600 "${DATA_DIR}/secrets/access-code" "${DATA_DIR}/config/service.env"
 
-docker compose -f "${INSTALL_DIR}/compose.yaml" --env-file "${INSTALL_DIR}/.env" pull
-docker compose -f "${INSTALL_DIR}/compose.yaml" --env-file "${INSTALL_DIR}/.env" up -d --remove-orphans
+cat > /etc/systemd/system/halfcloud.service <<EOF
+[Unit]
+Description=HalfCloud control plane
+After=network-online.target user@${halfcloud_uid}.service
+Wants=network-online.target
+Requires=user@${halfcloud_uid}.service
 
-for _ in {1..60}; do
-  if docker compose -f "${INSTALL_DIR}/compose.yaml" --env-file "${INSTALL_DIR}/.env" exec -T halfcloud node -e "fetch('http://127.0.0.1:3000/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))" >/dev/null 2>&1; then
-    success "HalfCloud started"
-    break
-  fi
-  sleep 2
-done
-if ! docker compose -f "${INSTALL_DIR}/compose.yaml" --env-file "${INSTALL_DIR}/.env" exec -T halfcloud node -e "fetch('http://127.0.0.1:3000/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))" >/dev/null 2>&1; then
-  docker compose -f "${INSTALL_DIR}/compose.yaml" --env-file "${INSTALL_DIR}/.env" logs --tail=40 >&2
-  fail "HalfCloud did not become healthy."
-fi
+[Service]
+Type=simple
+User=${HALFCLOUD_USER}
+Group=${HALFCLOUD_USER}
+WorkingDirectory=${INSTALL_DIR}
+EnvironmentFile=${DATA_DIR}/config/service.env
+ExecStart=/usr/bin/node ${INSTALL_DIR}/dist/backend/server.js
+Restart=always
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=${DATA_DIR}
+RestrictSUIDSGID=true
 
-success "Caddy started"
+[Install]
+WantedBy=multi-user.target
+EOF
+
+curl -fsSL https://dl.cloudsmith.io/public/caddy/stable/gpg.key | gpg --dearmor --yes -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+curl -fsSL https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt -o /etc/apt/sources.list.d/caddy-stable.list
+apt-get update -qq
+apt-get install -y -qq caddy
+cat > /etc/caddy/Caddyfile <<EOF
+{
+  admin 127.0.0.1:2019
+}
+
+${hostname} {
+  encode zstd gzip
+  reverse_proxy 127.0.0.1:9000
+}
+EOF
+caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+systemctl enable --now caddy
+systemctl daemon-reload
+systemctl enable --now halfcloud
+success "HalfCloud and Caddy services installed"
+
+test_name="halfcloud-install-test"
+run_user docker rm -f "${test_name}" >/dev/null 2>&1 || true
+run_user docker run -d --name "${test_name}" -p 127.0.0.1:19999:80 nginx:alpine >/dev/null
+for _ in {1..30}; do curl -fsS --max-time 2 http://127.0.0.1:19999/ >/dev/null 2>&1 && break; sleep 1; done
+curl -fsS --max-time 2 http://127.0.0.1:19999/ >/dev/null || fail "Rootless Docker could not expose a localhost test port."
+run_user docker rm -f "${test_name}" >/dev/null
+success "Rootless test container passed"
+
+for _ in {1..60}; do curl -fsS --max-time 2 http://127.0.0.1:9000/api/health >/dev/null 2>&1 && break; sleep 2; done
+curl -fsS --max-time 2 http://127.0.0.1:9000/api/health >/dev/null || { journalctl -u halfcloud --no-pager -n 50 >&2; fail "HalfCloud did not become healthy."; }
+systemctl is-active --quiet caddy || fail "Caddy is not running."
+if id -nG "${HALFCLOUD_USER}" | tr ' ' '\n' | grep -Eq '^(sudo|docker)$'; then fail "The halfcloud user received a prohibited privileged group."; fi
+success "Runtime identity and service checks passed"
+
 https_ready=false
 for _ in {1..60}; do
-  if curl -fsS --max-time 5 "https://${hostname}/api/health" >/dev/null 2>&1; then
-    https_ready=true
-    break
-  fi
+  if curl -fsS --max-time 5 "https://${hostname}/api/health" >/dev/null 2>&1; then https_ready=true; break; fi
   sleep 2
 done
-if [[ "${https_ready}" != "true" ]]; then
-  docker compose -f "${INSTALL_DIR}/compose.yaml" --env-file "${INSTALL_DIR}/.env" logs --tail=40 caddy >&2
-  fail "HTTPS did not become available. Verify that inbound ports 80 and 443 are open, then rerun the installer."
-fi
+[[ "${https_ready}" == "true" ]] || fail "HTTPS did not become available. Verify that inbound ports 80 and 443 are open, then rerun the installer."
 success "HTTPS configured"
 
 info ""
 info "HalfCloud is ready."
-info ""
 info "https://${hostname}"
 info ""
 info "Access code:"

@@ -14,7 +14,8 @@
     "build:web": "vite build --config vite.config.ts",
     "build:server": "tsc -p backend/tsconfig.json",
     "start": "node dist/backend/server.js",
-    "typecheck": "tsc -p backend/tsconfig.json --noEmit && vue-tsc -p frontend/tsconfig.json --noEmit"
+    "typecheck": "tsc -p backend/tsconfig.json --noEmit && vue-tsc -p frontend/tsconfig.json --noEmit",
+    "test": "npm run build:server && node --test tests/*.test.mjs"
   },
   "dependencies": {
     "@ai-sdk/azure": "^4.0.49",

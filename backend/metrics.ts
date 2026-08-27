@@ -1,8 +1,9 @@
 import { readFile } from 'node:fs/promises';
 import { statfs } from 'node:fs/promises';
+import os from 'node:os';
 
-const hostRoot = process.env.HALFCLOUD_HOST_ROOT ?? '/host';
-const procRoot = process.env.HALFCLOUD_HOST_PROC ?? '/host/proc';
+const hostRoot = process.env.HALFCLOUD_DATA_DIR ?? `${process.env.HOME ?? '/home/halfcloud'}/.halfcloud`;
+const procRoot = '/proc';
 
 async function readablePath(preferred: string, fallback: string) {
   try {
@@ -56,5 +57,8 @@ export async function getServerStats() {
     diskUsed: diskTotal - diskAvailable,
     diskTotal,
     uptimeSeconds: Math.floor(uptimeSeconds),
+    os: `${os.type()} ${os.release()}`,
+    architecture: os.arch(),
+    cpuCount: os.cpus().length,
   };
 }

@@ -2,7 +2,7 @@ import { createAzure } from '@ai-sdk/azure';
 import { ToolLoopAgent, createAgentUIStreamResponse, tool, type UIMessage } from 'ai';
 import { z } from 'zod';
 import type { AiSettings } from './config.js';
-import type { DockerService } from './docker.js';
+import type { ApplicationService } from './applications.js';
 import { getServerStats } from './metrics.js';
 
 const SYSTEM_PROMPT = `You are HalfCloud, the operator of a real VPS. Docker tool calls affect the real machine.
@@ -10,14 +10,16 @@ const SYSTEM_PROMPT = `You are HalfCloud, the operator of a real VPS. Docker too
 Rules:
 - Inspect current Docker state before making assumptions. Prefer the provided tools over instructions involving Docker CLI.
 - Only modify containers carrying the HalfCloud managed label. The tools enforce this boundary.
-- Before creating a container, list containers to understand names and published ports. createContainer performs the final port check.
+- Before creating an application, list applications to understand names and published ports. createApplication performs the final port check.
 - Choose a sensible short container name when intent is clear. Use official images and explicit image tags (usually :latest) unless the user names another image.
-- For common web images, infer their standard internal port. The ports object maps host port strings to container port strings.
+- For common web images, infer their standard internal port. The ports object maps a localhost host port in the 10000-19999 range to a container port.
+- Deployments run on rootless Docker. Never request privileged mode, host networking, devices, Docker sockets, or arbitrary host paths. Managed volume sources are relative paths beneath the application's HalfCloud directory.
+- If an application requires privileged host access, explain that it cannot currently be deployed safely by HalfCloud. Never suggest silently elevating it.
 - Never stop or delete a different container to resolve a port conflict. Offer the available port reported by the tool and ask the user before changing their requested port.
-- Deletion is destructive. First explain that the container will be permanently removed while its image remains, put its exact HalfCloud name in backticks, and ask for confirmation. Only call deleteContainer with that exact name after the user explicitly confirms in a later message, and set confirmed=true.
+- Deletion is destructive. First explain that the application container will be permanently removed while its image and managed data remain, put its exact HalfCloud name in backticks, and ask for confirmation. Only call deleteApplication with that exact name after the user explicitly confirms in a later message, and set confirmed=true.
 - Start, stop, restart, create, logs, stats, and listing do not need confirmation when the user's intent is clear.
 - Explain important failures plainly. Never expose API keys or claim success unless the tool result confirms it.
-- Keep responses concise and operational. After creating a container, state its name and published host port.`;
+- Keep responses concise and operational. After creating an application, state its name and public HTTPS URL.`;
 
 function textOf(message: UIMessage) {
   return message.parts.filter((part): part is Extract<typeof part, { type: 'text' }> => part.type === 'text').map((part) => part.text).join(' ');
@@ -34,7 +36,7 @@ function deletionConfirmed(messages: UIMessage[]) {
 
 export async function createChatResponse(
   settings: AiSettings,
-  docker: DockerService,
+  docker: ApplicationService,
   messages: UIMessage[],
   abortSignal?: AbortSignal,
 ) {
@@ -55,32 +57,34 @@ export async function createChatResponse(
       inputSchema: z.object({}),
       execute: () => docker.listContainers(),
     }),
-    createContainer: tool({
-      description: 'Pull if needed, create, label, publish ports, start, and verify a new HalfCloud container.',
+    createApplication: tool({
+      description: 'Deploy a rootless HalfCloud application, expose it through Caddy HTTPS, and verify it started.',
       inputSchema: z.object({
         name: z.string().min(1),
         image: z.string().min(1),
-        ports: z.record(z.string(), z.string()).describe('Map of host port to container port, e.g. {"8080":"80"}'),
+        ports: z.record(z.string(), z.string()).describe('Map of localhost host port (10000-19999) to container port, e.g. {"10023":"5678"}'),
         environment: z.record(z.string(), z.string()).optional(),
+        volumes: z.record(z.string(), z.string()).optional().describe('Map of application-relative data directory to absolute container path'),
+        hostname: z.string().optional().describe('Optional DNS hostname; defaults to <name>.<server-domain>'),
       }),
       execute: (input) => docker.createContainer(input),
     }),
-    startContainer: tool({
+    startApplication: tool({
       description: 'Start a stopped HalfCloud-managed container.',
       inputSchema: z.object({ containerId }),
       execute: ({ containerId }) => docker.startContainer(containerId),
     }),
-    stopContainer: tool({
+    stopApplication: tool({
       description: 'Gracefully stop a running HalfCloud-managed container.',
       inputSchema: z.object({ containerId }),
       execute: ({ containerId }) => docker.stopContainer(containerId),
     }),
-    restartContainer: tool({
+    restartApplication: tool({
       description: 'Restart a HalfCloud-managed container.',
       inputSchema: z.object({ containerId }),
       execute: ({ containerId }) => docker.restartContainer(containerId),
     }),
-    deleteContainer: tool({
+    deleteApplication: tool({
       description: 'Permanently delete a HalfCloud-managed container, but not its image. Requires explicit confirmation from the user in a later message.',
       inputSchema: z.object({ containerId, confirmed: z.literal(true) }),
       execute: ({ containerId }) => {
@@ -88,20 +92,25 @@ export async function createChatResponse(
         return docker.deleteContainer(containerId);
       },
     }),
-    getContainerLogs: tool({
+    getApplicationLogs: tool({
       description: 'Get recent raw stdout/stderr logs for a HalfCloud-managed container.',
       inputSchema: z.object({ containerId, tail: z.number().int().min(1).max(1000).optional() }),
       execute: ({ containerId, tail }) => docker.getContainerLogs(containerId, tail),
     }),
-    getContainerStats: tool({
+    getApplicationStatus: tool({
       description: 'Get current CPU and memory use for one HalfCloud-managed container.',
       inputSchema: z.object({ containerId }),
       execute: ({ containerId }) => docker.getContainerStats(containerId),
     }),
-    getServerStats: tool({
+    setEnvironmentVariable: tool({
+      description: 'Set or replace one environment variable and safely recreate the application container. Secret values are not returned.',
+      inputSchema: z.object({ containerId, key: z.string().min(1), value: z.string() }),
+      execute: ({ containerId, key, value }) => docker.setEnvironmentVariable(containerId, key, value),
+    }),
+    getHostStatus: tool({
       description: 'Get current host CPU, memory, disk, and uptime.',
       inputSchema: z.object({}),
-      execute: getServerStats,
+      execute: async () => ({ ...(await getServerStats()), docker: await docker.getRuntimeInfo() }),
     }),
   };
 

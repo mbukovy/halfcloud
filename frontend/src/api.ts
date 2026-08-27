@@ -5,6 +5,16 @@ export interface ServerStats {
   diskUsed: number;
   diskTotal: number;
   uptimeSeconds: number;
+  os: string;
+  architecture: string;
+  cpuCount: number;
+  docker: {
+    dockerVersion: string;
+    rootless: boolean;
+    cgroupVersion: string;
+    cpuCount: number;
+    memoryTotal: number;
+  };
 }
 
 export interface ContainerInfo {
@@ -13,6 +23,7 @@ export interface ContainerInfo {
   image: string;
   state: string;
   status: string;
+  hostname?: string;
   ports: Array<{ host: number; container: number; protocol: string }>;
   cpuPercent: number;
   memoryUsed: number;

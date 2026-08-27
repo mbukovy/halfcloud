@@ -7,14 +7,17 @@ import { z, ZodError } from 'zod';
 import { AuthService } from './auth.js';
 import { SettingsStore } from './config.js';
 import { DockerService } from './docker.js';
+import { ApplicationService } from './applications.js';
 import { createChatResponse } from './agent.js';
 import { getServerStats } from './metrics.js';
 
 const app = express();
-const port = Number(process.env.PORT ?? 3000);
+const port = Number(process.env.PORT ?? 9000);
 const auth = await AuthService.create();
 const settings = new SettingsStore();
-const docker = new DockerService();
+const docker = new ApplicationService(new DockerService());
+await docker.assertRootless();
+await docker.syncRoutes();
 const loginAttempts = new Map<string, { count: number; resetAt: number }>();
 
 app.set('trust proxy', 1);
@@ -75,7 +78,7 @@ app.use('/api', (request, response, next) => {
 
 app.get('/api/settings', async (_request, response) => response.json(await settings.publicValue()));
 app.put('/api/settings', async (request, response) => response.json(await settings.save({ ...request.body, provider: 'azure' })));
-app.get('/api/server/stats', async (_request, response) => response.json(await getServerStats()));
+app.get('/api/server/stats', async (_request, response) => response.json({ ...(await getServerStats()), docker: await docker.getRuntimeInfo() }));
 app.get('/api/containers', async (_request, response) => response.json(await docker.listContainers()));
 app.get('/api/containers/:id/logs', async (request, response) => {
   response.json(await docker.getContainerLogs(request.params.id, Number(request.query.tail ?? 200)));
@@ -93,6 +96,9 @@ app.post('/api/containers/:id/:action', async (request, response) => {
   }
   const methods = { start: docker.startContainer.bind(docker), stop: docker.stopContainer.bind(docker), restart: docker.restartContainer.bind(docker) };
   response.json(await methods[action](id));
+});
+app.put('/api/containers/:id/environment/:key', async (request, response) => {
+  response.json(await docker.setEnvironmentVariable(request.params.id, request.params.key, z.string().parse(request.body?.value)));
 });
 
 app.post('/api/chat', async (request, response) => {
@@ -129,4 +135,4 @@ app.use((error: unknown, _request: Request, response: Response, _next: NextFunct
   if (!response.headersSent) response.status(error instanceof ZodError ? 400 : 500).json({ error: message });
 });
 
-app.listen(port, '0.0.0.0', () => console.log(`HalfCloud listening on :${port}`));
+app.listen(port, '127.0.0.1', () => console.log(`HalfCloud listening on 127.0.0.1:${port}`));
