@@ -10,6 +10,7 @@ export interface CreateContainerInput {
   image: string;
   ports: PortMap;
   environment?: Record<string, string>;
+  namedVolumes?: Record<string, string>;
   volumes?: Record<string, string>;
   hostname?: string;
 }
@@ -170,6 +171,24 @@ export class DockerService {
       await mkdir(source, { recursive: true, mode: 0o700 });
       binds.push(`${source}:${containerTarget}`);
     }
+    const mounts: Array<{ Type: 'volume'; Source: string; Target: string }> = [];
+    const mountTargets = new Set(binds.map((bind) => bind.slice(bind.indexOf(':') + 1)));
+    for (const [localName, containerTarget] of Object.entries(input.namedVolumes ?? {})) {
+      if (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$/.test(localName)) throw new Error(`Invalid named volume ${localName}`);
+      if (!containerTarget.startsWith('/') || containerTarget === '/') throw new Error(`Invalid container mount target ${containerTarget}`);
+      if (mountTargets.has(containerTarget)) throw new Error(`Container mount target ${containerTarget} cannot be used more than once`);
+      mountTargets.add(containerTarget);
+      const volumeName = `halfcloud-${name}-${localName}`;
+      if (volumeName.length > 255) throw new Error(`Named volume ${localName} is too long`);
+      const volume = await this.docker.createVolume({
+        Name: volumeName,
+        Labels: { 'halfcloud.managed': 'true', 'halfcloud.application': name, 'halfcloud.volume': localName },
+      });
+      if (volume.Labels?.['halfcloud.application'] !== name || volume.Labels?.['halfcloud.volume'] !== localName) {
+        throw new Error(`Docker volume ${volumeName} already exists and is not managed by this application`);
+      }
+      mounts.push({ Type: 'volume', Source: volumeName, Target: containerTarget });
+    }
 
     const environment = input.environment ?? {};
     if (Object.keys(environment).length) {
@@ -208,6 +227,7 @@ export class DockerService {
         SecurityOpt: ['no-new-privileges'],
         PidsLimit: 512,
         Binds: binds,
+        Mounts: mounts,
       },
     });
     try {
@@ -285,6 +305,7 @@ export class DockerService {
           LogConfig: inspection.HostConfig.LogConfig,
           SecurityOpt: inspection.HostConfig.SecurityOpt,
           PidsLimit: inspection.HostConfig.PidsLimit,
+          Mounts: inspection.HostConfig.Mounts,
         },
       });
       if (wasRunning) await replacement.start();
