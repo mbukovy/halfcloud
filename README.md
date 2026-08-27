@@ -1,49 +1,63 @@
-# HalfCloud
+# HalfCloud ☁️
 
-HalfCloud is an open-source, self-hosted platform for deploying and operating containerized applications on your own server through a simple AI conversation.
+**Your servers. Zero complexity.**
 
-Bring an Ubuntu VPS, install HalfCloud, and describe what you want to run. HalfCloud can deploy Docker images, manage their lifecycle, inspect logs, and help diagnose resource problems without turning every project into an infrastructure project.
+HalfCloud is an open-source, self-hosted platform for deploying and operating **web applications and services** on your own server through a simple AI conversation.
 
-It is built for developers, indie hackers, AI builders, and small teams who want the affordability and control of a VPS without spending their time living in SSH.
+You built the app. Now tell HalfCloud to run it.
 
-## Your servers. Zero complexity.
-
-Building software has changed dramatically. You can prototype an application in an afternoon, push an image to a registry, and then suddenly find yourself dealing with Linux servers, Docker commands, port mappings, environment variables, logs, and restarts.
-
-**HalfCloud is built for that last mile.**
-
-You describe the outcome:
-
-> Run nginx on port 8080.
+> Run n8n for me.
 
 > Start my API with these environment variables.
 
-> Why did this container stop?
+> Restart the service.
+
+> Why did my app stop?
 
 > Which service is using all the memory?
 
-HalfCloud translates the conversation into focused infrastructure operations on your server.
-
-```text
-Your Docker image
-        |
-        v
-     HalfCloud
-        |
-        v
-     Your VPS
-        |
-        v
-  Running service
-```
+HalfCloud handles the infrastructure behind it.
 
 No Kubernetes. No giant control plane. No YAML archaeology. **No DevOps degree required.**
 
-A modest VPS can run a surprising amount of software. The difficult part is not renting one; it is operating it confidently. HalfCloud gives you a practical middle ground between "I just want to put this online" and "apparently we need a platform engineering team now."
+## From app to running service
 
-Use it to run web applications, APIs, automation tools, AI agents, internal services, open-source software, side projects, and experiments that unexpectedly found users. If it ships as a Docker image, HalfCloud can help you get it running and keep an eye on it.
+Building software has changed dramatically.
 
-Your code can move fast. Your infrastructure should not slow it down.
+You can prototype an application in an afternoon, generate half the code with AI, and package it in a container. Then you suddenly find yourself managing Linux servers, Docker, ports, environment variables, logs, and restarts.
+
+**HalfCloud is built for that last mile.**
+
+Bring a VPS. Install HalfCloud. Tell it what you want running.
+
+```text
+Your app
+   |
+   v
+Docker image
+   |
+   v
+HalfCloud
+   |
+   v
+Your VPS
+```
+
+Running a VPS is cheap.
+
+Operating one properly is not.
+
+Each infrastructure task may be manageable on its own. Together, they are enough to turn shipping a small app into an infrastructure project.
+
+HalfCloud puts an **AI operations layer** on top of your server.
+
+You describe the outcome.
+
+HalfCloud handles the operations.
+
+Your code can move fast.
+
+Your infrastructure should not slow it down.
 
 ## How HalfCloud works
 
