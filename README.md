@@ -2,142 +2,258 @@
 
 **Your servers. Zero complexity.**
 
-HalfCloud is an open-source, self-hosted platform for deploying and operating **web applications and services** on your own server through a simple AI conversation.
+HalfCloud is an open-source, self-hosted platform for deploying and operating **web applications and services** on your own servers through a simple AI conversation.
 
-You built the app. Now tell HalfCloud to run it.
+You built the app. Now just tell HalfCloud to run it.
+
+> Deploy this app and give it a domain.
 
 > Run n8n for me.
 
-> Start my API with these environment variables.
+> Add this environment variable and restart the service.
 
-> Restart the service.
+> Why is my API returning 502?
 
-> Why did my app stop?
-
-> Which service is using all the memory?
+> Which service is eating all the memory?
 
 HalfCloud handles the infrastructure behind it.
 
 No Kubernetes. No giant control plane. No YAML archaeology. **No DevOps degree required.**
 
-## From app to running service
+## From code to running app
 
 Building software has changed dramatically.
 
-You can prototype an application in an afternoon, generate half the code with AI, and package it in a container. Then you suddenly find yourself managing Linux servers, Docker, ports, environment variables, logs, and restarts.
+You can prototype an application in an afternoon, generate 99% of the code with AI, push it to GitHub — and then suddenly find yourself configuring Cloud console or Linux servers, containers, DNS, reverse proxies and TLS certificates.
 
 **HalfCloud is built for that last mile.**
 
 Bring a VPS. Install HalfCloud. Tell it what you want running.
 
 ```text
-Your app
-   |
-   v
-Docker image
-   |
-   v
+Your code
+   ↓
+GitHub / Docker
+   ↓
 HalfCloud
-   |
-   v
+   ↓
 Your VPS
+   ↓
+https://your-app.com
 ```
+
+Your code can move fast.
+
+**Your infrastructure shouldn't slow it down.**
+
+## Your server, without the server management
 
 Running a VPS is cheap.
 
-Operating one properly is not.
+Operating one properly isn't.
 
-Each infrastructure task may be manageable on its own. Together, they are enough to turn shipping a small app into an infrastructure project.
+Deployments, containers, reverse proxies, TLS certificates, environment variables, logs, networking and updates aren't particularly difficult individually.
 
-HalfCloud puts an **AI operations layer** on top of your server.
+Together, they're enough complexity to turn shipping a small web app into an infrastructure project.
+
+HalfCloud puts an **AI operations layer** on top of your servers.
 
 You describe the outcome.
 
 HalfCloud handles the operations.
 
-Your code can move fast.
+## Deploy without becoming a DevOps engineer
 
-Your infrastructure should not slow it down.
-
-## How HalfCloud works
-
-HalfCloud runs on a single Ubuntu server alongside Docker. Its Vue dashboard connects to a Node.js backend, where an AI agent turns natural-language requests into a deliberately small set of Docker operations.
-
-The agent can:
-
-- Pull and run Docker images with port mappings and environment variables
-- List, start, stop, restart, and remove HalfCloud-managed containers
-- Read recent container logs
-- Inspect container CPU and memory usage
-- Inspect host CPU, memory, disk usage, and uptime
-
-Docker remains the source of truth. HalfCloud labels every container it creates with `halfcloud.managed=true`, and its lifecycle tools reject containers without that label. The model does not receive a general-purpose shell or unrestricted SSH session; it can act only through the tools HalfCloud exposes. Destructive actions require confirmation.
-
-This guardrail limits the AI's operating surface, but it is not a security boundary between HalfCloud and the host. HalfCloud mounts the Docker socket, which gives the application root-equivalent control of the server. It is designed for one trusted administrator on an experimental or small VPS, not for untrusted users or multi-tenant hosting.
-
-The HalfCloud interface is protected by an access code and served through Caddy over HTTPS. Sessions use signed, HTTP-only cookies, login attempts are rate-limited, and your Azure OpenAI API key is stored locally with restricted file permissions and is never returned by the settings API. Prompts and tool calls are processed by the Azure OpenAI endpoint you configure.
-
-### Install
-
-On a fresh Ubuntu 22.04 or newer VPS, run as root:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/mbukovy/halfcloud/main/install.sh | bash
-```
-
-The installer sets up Docker, HalfCloud, and Caddy, then prints an automatic `sslip.io` HTTPS URL and a permanent random access code. Inbound TCP ports 80 and 443 must be open. Any ports published for your applications must also be allowed by the VPS firewall or cloud security group.
-
-### First run
-
-1. Open the printed HTTPS URL and sign in with the access code.
-2. Enter your Azure OpenAI endpoint, API key, and deployment name. The default deployment name is `gpt-5.6-sol`.
-3. Ask HalfCloud to run a service, for example: `Run nginx on port 8080`.
-
-### Local development
-
-Requirements: Node.js 22+, Docker, and permission to access `/var/run/docker.sock`.
-
-```bash
-npm install
-HALFCLOUD_ACCESS_CODE=LOCAL-DEV \
-HALFCLOUD_DATA_DIR="$PWD/data" \
-npm run dev
-```
-
-Open `http://localhost:5173`. Vite proxies API requests to the backend on port 3000.
-
-Useful checks:
-
-```bash
-npm run typecheck
-npm run build
-docker build -t halfcloud:local .
-```
-
-To test the production Compose stack locally, set `HALFCLOUD_IMAGE=halfcloud:local` in `/opt/halfcloud/.env` after building the image.
-
-### Data and operations
-
-The VPS deployment stores its configuration under `/opt/halfcloud`:
+The traditional way:
 
 ```text
-/opt/halfcloud/
-|-- .env                 # hostname and session signing secret
-|-- Caddyfile
-|-- compose.yaml
-`-- data/
-    |-- access-code      # mode 0600
-    `-- settings.json    # Azure credentials, mode 0600
+Rent VPS
+→ SSH into server
+→ install Docker
+→ configure firewall
+→ write compose.yaml
+→ configure reverse proxy
+→ configure TLS
+→ start containers
+→ inspect logs
+→ search why you're getting 502
+→ edit config
+→ restart everything
+→ finally ship
 ```
 
-Common administrative commands:
+The HalfCloud way:
 
-```bash
-docker compose -f /opt/halfcloud/compose.yaml --env-file /opt/halfcloud/.env ps
-docker compose -f /opt/halfcloud/compose.yaml --env-file /opt/halfcloud/.env logs -f
-docker compose -f /opt/halfcloud/compose.yaml --env-file /opt/halfcloud/.env restart
+```text
+Install HalfCloud
+→ "Deploy my app"
+→ ship
 ```
 
-HalfCloud is an early project with a deliberately focused scope: one trusted administrator, one Docker host, and container deployments from existing images. It does not currently build from source repositories, manage custom application domains, or replace a production orchestration platform.
+That's the idea.
 
-**HalfCloud: your servers, zero complexity.**
+## What can HalfCloud do?
+
+- Deploy containerized web applications and services
+- Start, stop, restart and remove services
+- Run multiple apps on a single server
+- Configure domains and reverse proxying
+- Automatically handle HTTPS with Caddy
+- Manage environment variables
+- Inspect containers, logs and runtime state
+- Monitor CPU, memory and disk usage
+- Diagnose deployment and runtime problems
+- Operate infrastructure through natural language
+
+All while keeping the actual infrastructure **on your servers and under your control**.
+
+## Built for shipping
+
+Maybe you built your app with Claude Code, Cursor, Codex, Lovable or just a suspicious amount of caffeine.
+
+HalfCloud doesn't care how the code was written.
+
+**HalfCloud helps you get it online and keep it running.**
+
+It's built for developers, indie hackers, AI builders and small teams who want to ship web applications without turning every project into an infrastructure project.
+
+Use it to run:
+
+- web applications
+- APIs and backend services
+- AI agents
+- automation tools
+- internal tools
+- open-source software
+- databases and supporting services
+- side projects
+- experiments that unexpectedly got users
+- that AI-generated app you promised yourself was "just a prototype"
+
+## Why your own server?
+
+Platforms like Vercel and Render made deploying web applications dramatically easier.
+
+They're great — until your application stops fitting neatly into their platform.
+
+You need a database. A background worker. An AI agent that runs continuously. A custom container. Persistent storage. Another internal service.
+
+Or you simply don't want your infrastructure bill growing with every new component.
+
+Then the abstraction starts leaking.
+
+HalfCloud takes the opposite approach:
+
+**Don't abstract the server away. Make the server easy to operate.**
+
+A single inexpensive VPS can run your web app, API, database, workers, queues, automation tools and supporting services together.
+
+```text
+Your VPS
+
+├── Web app
+├── API
+├── PostgreSQL
+├── Redis
+├── Background worker
+├── n8n
+└── Whatever you need next
+```
+
+No per-service pricing. No platform-specific runtime. No artificial boundary between the things your application needs.
+
+### Simple doesn't have to mean limited
+
+Managed platforms optimize for a specific way of running software.
+
+HalfCloud optimizes for **your server**.
+
+That means you keep the flexibility to run standard containers, persistent services, databases, workers and custom software — without turning every deployment into a DevOps project.
+
+And because you're paying for the server rather than assembling a collection of individually priced managed services, the economics can be very different too.
+
+For many small and medium-sized applications, a **$5–20 VPS is already a surprisingly capable cloud.**
+
+HalfCloud just makes it feel like one.
+
+### The middle ground
+
+HalfCloud sits between two extremes:
+
+| | Raw VPS | Managed platforms | HalfCloud |
+|---|---|---|---|
+| Easy deployment | ❌ | ✅ | ✅ |
+| Low infrastructure cost | ✅ | ⚠️ | ✅ |
+| Run arbitrary containers | ✅ | ⚠️ | ✅ |
+| Run your own database | ✅ | ⚠️ | ✅ |
+| Persistent services | ✅ | ⚠️ | ✅ |
+| Full server control | ✅ | ❌ | ✅ |
+| AI operations | ❌ | ❌ | ✅ |
+| Requires DevOps knowledge | ⚠️ | ❌ | ❌ |
+
+**The flexibility and economics of your own server, with the experience of a modern deployment platform.**
+
+## AI with guardrails
+
+Giving an autonomous AI agent unrestricted SSH access to your server is... adventurous.
+
+HalfCloud takes a different approach.
+
+The AI operates through a deliberately limited set of infrastructure tools. It can deploy services, inspect containers, read logs, manage configuration and perform common operational tasks — without simply handing the model unrestricted root access.
+
+**Enough power to operate your apps. Not enough power to casually destroy the server.**
+
+## How it works
+
+HalfCloud keeps the stack intentionally boring.
+
+Under the hood, your applications run as **Docker containers** on your own server. **Caddy** handles routing, domains and automatic HTTPS, while HalfCloud provides the management layer and AI interface on top.
+
+```text
+You
+ ↓
+HalfCloud AI
+ ↓
+Controlled operations
+ ↓
+Docker + Caddy
+ ↓
+Your apps
+```
+
+### Why this approach?
+
+**Your apps stay portable.**  
+HalfCloud runs standard containers. You're not deploying into a proprietary runtime or inventing a new packaging format.
+
+**Your server stays yours.**  
+Applications, data and configuration live on infrastructure you control. HalfCloud is self-hosted alongside them.
+
+**AI doesn't get a magic root terminal.**  
+Instead of giving the model unrestricted shell access and hoping for the best, HalfCloud exposes a controlled set of operations for deploying, configuring, inspecting and managing services.
+
+**The infrastructure stays understandable.**  
+HalfCloud builds on tools developers already know — Linux, Docker and Caddy — rather than hiding everything behind a custom orchestration layer.
+
+**You can always drop down a level.**  
+HalfCloud is there to remove routine infrastructure work, not to lock you out of your own machine. When you need to investigate something manually, it's still just your server and your containers underneath.
+
+The result is deliberately simple:
+
+**AI for convenience. Containers for portability. Guardrails for safety. Your server for everything else.**
+
+## Where HalfCloud is going
+
+AI made building software dramatically easier.
+
+**Deploying and operating it should be next.**
+
+HalfCloud is exploring a world where running your own infrastructure doesn't require learning another platform, another configuration language or another dashboard.
+
+You build.
+
+You ship.
+
+HalfCloud keeps it running.
+
+**HalfCloud — Your servers. Zero complexity.**
