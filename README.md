@@ -20,6 +20,16 @@ HalfCloud handles the infrastructure behind it.
 
 No Kubernetes. No giant control plane. No YAML archaeology. **No DevOps degree required.**
 
+## Install
+
+On a fresh Linux VPS, run as root:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/mbukovy/halfcloud/main/install.sh | bash
+```
+
+Open the HTTPS URL printed by the installer, sign in with your access code and connect your AI provider.
+
 ## From code to running app
 
 Building software has changed dramatically.
