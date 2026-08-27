@@ -1,89 +1,93 @@
 # HalfCloud
 
-> **Under active development. Do not use HalfCloud for production workloads yet.**
+> **HalfCloud is under active development. It is not ready for production apps yet.**
 
-**Your servers. Zero complexity.**
+## Your app is built. Now put it online.
 
-HalfCloud is an open-source, self-hosted platform for deploying and operating web applications on your own server through a simple AI conversation.
+Building an app has never been easier.
 
-You describe the outcome:
+You can describe an idea, watch AI write the code, and have something working by the end of the day. Then comes the part nobody asked for:
+
+- setting up a server;
+- figuring out domains and HTTPS;
+- running databases and background jobs;
+- restarting things when they break;
+- reading logs that make no sense.
+
+HalfCloud is built to handle that part.
+
+Give it a server, open the chat, and tell it what you want:
+
+> Put my app online.
 
 > Run n8n for me.
 
-> Add this environment variable and restart the service.
+> Add a database for my app.
 
-> Why is my API returning 502?
+> Why is my website down?
 
-> Which service is using all the memory?
+> Fix it and restart it.
 
-HalfCloud handles containers, networking, HTTPS, persistent storage, logs, and routine operations behind the conversation. No Kubernetes, no proprietary runtime, and no unrestricted AI shell.
+HalfCloud does the server work for you.
 
-## From container to cloud
+## Hosting that speaks your language
 
-Building software has become fast. Getting it online still means dealing with servers, reverse proxies, certificates, ports, logs, and databases.
+You should not need to become a DevOps engineer just to share something you built.
 
-HalfCloud is built for that last mile:
+HalfCloud gives you one simple place to:
 
-```text
-Your container image
-        |
-        v
-    HalfCloud
-        |
-        v
-    Your VPS
-        |
-        v
-https://your-app.example.com
-```
+- launch apps and services;
+- give them a public web address;
+- keep their data between restarts;
+- see whether they are running;
+- check server health and app logs;
+- fix common problems through conversation.
 
-Bring a VPS and standard container images. HalfCloud turns them into running applications while keeping the infrastructure on a server you control.
+There are no configuration files to memorize and no maze of cloud dashboards. Describe the result you want and HalfCloud works out the steps.
 
-## One server, everything your app needs
+## One small server, your own cloud
 
-A single VPS can run more than a frontend. HalfCloud is designed for web applications, APIs, databases, workers, automation tools, internal services, and experiments that unexpectedly found users.
+HalfCloud runs on a VPS: an affordable computer you rent online. Providers such as Hetzner, DigitalOcean, Linode, Vultr, and many others can give you one in a few minutes.
 
-```text
-Your VPS
+That single server can hold your website, API, database, automations, workers, and other tools together.
 
-|-- Web app
-|-- API
-|-- PostgreSQL
-|-- Redis
-|-- Background worker
-`-- Whatever comes next
-```
+You pay for the server instead of paying separately for every small piece of your app. Your apps and their data stay on infrastructure you control, without locking them into a custom hosting platform.
 
-Public applications receive HTTPS through Caddy. Private services stay on an internal Docker network. Your applications remain standard containers, so the underlying stack stays portable and understandable.
+## AI that helps without owning the server
 
-## AI with boundaries
+HalfCloud's AI can perform the everyday actions needed to run your apps, but it does not receive an unrestricted administrator terminal.
 
-Giving an AI agent root access to a server is not a deployment strategy.
+It works through a limited set of built-in actions. Risky operations ask for confirmation, and applications are kept away from the sensitive parts of the server by default.
 
-HalfCloud gives the model a small set of validated operations instead of a terminal. It can deploy and manage HalfCloud applications, inspect status and logs, and diagnose common failures. It cannot request privileged containers, host networking, host devices, arbitrary host mounts, or access to the host Docker socket.
-
-The result is AI for convenience, containers for portability, and guardrails that reduce the blast radius when something goes wrong.
+This does not make hosting risk-free, but it is a more careful approach than giving an AI full control and hoping for the best.
 
 ## Install
 
-HalfCloud 0.1 requires a fresh, dedicated Ubuntu 22.04 or newer VPS with a public IPv4 address. Ports 80 and 443 must be open. An active host Docker daemon causes installation to stop.
+For HalfCloud 0.1, start with a new Ubuntu 22.04 or newer VPS that is not being used for anything else. Choose an amd64 or arm64 server with a public IPv4 address, and make sure web traffic on ports 80 and 443 is allowed.
+
+Connect to the server with SSH and run:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/mbukovy/halfcloud/main/install.sh | sudo bash
 ```
 
-Open the HTTPS URL printed by the installer, sign in with the generated access code, and connect your Azure OpenAI deployment.
+When installation finishes, it prints:
 
-Read [Install, uninstall, and update](docs/install-uninstall-update.md) before installing, especially if the server already contains data or software you need to keep.
+- a secure web address for your HalfCloud dashboard;
+- an access code used to sign in.
 
-## Documentation
+Open the address, enter the code, connect your Azure OpenAI account, and tell HalfCloud what you want to run.
 
-- [Documentation overview](docs/README.md)
+HalfCloud currently needs an existing app packaged as a container image. Support for deploying directly from source code is not available yet.
+
+Before using a server that contains anything important, read [Install, uninstall, and update](docs/install-uninstall-update.md). The current uninstaller permanently removes HalfCloud, its applications, and its server data.
+
+## Learn more
+
 - [Getting started](docs/getting-started.md)
-- [Operating applications](docs/operating-applications.md)
-- [How it works](docs/how-it-works.md)
-- [Why is it safe?](docs/why-is-it-safe.md)
-- [Install, uninstall, and update](docs/install-uninstall-update.md)
+- [How HalfCloud works](docs/how-it-works.md)
+- [Why HalfCloud is safer than giving AI full server access](docs/why-is-it-safe.md)
+- [Operating your applications](docs/operating-applications.md)
+- [Install, update, and uninstall](docs/install-uninstall-update.md)
 - [Troubleshooting](docs/troubleshooting.md)
-
-HalfCloud is currently an early preview. Its capabilities and installation model may change before the first stable release.
+- [All documentation](docs/README.md)
