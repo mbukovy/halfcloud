@@ -91,6 +91,9 @@ function toolLabel(part: Record<string, unknown>) {
     stopApplication: 'Stopping application', restartApplication: 'Restarting application', deleteApplication: 'Deleting application',
     getApplicationLogs: 'Reading application logs', getApplicationStatus: 'Inspecting application', getHostStatus: 'Inspecting host',
     setEnvironmentVariable: 'Updating application environment',
+    listManagedVolumes: 'Inspecting managed storage', inspectManagedVolume: 'Inspecting managed volume',
+    reconcileManagedVolume: 'Reconciling managed volume', deleteManagedVolume: 'Deleting managed volume',
+    repairStorageOwnership: 'Repairing storage ownership',
     getContainerLogs: 'Reading logs', getContainerStats: 'Reading container metrics', getServerStats: 'Reading server metrics',
   };
   return labels[name] ?? name;
@@ -135,6 +138,8 @@ function toolDetails(part: Record<string, unknown>) {
     if (ports) for (const [host, container] of Object.entries(ports)) details.push({ text: `Port: ${host} → ${String(container)}` });
     const volumes = recordValue(input?.volumes);
     if (volumes) for (const [source, destination] of Object.entries(volumes)) details.push({ text: `Storage: ${source} → ${String(destination)}` });
+    const namedVolumes = recordValue(input?.namedVolumes);
+    if (namedVolumes) for (const [source, destination] of Object.entries(namedVolumes)) details.push({ text: `Named storage: ${source} → ${String(destination)}` });
     const environment = recordValue(input?.environment);
     if (environment && Object.keys(environment).length) details.push({ text: `Environment keys: ${Object.keys(environment).join(', ')}` });
     if (typeof input?.hostname === 'string') details.push({ text: `Hostname: ${input.hostname}` });
@@ -146,6 +151,8 @@ function toolDetails(part: Record<string, unknown>) {
   if (typeof target === 'string') details.push({ text: `Application: ${target}` });
   if (name === 'getApplicationLogs' && typeof input?.tail === 'number') details.push({ text: `Recent lines: ${input.tail}` });
   if (name === 'setEnvironmentVariable' && typeof input?.key === 'string') details.push({ text: `Environment key: ${input.key}` });
+  if (typeof input?.volumeName === 'string') details.push({ text: `Volume: ${input.volumeName}` });
+  if (typeof input?.mountTarget === 'string') details.push({ text: `Mount: ${input.mountTarget}` });
   if (name === 'listContainers' && Array.isArray(part.output)) details.push({ text: `Found ${part.output.length} managed application${part.output.length === 1 ? '' : 's'}` });
   if (typeof part.errorText === 'string') details.push({ text: part.errorText });
   return details;
@@ -157,6 +164,13 @@ function approvalRequest(part: Record<string, unknown>) {
   return typeof approval?.id === 'string' && approval.isAutomatic !== true ? approval.id : undefined;
 }
 
+function approvalCopy(part: Record<string, unknown>) {
+  const name = toolName(part);
+  if (name === 'deleteManagedVolume') return { title: 'Delete this volume permanently?', detail: 'All data in this managed volume will be permanently removed.' };
+  if (name === 'repairStorageOwnership') return { title: 'Repair this storage ownership?', detail: 'The application may be briefly stopped while ownership is changed recursively.' };
+  return { title: 'Delete this application permanently?', detail: 'The container will be removed. Its image and managed data will remain.' };
+}
+
 async function respondToApproval(part: Record<string, unknown>, approved: boolean) {
   const id = approvalRequest(part);
   if (!id || respondingApprovalId.value) return;
@@ -165,7 +179,7 @@ async function respondToApproval(part: Record<string, unknown>, approved: boolea
     await addToolApprovalResponse({
       id,
       approved,
-      reason: approved ? 'User explicitly confirmed the deletion' : 'User dismissed the deletion',
+      reason: approved ? 'User explicitly approved the requested operation' : 'User dismissed the requested operation',
     });
   } finally {
     respondingApprovalId.value = '';
@@ -367,11 +381,10 @@ onBeforeUnmount(() => {
     <div class="workspace">
       <section class="chat-panel">
         <div class="section-heading">
-          <div><p class="eyebrow">AI OPERATOR</p><h1>Ask HalfCloud</h1></div>
-          <div class="chat-heading-actions">
-            <span v-if="chatBusy" class="thinking">WORKING<span></span></span>
-            <button class="new-conversation-button" type="button" @click="newConversation">New conversation</button>
-          </div>
+           <div><p class="eyebrow">AI OPERATOR</p><h1>Ask HalfCloud</h1></div>
+           <div class="chat-heading-actions">
+             <button class="new-conversation-button" type="button" @click="newConversation">New conversation</button>
+           </div>
         </div>
         <div ref="transcript" class="transcript">
           <div v-if="messages.length === 0" class="empty-chat">
@@ -396,8 +409,8 @@ onBeforeUnmount(() => {
                     <li v-for="(detail, detailIndex) in toolDetails(toolPart(part)!)" :key="detailIndex"><a v-if="detail.href" :href="detail.href" target="_blank" rel="noopener noreferrer">{{ detail.text }}</a><template v-else>{{ detail.text }}</template></li>
                   </ul>
                   <div v-if="approvalRequest(toolPart(part)!)" class="approval-widget">
-                    <strong>Delete this application permanently?</strong>
-                    <p>The container will be removed. Its image and managed data will remain.</p>
+                    <strong>{{ approvalCopy(toolPart(part)!).title }}</strong>
+                    <p>{{ approvalCopy(toolPart(part)!).detail }}</p>
                     <div>
                       <button class="confirm" type="button" :disabled="Boolean(respondingApprovalId)" @click="respondToApproval(toolPart(part)!, true)">Confirm</button>
                       <button type="button" :disabled="Boolean(respondingApprovalId)" @click="respondToApproval(toolPart(part)!, false)">Dismiss</button>
@@ -410,11 +423,17 @@ onBeforeUnmount(() => {
           </article>
           <pre v-if="chatError" class="form-error chat-error">{{ chatError.message }}</pre>
         </div>
-        <form class="composer" @submit.prevent="submitPrompt">
-          <textarea v-model="prompt" :disabled="!settings?.configured" rows="2" :placeholder="settings?.configured ? 'Tell HalfCloud what should be running…' : 'Configure Azure OpenAI to start…'" @keydown.enter.exact.prevent="submitPrompt"></textarea>
-          <button v-if="chatBusy" class="send-button stop" type="button" title="Stop" @click="stop">■</button>
-          <button v-else class="send-button" type="submit" :disabled="!prompt.trim() || !settings?.configured" title="Send">↑</button>
-        </form>
+        <div class="conversation-footer">
+          <form class="composer" @submit.prevent="submitPrompt">
+            <textarea v-model="prompt" :disabled="!settings?.configured" rows="2" :placeholder="settings?.configured ? 'Tell HalfCloud what should be running…' : 'Configure Azure OpenAI to start…'" @keydown.enter.exact.prevent="submitPrompt"></textarea>
+            <button v-if="chatBusy" class="send-button stop" type="button" title="Stop" @click="stop">■</button>
+            <button v-else class="send-button" type="submit" :disabled="!prompt.trim() || !settings?.configured" title="Send">↑</button>
+          </form>
+          <div class="conversation-loader" :class="{ active: chatBusy }" role="status" aria-live="polite">
+            <span>{{ chatBusy ? 'Working' : '' }}</span>
+            <i aria-hidden="true"><b></b></i>
+          </div>
+        </div>
       </section>
 
       <section class="containers-panel">

@@ -1,5 +1,5 @@
 import net from 'node:net';
-import { mkdir, realpath, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, realpath, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import Docker from 'dockerode';
 
@@ -13,6 +13,32 @@ export interface CreateContainerInput {
   namedVolumes?: Record<string, string>;
   volumes?: Record<string, string>;
   hostname?: string;
+}
+
+interface ManagedVolumeClient {
+  createVolume(options: Docker.VolumeCreateOptions): Promise<unknown>;
+  getVolume(name: string): { inspect(): Promise<Docker.VolumeInspectInfo> };
+}
+
+export function assertManagedVolumeLabels(volume: Docker.VolumeInspectInfo, application: string, localName: string) {
+  if (
+    volume.Labels?.['halfcloud.managed'] !== 'true'
+    || volume.Labels?.['halfcloud.application'] !== application
+    || volume.Labels?.['halfcloud.volume'] !== localName
+  ) {
+    throw new Error(`Docker volume ${volume.Name} already exists and is not managed by application ${application} as ${localName}`);
+  }
+}
+
+export async function createOrReuseManagedVolume(docker: ManagedVolumeClient, application: string, localName: string) {
+  const volumeName = `halfcloud-${application}-${localName}`;
+  await docker.createVolume({
+    Name: volumeName,
+    Labels: { 'halfcloud.managed': 'true', 'halfcloud.application': application, 'halfcloud.volume': localName },
+  });
+  const inspection = await docker.getVolume(volumeName).inspect();
+  assertManagedVolumeLabels(inspection, application, localName);
+  return inspection;
 }
 
 const minimumHostPort = 10_000;
@@ -32,7 +58,7 @@ export function validateHostPort(port: number) {
 export function managedBindPath(appDir: string, relativeSource: string) {
   if (path.isAbsolute(relativeSource) || relativeSource.split(/[\\/]/).includes('..')) throw new Error(`Bind mount ${relativeSource} must be relative to the managed application directory`);
   const source = path.resolve(appDir, relativeSource);
-  if (source !== appDir && !source.startsWith(`${appDir}${path.sep}`)) throw new Error(`Bind mount ${relativeSource} escapes the managed application directory`);
+  if (source === appDir || !source.startsWith(`${appDir}${path.sep}`)) throw new Error(`Bind mount ${relativeSource} escapes the managed application directory`);
   return source;
 }
 
@@ -164,11 +190,13 @@ export class DockerService {
     await mkdir(appDir, { recursive: false, mode: 0o700 }).catch((error: NodeJS.ErrnoException) => {
       if (error.code !== 'EEXIST') throw error;
     });
+    if (await realpath(appDir) !== appDir) throw new Error(`Application directory ${name} cannot be a symbolic link`);
     const binds: string[] = [];
+    const newBindSources: string[] = [];
     for (const [relativeSource, containerTarget] of Object.entries(input.volumes ?? {})) {
       if (!containerTarget.startsWith('/') || containerTarget === '/') throw new Error(`Invalid container mount target ${containerTarget}`);
       const source = managedBindPath(appDir, relativeSource);
-      await mkdir(source, { recursive: true, mode: 0o700 });
+      if (await this.createManagedBindDirectory(appDir, source)) newBindSources.push(source);
       binds.push(`${source}:${containerTarget}`);
     }
     const mounts: Array<{ Type: 'volume'; Source: string; Target: string }> = [];
@@ -180,13 +208,7 @@ export class DockerService {
       mountTargets.add(containerTarget);
       const volumeName = `halfcloud-${name}-${localName}`;
       if (volumeName.length > 255) throw new Error(`Named volume ${localName} is too long`);
-      const volume = await this.docker.createVolume({
-        Name: volumeName,
-        Labels: { 'halfcloud.managed': 'true', 'halfcloud.application': name, 'halfcloud.volume': localName },
-      });
-      if (volume.Labels?.['halfcloud.application'] !== name || volume.Labels?.['halfcloud.volume'] !== localName) {
-        throw new Error(`Docker volume ${volumeName} already exists and is not managed by this application`);
-      }
+      await createOrReuseManagedVolume(this.docker, name, localName);
       mounts.push({ Type: 'volume', Source: volumeName, Target: containerTarget });
     }
 
@@ -196,14 +218,20 @@ export class DockerService {
     }
 
     let pulled = false;
+    let imageInspection: Docker.ImageInspectInfo;
     try {
-      await this.docker.getImage(image).inspect();
+      imageInspection = await this.docker.getImage(image).inspect();
     } catch {
       const stream = await this.docker.pull(image);
       await new Promise<void>((resolve, reject) => {
         this.docker.modem.followProgress(stream, (error) => error ? reject(error) : resolve());
       });
       pulled = true;
+      imageInspection = await this.docker.getImage(image).inspect();
+    }
+
+    if (newBindSources.length) {
+      await this.initializeStorageOwnership(image, imageInspection.Config?.User ?? '', newBindSources.map((source) => ({ type: 'bind', source })));
     }
 
     const exposedPorts: Record<string, object> = {};
@@ -270,6 +298,97 @@ export class DockerService {
     const inspection = await container.inspect();
     await container.remove({ force: inspection.State.Running, v: false });
     return { containerId: container.id, deleted: true, imageRemoved: false };
+  }
+
+  async listManagedVolumes(application?: string) {
+    if (application && !/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$/.test(application)) throw new Error('Invalid application name');
+    const filters = ['halfcloud.managed=true', ...(application ? [`halfcloud.application=${application}`] : [])];
+    const { Volumes: volumes = [] } = await this.docker.listVolumes({ filters: { label: filters } });
+    const containers = await this.docker.listContainers({ all: true });
+    const attached = new Map<string, string[]>();
+    for (const container of containers) {
+      for (const mount of container.Mounts ?? []) {
+        if (mount.Type !== 'volume' || !mount.Name) continue;
+        const names = attached.get(mount.Name) ?? [];
+        names.push(container.Names?.[0]?.replace(/^\//, '') ?? container.Id.slice(0, 12));
+        attached.set(mount.Name, names);
+      }
+    }
+    return volumes.map((volume) => ({
+      name: volume.Name,
+      application: volume.Labels?.['halfcloud.application'],
+      localName: volume.Labels?.['halfcloud.volume'],
+      driver: volume.Driver,
+      attachedTo: attached.get(volume.Name) ?? [],
+      orphaned: !(attached.get(volume.Name)?.length),
+    }));
+  }
+
+  async inspectManagedVolume(volumeName: string) {
+    const volume = await this.managedVolume(volumeName);
+    const containers = await this.docker.listContainers({ all: true });
+    const attachedTo = containers
+      .filter((container) => container.Mounts?.some((mount) => mount.Type === 'volume' && mount.Name === volume.Name))
+      .map((container) => container.Names?.[0]?.replace(/^\//, '') ?? container.Id.slice(0, 12));
+    return {
+      name: volume.Name,
+      application: volume.Labels['halfcloud.application'],
+      localName: volume.Labels['halfcloud.volume'],
+      driver: volume.Driver,
+      scope: volume.Scope,
+      attachedTo,
+      orphaned: attachedTo.length === 0,
+    };
+  }
+
+  async deleteManagedVolume(volumeName: string) {
+    const volume = await this.managedVolume(volumeName);
+    await this.docker.getVolume(volume.Name).remove();
+    return { volumeName: volume.Name, deleted: true };
+  }
+
+  async reconcileManagedVolume(application: string, localName: string) {
+    if (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$/.test(application)) throw new Error('Invalid application name');
+    if (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$/.test(localName)) throw new Error('Invalid local volume name');
+    const volumeName = `halfcloud-${application}-${localName}`;
+    const volume = await this.docker.getVolume(volumeName).inspect();
+    assertManagedVolumeLabels(volume, application, localName);
+    const details = await this.inspectManagedVolume(volumeName);
+    if (!details.orphaned) throw new Error(`Docker volume ${volumeName} is attached and does not need reconciliation`);
+    return { ...details, reconciled: true, reusableByCreateApplication: true };
+  }
+
+  async repairStorageOwnership(id: string, mountTarget: string) {
+    if (!mountTarget.startsWith('/') || mountTarget === '/') throw new Error('Invalid container mount target');
+    const container = await this.managedContainer(id);
+    const inspection = await container.inspect();
+    const mount = inspection.Mounts.find((candidate) => candidate.Destination === mountTarget);
+    if (!mount) throw new Error(`Application does not have storage mounted at ${mountTarget}`);
+
+    let storage: { type: 'bind' | 'volume'; source: string };
+    if (mount.Type === 'volume') {
+      const volume = await this.managedVolume(mount.Name ?? mount.Source);
+      if (volume.Labels['halfcloud.application'] !== inspection.Config.Labels?.['halfcloud.name']) throw new Error(`Volume ${volume.Name} is not managed by this application`);
+      storage = { type: 'volume', source: volume.Name };
+    } else if (mount.Type === 'bind') {
+      const application = inspection.Config.Labels?.['halfcloud.name'];
+      if (!application) throw new Error('Managed application label is missing');
+      const appRoot = await realpath(path.join(this.appsDir, application));
+      const source = await realpath(mount.Source);
+      if (source === appRoot || !source.startsWith(`${appRoot}${path.sep}`)) throw new Error('Bind mount is outside the managed application directory');
+      storage = { type: 'bind', source };
+    } else {
+      throw new Error(`Storage type ${mount.Type} cannot be repaired`);
+    }
+
+    const wasRunning = inspection.State.Running;
+    if (wasRunning) await container.stop({ t: 10 });
+    try {
+      await this.initializeStorageOwnership(inspection.Config.Image, inspection.Config.User, [storage]);
+    } finally {
+      if (wasRunning) await container.start();
+    }
+    return { containerId: container.id, mountTarget, owner: inspection.Config.User, repaired: true, state: wasRunning ? 'running' : 'exited' };
   }
 
   async setEnvironmentVariable(id: string, key: string, value: string) {
@@ -353,6 +472,73 @@ export class DockerService {
     if (!matches.length) throw new Error(`Managed container ${idOrName} was not found`);
     if (matches.length > 1) throw new Error(`Container id ${idOrName} is ambiguous; use the exact name or full id`);
     return this.docker.getContainer(matches[0]!.Id);
+  }
+
+  private async managedVolume(volumeName: string) {
+    if (!/^halfcloud-[a-zA-Z0-9_.-]+$/.test(volumeName)) throw new Error('Invalid managed volume name');
+    const volume = await this.docker.getVolume(volumeName).inspect();
+    if (volume.Labels?.['halfcloud.managed'] !== 'true' || !volume.Labels?.['halfcloud.application'] || !volume.Labels?.['halfcloud.volume']) {
+      throw new Error(`Docker volume ${volumeName} is not managed by HalfCloud`);
+    }
+    assertManagedVolumeLabels(volume, volume.Labels['halfcloud.application'], volume.Labels['halfcloud.volume']);
+    return volume;
+  }
+
+  private async createManagedBindDirectory(appDir: string, source: string) {
+    let created = false;
+    let current = appDir;
+    for (const segment of path.relative(appDir, source).split(path.sep)) {
+      current = path.join(current, segment);
+      try {
+        const details = await lstat(current);
+        if (details.isSymbolicLink() || !details.isDirectory()) throw new Error(`Bind mount path ${current} must contain directories only`);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+        await mkdir(current, { mode: 0o700 });
+        created = true;
+      }
+    }
+    return created;
+  }
+
+  private async initializeStorageOwnership(
+    image: string,
+    imageUser: string,
+    storage: Array<{ type: 'bind' | 'volume'; source: string }>,
+  ) {
+    if (!imageUser || ['0', '0:0', 'root', 'root:root'].includes(imageUser)) return;
+    const targets = storage.map((_, index) => `/halfcloud-storage/${index}`);
+    const helper = await this.docker.createContainer({
+      Image: image,
+      User: '0:0',
+      Entrypoint: ['/bin/sh', '-c'],
+      Cmd: [
+        'requested_user="$1"; shift; case "$requested_user" in *:*) owner="$requested_user" ;; *) owner="$(id -u "$requested_user"):$(id -g "$requested_user")" ;; esac; chown -R "$owner" "$@"',
+        'halfcloud-storage-init',
+        imageUser,
+        ...targets,
+      ],
+      HostConfig: {
+        NetworkMode: 'none',
+        ReadonlyRootfs: true,
+        SecurityOpt: ['no-new-privileges'],
+        CapDrop: ['ALL'],
+        CapAdd: ['CHOWN', 'DAC_OVERRIDE'],
+        PidsLimit: 32,
+        Binds: storage.flatMap((item, index) => item.type === 'bind' ? [`${item.source}:${targets[index]}`] : []),
+        Mounts: storage.flatMap((item, index) => item.type === 'volume' ? [{ Type: 'volume' as const, Source: item.source, Target: targets[index]! }] : []),
+      },
+    });
+    try {
+      await helper.start();
+      const result = await helper.wait();
+      if (result.StatusCode !== 0) {
+        const output = await helper.logs({ stdout: true, stderr: true, tail: 50 });
+        throw new Error(`Could not initialize storage ownership for image user ${imageUser}: ${this.cleanDockerLog(Buffer.isBuffer(output) ? output : Buffer.from(String(output)))}`);
+      }
+    } finally {
+      await helper.remove({ force: true, v: false }).catch(() => undefined);
+    }
   }
 
   private async portConflict(port: number) {

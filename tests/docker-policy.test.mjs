@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { managedBindPath, rootlessSocketPath, validateHostPort } from '../dist/backend/docker.js';
+import { assertManagedVolumeLabels, createOrReuseManagedVolume, managedBindPath, rootlessSocketPath, validateHostPort } from '../dist/backend/docker.js';
 
 test('requires an explicit rootless user Docker socket', () => {
   assert.equal(rootlessSocketPath('unix:///run/user/1001/docker.sock'), '/run/user/1001/docker.sock');
@@ -17,7 +17,46 @@ test('limits application publications to the managed port range', () => {
 
 test('limits bind mounts to application-relative paths', () => {
   assert.equal(managedBindPath('/home/halfcloudrunner/.halfcloud/apps/demo', 'data'), '/home/halfcloudrunner/.halfcloud/apps/demo/data');
-  for (const source of ['/', '/etc', '../secrets', 'data/../../escape']) {
+  for (const source of ['', '.', '/', '/etc', '../secrets', 'data/../../escape']) {
     assert.throws(() => managedBindPath('/home/halfcloudrunner/.halfcloud/apps/demo', source), /managed application directory/);
   }
+});
+
+test('accepts all required labels on a managed volume', () => {
+  assert.doesNotThrow(() => assertManagedVolumeLabels({
+    Name: 'halfcloud-n8n-data',
+    Labels: { 'halfcloud.managed': 'true', 'halfcloud.application': 'n8n', 'halfcloud.volume': 'data' },
+  }, 'n8n', 'data'));
+  assert.throws(() => assertManagedVolumeLabels({
+    Name: 'halfcloud-n8n-data',
+    Labels: { 'halfcloud.application': 'n8n', 'halfcloud.volume': 'data' },
+  }, 'n8n', 'data'), /not managed/);
+});
+
+test('inspects the dockerode volume handle before validating labels', async () => {
+  let createOptions;
+  const docker = {
+    async createVolume(options) {
+      createOptions = options;
+      return { name: options.Name };
+    },
+    getVolume(name) {
+      return {
+        async inspect() {
+          return {
+            Name: name,
+            Labels: { 'halfcloud.managed': 'true', 'halfcloud.application': 'n8n', 'halfcloud.volume': 'data' },
+          };
+        },
+      };
+    },
+  };
+
+  const volume = await createOrReuseManagedVolume(docker, 'n8n', 'data');
+  assert.equal(volume.Name, 'halfcloud-n8n-data');
+  assert.deepEqual(createOptions.Labels, {
+    'halfcloud.managed': 'true',
+    'halfcloud.application': 'n8n',
+    'halfcloud.volume': 'data',
+  });
 });

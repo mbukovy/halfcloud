@@ -75,6 +75,7 @@ Rules:
 - Use volumes, which are bind mounts inside the application's HalfCloud-managed directory, only for configuration or other files that intentionally need host filesystem access. Do not use a bind mount merely out of habit.
 - Never replace persistent data with an ephemeral container directory to work around permissions. Preserve persistence and fix the volume, mount target, ownership, or image configuration instead. Never use chmod 777 as a generic permissions fix.
 - Before changing existing storage, inspect what is already deployed. Do not delete data, replace a volume, or perform a destructive migration without clearly explaining the risk and obtaining the user's approval.
+- Use the managed storage tools to inspect or reconcile storage. Volume deletion and ownership repair require explicit approval. Ownership repair is restricted to storage already mounted by the selected HalfCloud application.
 - Never stop or delete a different container to resolve a port conflict. Offer the available port reported by the tool and ask the user before changing their requested port.
 - Deletion is destructive. Call deleteApplication with the exact HalfCloud name when deletion is requested; the interface will require explicit user approval before the tool executes. If approval is denied, do not retry unless the user makes a new deletion request.
 - Start, stop, restart, create, logs, stats, and listing do not need confirmation when the user's intent is clear.
@@ -147,6 +148,31 @@ export async function createChatResponse(
       inputSchema: z.object({ containerId, key: z.string().min(1), value: z.string() }),
       execute: ({ containerId, key, value }) => docker.setEnvironmentVariable(containerId, key, value),
     }),
+    listManagedVolumes: tool({
+      description: 'List HalfCloud-managed named volumes and show whether each is attached or orphaned.',
+      inputSchema: z.object({ application: z.string().min(1).optional() }),
+      execute: ({ application }) => docker.listManagedVolumes(application),
+    }),
+    inspectManagedVolume: tool({
+      description: 'Inspect one HalfCloud-managed named volume without exposing unmanaged Docker storage.',
+      inputSchema: z.object({ volumeName: z.string().min(1) }),
+      execute: ({ volumeName }) => docker.inspectManagedVolume(volumeName),
+    }),
+    reconcileManagedVolume: tool({
+      description: 'Validate and recognize a correctly labeled orphaned HalfCloud volume so createApplication can safely reuse it.',
+      inputSchema: z.object({ application: z.string().min(1), localName: z.string().min(1) }),
+      execute: ({ application, localName }) => docker.reconcileManagedVolume(application, localName),
+    }),
+    deleteManagedVolume: tool({
+      description: 'Permanently delete one HalfCloud-managed named volume. Fails if it is in use and requires explicit user approval.',
+      inputSchema: z.object({ volumeName: z.string().min(1) }),
+      execute: ({ volumeName }) => docker.deleteManagedVolume(volumeName),
+    }),
+    repairStorageOwnership: tool({
+      description: 'Recursively repair ownership of one mounted managed storage path to match the application image user. Requires explicit user approval.',
+      inputSchema: z.object({ containerId, mountTarget: z.string().startsWith('/') }),
+      execute: ({ containerId, mountTarget }) => docker.repairStorageOwnership(containerId, mountTarget),
+    }),
     getHostStatus: tool({
       description: 'Get current host CPU, memory, disk, and uptime.',
       inputSchema: z.object({}),
@@ -159,7 +185,7 @@ export async function createChatResponse(
     model: provider.responses(settings.deployment),
     instructions: SYSTEM_PROMPT,
     tools,
-    toolApproval: { deleteApplication: 'user-approval' },
+    toolApproval: { deleteApplication: 'user-approval', deleteManagedVolume: 'user-approval', repairStorageOwnership: 'user-approval' },
   });
   return createAgentUIStreamResponse({
     agent,

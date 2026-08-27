@@ -13,6 +13,11 @@ export class ApplicationService {
   listContainers(includeStats = true) { return this.docker.listContainers(includeStats); }
   getContainerLogs(id: string, tail?: number) { return this.docker.getContainerLogs(id, tail); }
   getContainerStats(id: string) { return this.docker.getContainerStats(id); }
+  listManagedVolumes(application?: string) { return this.docker.listManagedVolumes(application); }
+  inspectManagedVolume(volumeName: string) { return this.docker.inspectManagedVolume(volumeName); }
+  deleteManagedVolume(volumeName: string) { return this.docker.deleteManagedVolume(volumeName); }
+  reconcileManagedVolume(application: string, localName: string) { return this.docker.reconcileManagedVolume(application, localName); }
+  repairStorageOwnership(id: string, mountTarget: string) { return this.docker.repairStorageOwnership(id, mountTarget); }
 
   async setEnvironmentVariable(id: string, key: string, value: string) {
     const result = await this.docker.setEnvironmentVariable(id, key, value);
