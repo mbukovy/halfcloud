@@ -2,7 +2,15 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue';
 import { useChat } from '@ai-sdk/vue';
 import { DefaultChatTransport, lastAssistantMessageIsCompleteWithApprovalResponses } from 'ai';
+import MarkdownIt from 'markdown-it';
 import { api, type ContainerInfo, type PublicSettings, type ServerStats } from './api';
+
+const markdown = new MarkdownIt({ html: false, linkify: true, breaks: true });
+markdown.renderer.rules.link_open = (tokens, index, options, environment, renderer) => {
+  tokens[index]!.attrSet('target', '_blank');
+  tokens[index]!.attrSet('rel', 'noopener noreferrer');
+  return renderer.renderToken(tokens, index, options);
+};
 
 const authenticated = ref(false);
 const loading = ref(true);
@@ -54,21 +62,8 @@ function textPart(part: unknown): part is { type: 'text'; text: string } {
   return typeof part === 'object' && part !== null && (part as { type?: string }).type === 'text';
 }
 
-function linkParts(text: string) {
-  const parts: Array<{ text: string; href?: string }> = [];
-  const urlPattern = /https?:\/\/[^\s<]+/g;
-  let cursor = 0;
-  for (const match of text.matchAll(urlPattern)) {
-    const start = match.index;
-    const rawUrl = match[0];
-    const url = rawUrl.replace(/[),.!?;:]+$/, '');
-    if (start > cursor) parts.push({ text: text.slice(cursor, start) });
-    parts.push({ text: url, href: url });
-    if (url.length < rawUrl.length) parts.push({ text: rawUrl.slice(url.length) });
-    cursor = start + rawUrl.length;
-  }
-  if (cursor < text.length) parts.push({ text: text.slice(cursor) });
-  return parts;
+function renderMarkdown(text: string) {
+  return markdown.render(text);
 }
 
 function publicUrl(container: ContainerInfo) {
@@ -392,7 +387,7 @@ onBeforeUnmount(() => {
           <article v-for="message in messages" :key="message.id" class="message" :class="message.role">
             <span class="message-author">{{ message.role === 'user' ? 'YOU' : 'HALFCLOUD' }}</span>
             <template v-for="(part, index) in message.parts" :key="index">
-              <p v-if="textPart(part)" class="message-text"><template v-for="(content, contentIndex) in linkParts(part.text)" :key="contentIndex"><a v-if="content.href" :href="content.href" target="_blank" rel="noopener noreferrer">{{ content.text }}</a><template v-else>{{ content.text }}</template></template></p>
+              <div v-if="textPart(part)" class="message-text" v-html="renderMarkdown(part.text)"></div>
               <div v-else-if="toolPart(part)" class="tool-event" :class="toolState(toolPart(part)!)">
                 <span class="tool-icon">{{ toolState(toolPart(part)!) === 'complete' ? '✓' : toolState(toolPart(part)!) === 'failed' ? '!' : '·' }}</span>
                 <div class="tool-content">

@@ -24,6 +24,7 @@
     "cookie-parser": "^1.4.7",
     "dockerode": "^5.0.1",
     "express": "^5.2.1",
+    "markdown-it": "^15.0.0",
     "vue": "^3.5.41",
     "zod": "^4.3.6"
   },
@@ -31,6 +32,7 @@
     "@types/cookie-parser": "^1.4.10",
     "@types/dockerode": "^3.3.47",
     "@types/express": "^5.0.6",
+    "@types/markdown-it": "^14.2.0",
     "@types/node": "^24.10.9",
     "@vitejs/plugin-vue": "^6.0.2",
     "concurrently": "^9.2.1",

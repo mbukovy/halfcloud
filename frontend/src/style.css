@@ -97,7 +97,23 @@ input:focus, textarea:focus { border-color: var(--ink); box-shadow: 0 0 0 3px #1
 .message.user { margin-left: auto; padding: 14px 17px; background: #e7e3d9; border-radius: 7px 7px 1px 7px; max-width: 75%; }
 .message-author { display: block; font: 9px 'DM Mono', monospace; letter-spacing: .11em; color: var(--muted); margin-bottom: 8px; }
 .message.assistant .message-author { color: var(--accent); }
-.message-text { white-space: pre-wrap; line-height: 1.65; margin: 5px 0; font-size: 14px; }
+.message-text { line-height: 1.65; margin: 5px 0; font-size: 14px; overflow-wrap: anywhere; }
+.message-text > :first-child { margin-top: 0; }
+.message-text > :last-child { margin-bottom: 0; }
+.message-text p { margin: 8px 0; }
+.message-text h1, .message-text h2, .message-text h3, .message-text h4 { margin: 18px 0 7px; line-height: 1.25; letter-spacing: -.02em; }
+.message-text h1 { font-size: 21px; }
+.message-text h2 { font-size: 18px; }
+.message-text h3, .message-text h4 { font-size: 15px; }
+.message-text ul, .message-text ol { margin: 8px 0; padding-left: 22px; }
+.message-text li { margin: 3px 0; }
+.message-text blockquote { margin: 10px 0; padding: 2px 0 2px 13px; border-left: 3px solid #d3a18f; color: var(--muted); }
+.message-text code { padding: 2px 4px; border-radius: 3px; background: #e9e6dd; font: 12px 'DM Mono', monospace; }
+.message-text pre { max-width: 100%; overflow-x: auto; padding: 13px 15px; border-radius: 4px; background: #111b18; color: #d8e2dc; font: 11px/1.6 'DM Mono', monospace; }
+.message-text pre code { padding: 0; background: none; color: inherit; }
+.message-text table { display: block; max-width: 100%; overflow-x: auto; border-collapse: collapse; font-size: 12px; }
+.message-text th, .message-text td { padding: 6px 9px; border: 1px solid var(--line); text-align: left; }
+.message-text hr { border: 0; border-top: 1px solid var(--line); margin: 15px 0; }
 .message-text a, .container-url { color: #b74321; text-decoration-color: #ee5d2f66; text-underline-offset: 3px; }
 .message-text a:hover, .container-url:hover { color: var(--accent); text-decoration-color: currentColor; }
 .tool-event { display: flex; align-items: flex-start; gap: 9px; margin: 8px 0; border: 1px solid var(--line); border-radius: 3px; padding: 10px 11px; max-width: 520px; color: #59615c; font-size: 12px; }
