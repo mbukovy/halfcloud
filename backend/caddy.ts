@@ -39,7 +39,10 @@ ${sites.join('\n\n')}
 `;
     const response = await fetch(`${this.endpoint}/load`, {
       method: 'POST',
-      headers: { 'content-type': 'text/caddyfile' },
+      headers: {
+        'content-type': 'text/caddyfile',
+        origin: new URL(this.endpoint).origin,
+      },
       body: caddyfile,
       signal: AbortSignal.timeout(10_000),
     });
