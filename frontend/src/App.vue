@@ -82,9 +82,13 @@ function toolPart(part: unknown) {
   return value;
 }
 
-function toolLabel(part: Record<string, unknown>) {
+function toolName(part: Record<string, unknown>) {
   const type = String(part.type);
-  const name = type === 'dynamic-tool' ? String(part.toolName ?? 'tool') : type.slice(5);
+  return type === 'dynamic-tool' ? String(part.toolName ?? 'tool') : type.slice(5);
+}
+
+function toolLabel(part: Record<string, unknown>) {
+  const name = toolName(part);
   const labels: Record<string, string> = {
     listContainers: 'Inspecting applications', createApplication: 'Creating application', startApplication: 'Starting application',
     stopApplication: 'Stopping application', restartApplication: 'Restarting application', deleteApplication: 'Deleting application',
@@ -100,6 +104,50 @@ function toolState(part: Record<string, unknown>) {
   if (state === 'output-available') return 'complete';
   if (state === 'output-error') return 'failed';
   return 'working';
+}
+
+function toolStateLabel(part: Record<string, unknown>) {
+  const state = String(part.state ?? '');
+  if (state === 'input-streaming') return 'preparing';
+  if (state === 'output-available') return 'complete';
+  if (state === 'output-error') return 'failed';
+  return 'executing';
+}
+
+function recordValue(value: unknown) {
+  return typeof value === 'object' && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
+}
+
+function toolDetails(part: Record<string, unknown>) {
+  const details: Array<{ text: string; href?: string }> = [];
+  const name = toolName(part);
+  const input = recordValue(part.input);
+  const output = recordValue(part.output);
+  const target = input?.containerId;
+
+  if (name === 'listContainers') details.push({ text: 'Reading status, published ports, CPU and memory' });
+  if (name === 'getHostStatus') details.push({ text: 'Reading host CPU, memory, disk and uptime' });
+  if (name === 'createApplication') {
+    if (typeof input?.name === 'string') details.push({ text: `Name: ${input.name}` });
+    if (typeof input?.image === 'string') details.push({ text: `Image: ${input.image}` });
+    const ports = recordValue(input?.ports);
+    if (ports) for (const [host, container] of Object.entries(ports)) details.push({ text: `Port: ${host} → ${String(container)}` });
+    const volumes = recordValue(input?.volumes);
+    if (volumes) for (const [source, destination] of Object.entries(volumes)) details.push({ text: `Storage: ${source} → ${String(destination)}` });
+    const environment = recordValue(input?.environment);
+    if (environment && Object.keys(environment).length) details.push({ text: `Environment keys: ${Object.keys(environment).join(', ')}` });
+    if (typeof input?.hostname === 'string') details.push({ text: `Hostname: ${input.hostname}` });
+    if (Array.isArray(output?.steps)) {
+      for (const step of output.steps) if (typeof step === 'string') details.push({ text: step });
+    }
+    if (typeof output?.url === 'string' && /^https?:\/\//.test(output.url)) details.push({ text: output.url, href: output.url });
+  }
+  if (typeof target === 'string') details.push({ text: `Application: ${target}` });
+  if (name === 'getApplicationLogs' && typeof input?.tail === 'number') details.push({ text: `Recent lines: ${input.tail}` });
+  if (name === 'setEnvironmentVariable' && typeof input?.key === 'string') details.push({ text: `Environment key: ${input.key}` });
+  if (name === 'listContainers' && Array.isArray(part.output)) details.push({ text: `Found ${part.output.length} managed application${part.output.length === 1 ? '' : 's'}` });
+  if (typeof part.errorText === 'string') details.push({ text: part.errorText });
+  return details;
 }
 
 async function bootstrap() {
@@ -320,8 +368,13 @@ onBeforeUnmount(() => {
               <p v-if="textPart(part)" class="message-text"><template v-for="(content, contentIndex) in linkParts(part.text)" :key="contentIndex"><a v-if="content.href" :href="content.href" target="_blank" rel="noopener noreferrer">{{ content.text }}</a><template v-else>{{ content.text }}</template></template></p>
               <div v-else-if="toolPart(part)" class="tool-event" :class="toolState(toolPart(part)!)">
                 <span class="tool-icon">{{ toolState(toolPart(part)!) === 'complete' ? '✓' : toolState(toolPart(part)!) === 'failed' ? '!' : '·' }}</span>
-                <span>{{ toolLabel(toolPart(part)!) }}</span>
-                <small>{{ toolState(toolPart(part)!) }}</small>
+                <div class="tool-content">
+                  <span>{{ toolLabel(toolPart(part)!) }}</span>
+                  <ul v-if="toolDetails(toolPart(part)!).length">
+                    <li v-for="(detail, detailIndex) in toolDetails(toolPart(part)!)" :key="detailIndex"><a v-if="detail.href" :href="detail.href" target="_blank" rel="noopener noreferrer">{{ detail.text }}</a><template v-else>{{ detail.text }}</template></li>
+                  </ul>
+                </div>
+                <small>{{ toolStateLabel(toolPart(part)!) }}</small>
               </div>
             </template>
           </article>
