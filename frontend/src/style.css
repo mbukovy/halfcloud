@@ -157,6 +157,11 @@ input:focus, textarea:focus { border-color: var(--ink); box-shadow: 0 0 0 3px #1
   .workspace { display: block; }
   .chat-panel { height: calc(100vh - 197px); min-height: 560px; }
   .section-heading, .transcript { padding-left: 18px; padding-right: 18px; }
+  .chat-panel > .section-heading { gap: 12px; }
+  .chat-panel .section-heading h1 { font-size: 24px; }
+  .chat-heading-actions { gap: 8px; }
+  .chat-heading-actions .thinking { display: none; }
+  .new-conversation-button { padding: 7px 8px; font-size: 9px; }
   .composer { margin-left: 18px; margin-right: 18px; }
   .message.user { max-width: 88%; }
   .auth-panel { padding: 30px 24px; }
