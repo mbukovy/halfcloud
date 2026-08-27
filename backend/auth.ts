@@ -18,7 +18,7 @@ export class AuthService {
   ) {}
 
   static async create() {
-    const codeFile = process.env.HALFCLOUD_ACCESS_CODE_FILE ?? `${process.env.HOME ?? '/home/halfcloud'}/.halfcloud/secrets/access-code`;
+    const codeFile = process.env.HALFCLOUD_ACCESS_CODE_FILE ?? `${process.env.HOME ?? '/home/halfcloudrunner'}/.halfcloud/secrets/access-code`;
     const accessCode = (process.env.HALFCLOUD_ACCESS_CODE ?? (await readFile(codeFile, 'utf8'))).trim();
     if (!accessCode) throw new Error('HalfCloud access code is empty');
     const configuredSecret = process.env.HALFCLOUD_SESSION_SECRET;

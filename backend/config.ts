@@ -15,7 +15,7 @@ export class SettingsStore {
   readonly dataDir: string;
   private readonly settingsPath: string;
 
-  constructor(dataDir = process.env.HALFCLOUD_DATA_DIR ?? `${process.env.HOME ?? '/home/halfcloud'}/.halfcloud/data`) {
+  constructor(dataDir = process.env.HALFCLOUD_DATA_DIR ?? `${process.env.HOME ?? '/home/halfcloudrunner'}/.halfcloud/data`) {
     this.dataDir = dataDir;
     this.settingsPath = path.join(dataDir, 'settings.json');
   }

@@ -37,37 +37,29 @@ HalfCloud 0.1 requires a clean installation. It deliberately refuses to install 
 
 ### Uninstall
 
-The uninstaller permanently removes HalfCloud, all deployed applications and data, the `halfcloud` user, and the Docker, Caddy, and Node.js installation used by HalfCloud. It is intended for a dedicated HalfCloud server and requires an explicit interactive confirmation.
+This permanently removes HalfCloud, all applications and data, and its Docker, Caddy, and Node.js installation. Run it from a sudo-capable account other than `halfcloudrunner`:
 
 ```bash
-sudo /home/halfcloud/halfcloud/uninstall.sh
-```
-
-If an installation failed before that file was installed, download and run the uninstaller directly:
-
-```bash
-curl -fsSLO https://raw.githubusercontent.com/mbukovy/halfcloud/main/uninstall.sh
-chmod +x uninstall.sh
-sudo ./uninstall.sh
+curl -fsSL https://raw.githubusercontent.com/mbukovy/halfcloud/main/uninstall.sh | sudo bash
 ```
 
 ## Runtime architecture
 
-The installer is the only component that runs as root. It creates a dedicated `halfcloud` Linux user with no `sudo` or `docker` group membership, installs that user's rootless Docker daemon, enables user lingering, and installs HalfCloud as a host systemd service.
+The installer is the only component that runs as root. It creates a dedicated `halfcloudrunner` Linux user with no `sudo` or `docker` group membership, installs that user's rootless Docker daemon, enables user lingering, and installs HalfCloud as a host systemd service.
 
 ```text
 Internet :80/:443
        ↓
 Caddy (host service)
        ↓
-HalfCloud 127.0.0.1:9000 (user: halfcloud)
+HalfCloud 127.0.0.1:9000 (user: halfcloudrunner)
        ↓
 /run/user/<uid>/docker.sock (rootless Docker)
        ↓
-application containers (user: halfcloud)
+application containers (user: halfcloudrunner)
 ```
 
-Runtime data lives in `/home/halfcloud/.halfcloud`. Application ports are allocated only from `10000-19999` and bind to `127.0.0.1`; Caddy is the public entry point. The standard host socket `/var/run/docker.sock` is neither mounted nor used.
+Runtime data lives in `/home/halfcloudrunner/.halfcloud`. Application ports are allocated only from `10000-19999` and bind to `127.0.0.1`; Caddy is the public entry point. The standard host socket `/var/run/docker.sock` is neither mounted nor used.
 
 The installer uses nip.io wildcard DNS for the detected public IPv4 address. HalfCloud is available at `https://halfcloud.<public-ip>.nip.io`, and applications receive addresses such as `https://n8n.<public-ip>.nip.io` by default. A different valid hostname can still be supplied when deploying an application.
 
@@ -76,10 +68,10 @@ Useful host commands:
 ```bash
 systemctl status halfcloud caddy
 journalctl -u halfcloud
-sudo -u halfcloud docker info
+sudo -u halfcloudrunner docker info
 ```
 
-Application deployments are validated in code. HalfCloud does not expose an arbitrary shell or Docker command tool and cannot request privileged containers, host networking, host devices, Docker socket mounts, or bind mounts outside `/home/halfcloud/.halfcloud/apps`.
+Application deployments are validated in code. HalfCloud does not expose an arbitrary shell or Docker command tool and cannot request privileged containers, host networking, host devices, Docker socket mounts, or bind mounts outside `/home/halfcloudrunner/.halfcloud/apps`.
 
 ## From code to running app
 

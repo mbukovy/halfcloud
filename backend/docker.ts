@@ -51,7 +51,7 @@ export class DockerService {
       throw new Error('DOCKER_HOST must belong to the user running HalfCloud');
     }
     this.docker = new Docker({ socketPath });
-    this.appsDir = path.resolve(process.env.HALFCLOUD_APPS_DIR ?? `${process.env.HOME ?? '/home/halfcloud'}/.halfcloud/apps`);
+    this.appsDir = path.resolve(process.env.HALFCLOUD_APPS_DIR ?? `${process.env.HOME ?? '/home/halfcloudrunner'}/.halfcloud/apps`);
   }
 
   async ping() {

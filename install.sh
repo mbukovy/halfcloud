@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-readonly HALFCLOUD_USER="halfcloud"
+readonly HALFCLOUD_USER="halfcloudrunner"
 readonly HALFCLOUD_HOME="/home/${HALFCLOUD_USER}"
 readonly INSTALL_DIR="${HALFCLOUD_HOME}/halfcloud"
 readonly DATA_DIR="${HALFCLOUD_HOME}/.halfcloud"
@@ -42,14 +42,14 @@ apt-get install -y -qq ca-certificates curl dbus-user-session git uidmap slirp4n
 if ! id "${HALFCLOUD_USER}" >/dev/null 2>&1; then
   useradd --create-home --shell /bin/bash "${HALFCLOUD_USER}"
 fi
-halfcloud_uid="$(id -u "${HALFCLOUD_USER}")"
-runtime_dir="/run/user/${halfcloud_uid}"
+runtime_uid="$(id -u "${HALFCLOUD_USER}")"
+runtime_dir="/run/user/${runtime_uid}"
 docker_socket="${runtime_dir}/docker.sock"
 if ! grep -q "^${HALFCLOUD_USER}:" /etc/subuid; then printf '%s:100000:65536\n' "${HALFCLOUD_USER}" >> /etc/subuid; fi
 if ! grep -q "^${HALFCLOUD_USER}:" /etc/subgid; then printf '%s:100000:65536\n' "${HALFCLOUD_USER}" >> /etc/subgid; fi
 loginctl enable-linger "${HALFCLOUD_USER}"
-systemctl start "user@${halfcloud_uid}.service"
-success "Dedicated halfcloud user configured"
+systemctl start "user@${runtime_uid}.service"
+success "Dedicated ${HALFCLOUD_USER} user configured"
 
 if ! command -v dockerd-rootless-setuptool.sh >/dev/null 2>&1; then
   curl -fsSL https://get.docker.com | sh
@@ -64,7 +64,7 @@ for _ in {1..30}; do
   sleep 1
 done
 [[ -S "${docker_socket}" ]] || fail "Rootless Docker did not create ${docker_socket}."
-[[ "$(stat -c %U "${docker_socket}")" == "${HALFCLOUD_USER}" ]] || fail "The Docker socket is not owned by halfcloud."
+[[ "$(stat -c %U "${docker_socket}")" == "${HALFCLOUD_USER}" ]] || fail "The Docker socket is not owned by ${HALFCLOUD_USER}."
 run_user docker info --format '{{json .SecurityOptions}}' | grep -q rootless || fail "Docker did not report rootless mode."
 success "Rootless Docker is running"
 
@@ -118,9 +118,9 @@ chmod 600 "${DATA_DIR}/secrets/access-code" "${DATA_DIR}/config/service.env"
 cat > /etc/systemd/system/halfcloud.service <<EOF
 [Unit]
 Description=HalfCloud control plane
-After=network-online.target user@${halfcloud_uid}.service
+After=network-online.target user@${runtime_uid}.service
 Wants=network-online.target
-Requires=user@${halfcloud_uid}.service
+Requires=user@${runtime_uid}.service
 
 [Service]
 Type=simple
@@ -174,7 +174,7 @@ success "Rootless test container passed"
 for _ in {1..60}; do curl -fsS --max-time 2 http://127.0.0.1:9000/api/health >/dev/null 2>&1 && break; sleep 2; done
 curl -fsS --max-time 2 http://127.0.0.1:9000/api/health >/dev/null || { journalctl -u halfcloud --no-pager -n 50 >&2; fail "HalfCloud did not become healthy."; }
 systemctl is-active --quiet caddy || fail "Caddy is not running."
-if id -nG "${HALFCLOUD_USER}" | tr ' ' '\n' | grep -Eq '^(sudo|docker)$'; then fail "The halfcloud user received a prohibited privileged group."; fi
+if id -nG "${HALFCLOUD_USER}" | tr ' ' '\n' | grep -Eq '^(sudo|docker)$'; then fail "The ${HALFCLOUD_USER} user received a prohibited privileged group."; fi
 success "Runtime identity and service checks passed"
 
 https_ready=false

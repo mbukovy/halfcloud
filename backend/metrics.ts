@@ -2,7 +2,7 @@ import { readFile } from 'node:fs/promises';
 import { statfs } from 'node:fs/promises';
 import os from 'node:os';
 
-const hostRoot = process.env.HALFCLOUD_DATA_DIR ?? `${process.env.HOME ?? '/home/halfcloud'}/.halfcloud`;
+const hostRoot = process.env.HALFCLOUD_DATA_DIR ?? `${process.env.HOME ?? '/home/halfcloudrunner'}/.halfcloud`;
 const procRoot = '/proc';
 
 async function readablePath(preferred: string, fallback: string) {

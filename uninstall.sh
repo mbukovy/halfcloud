@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 set -uo pipefail
 
-readonly HALFCLOUD_USER="halfcloud"
-readonly HALFCLOUD_HOME="/home/${HALFCLOUD_USER}"
 readonly CONFIRMATION="UNINSTALL HALFCLOUD"
+readonly HALFCLOUD_USER="halfcloudrunner"
+readonly HALFCLOUD_HOME="/home/${HALFCLOUD_USER}"
 
 info() { printf '%s\n' "$1"; }
 success() { printf '✓ %s\n' "$1"; }
@@ -14,6 +14,18 @@ if [[ "${EUID}" -ne 0 ]]; then
   exit 1
 fi
 
+invoking_user="${SUDO_USER:-}"
+terminal_path="$(tty 2>/dev/null || true)"
+terminal_user=""
+if [[ -n "${terminal_path}" && "${terminal_path}" != "not a tty" ]]; then
+  terminal_user="$(stat -c %U "${terminal_path}" 2>/dev/null || true)"
+fi
+if [[ "${invoking_user}" == "${HALFCLOUD_USER}" || "${terminal_user}" == "${HALFCLOUD_USER}" ]]; then
+  printf 'Error: Do not run the uninstaller from a %s login session.\n' "${HALFCLOUD_USER}" >&2
+  printf 'Log in as root or a different sudo-capable user, then run it again.\n' >&2
+  exit 1
+fi
+
 cat >&2 <<'EOF'
 
 WARNING: This will completely uninstall HalfCloud from this server.
@@ -21,10 +33,10 @@ WARNING: This will completely uninstall HalfCloud from this server.
 All HalfCloud applications, containers, images, volumes, configuration,
 credentials, logs, and data will be permanently deleted.
 
-The dedicated halfcloud user and its home directory will be deleted. Docker,
-Caddy, Node.js, their package repositories, and all host Docker/containerd data
-will also be removed because HalfCloud 0.1 is intended for a dedicated, clean
-server.
+The dedicated halfcloudrunner user and its home directory will be deleted.
+Docker, Caddy, Node.js, their package repositories, and all host
+Docker/containerd data will also be removed because HalfCloud 0.1 is intended
+for a dedicated, clean server.
 
 This operation is irreversible. Back up anything you want to keep before
 continuing. Do not continue if this server has Docker, Caddy, or Node.js state
@@ -49,10 +61,11 @@ rm -f /etc/systemd/system/halfcloud.service
 systemctl daemon-reload
 systemctl reset-failed halfcloud.service >/dev/null 2>&1 || true
 
-halfcloud_uid=""
+info "Stopping rootless Docker and removing the HalfCloud account and data..."
+runtime_uid=""
 if id "${HALFCLOUD_USER}" >/dev/null 2>&1; then
-  halfcloud_uid="$(id -u "${HALFCLOUD_USER}")"
-  runtime_dir="/run/user/${halfcloud_uid}"
+  runtime_uid="$(id -u "${HALFCLOUD_USER}")"
+  runtime_dir="/run/user/${runtime_uid}"
 
   runuser -u "${HALFCLOUD_USER}" -- env \
     HOME="${HALFCLOUD_HOME}" \
@@ -62,19 +75,16 @@ if id "${HALFCLOUD_USER}" >/dev/null 2>&1; then
 
   loginctl disable-linger "${HALFCLOUD_USER}" >/dev/null 2>&1 || true
   loginctl terminate-user "${HALFCLOUD_USER}" >/dev/null 2>&1 || true
-  pkill -TERM -u "${halfcloud_uid}" >/dev/null 2>&1 || true
+  pkill -TERM -u "${runtime_uid}" >/dev/null 2>&1 || true
   sleep 1
-  pkill -KILL -u "${halfcloud_uid}" >/dev/null 2>&1 || true
-fi
-
-info "Removing the HalfCloud account and all application data..."
-if id "${HALFCLOUD_USER}" >/dev/null 2>&1; then
+  pkill -KILL -u "${runtime_uid}" >/dev/null 2>&1 || true
   userdel --remove "${HALFCLOUD_USER}" >/dev/null 2>&1 || true
 fi
+
 rm -rf -- "${HALFCLOUD_HOME}"
 rm -f "/var/lib/systemd/linger/${HALFCLOUD_USER}"
-if [[ -n "${halfcloud_uid}" ]]; then
-  rm -rf -- "/run/user/${halfcloud_uid}"
+if [[ -n "${runtime_uid}" ]]; then
+  rm -rf -- "/run/user/${runtime_uid}"
 fi
 if [[ -f /etc/subuid ]]; then
   sed -i "/^${HALFCLOUD_USER}:/d" /etc/subuid
@@ -83,7 +93,7 @@ if [[ -f /etc/subgid ]]; then
   sed -i "/^${HALFCLOUD_USER}:/d" /etc/subgid
 fi
 if getent group "${HALFCLOUD_USER}" >/dev/null 2>&1; then
-  groupdel "${HALFCLOUD_USER}" >/dev/null 2>&1 || warning "Could not remove the halfcloud group."
+  groupdel "${HALFCLOUD_USER}" >/dev/null 2>&1 || warning "Could not remove the ${HALFCLOUD_USER} group."
 fi
 
 info "Removing Docker and container state..."
@@ -145,7 +155,7 @@ systemctl daemon-reload
 systemctl reset-failed >/dev/null 2>&1 || true
 
 if id "${HALFCLOUD_USER}" >/dev/null 2>&1; then
-  warning "Most HalfCloud state was removed, but the halfcloud account is still present."
+  warning "Most HalfCloud state was removed, but the ${HALFCLOUD_USER} account is still present."
   warning "Reboot the server and run this uninstaller again."
   exit 1
 fi

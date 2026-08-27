@@ -16,8 +16,8 @@ test('limits application publications to the managed port range', () => {
 });
 
 test('limits bind mounts to application-relative paths', () => {
-  assert.equal(managedBindPath('/home/halfcloud/.halfcloud/apps/demo', 'data'), '/home/halfcloud/.halfcloud/apps/demo/data');
+  assert.equal(managedBindPath('/home/halfcloudrunner/.halfcloud/apps/demo', 'data'), '/home/halfcloudrunner/.halfcloud/apps/demo/data');
   for (const source of ['/', '/etc', '../secrets', 'data/../../escape']) {
-    assert.throws(() => managedBindPath('/home/halfcloud/.halfcloud/apps/demo', source), /managed application directory/);
+    assert.throws(() => managedBindPath('/home/halfcloudrunner/.halfcloud/apps/demo', source), /managed application directory/);
   }
 });
