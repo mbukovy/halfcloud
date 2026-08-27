@@ -1,3 +1,6 @@
+# UNDER ACTIVE DEVELOPMENT
+## Do not use (yet)
+
 # HalfCloud ☁️
 
 **Your servers. Zero complexity.**
