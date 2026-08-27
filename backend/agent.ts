@@ -71,23 +71,10 @@ Rules:
 - Deployments run on rootless Docker. Never request privileged mode, host networking, devices, Docker sockets, or arbitrary host paths. Managed volume sources are relative paths beneath the application's HalfCloud directory.
 - If an application requires privileged host access, explain that it cannot currently be deployed safely by HalfCloud. Never suggest silently elevating it.
 - Never stop or delete a different container to resolve a port conflict. Offer the available port reported by the tool and ask the user before changing their requested port.
-- Deletion is destructive. First explain that the application container will be permanently removed while its image and managed data remain, put its exact HalfCloud name in backticks, and ask for confirmation. Only call deleteApplication with that exact name after the user explicitly confirms in a later message, and set confirmed=true.
+- Deletion is destructive. Call deleteApplication with the exact HalfCloud name when deletion is requested; the interface will require explicit user approval before the tool executes. If approval is denied, do not retry unless the user makes a new deletion request.
 - Start, stop, restart, create, logs, stats, and listing do not need confirmation when the user's intent is clear.
 - Explain important failures plainly. Never expose API keys or claim success unless the tool result confirms it.
 - Keep responses concise and operational. After creating an application, state its name and public HTTPS URL.`;
-
-function textOf(message: UIMessage) {
-  return message.parts.filter((part): part is Extract<typeof part, { type: 'text' }> => part.type === 'text').map((part) => part.text).join(' ');
-}
-
-function deletionConfirmed(messages: UIMessage[]) {
-  const lastUserIndex = messages.findLastIndex((message) => message.role === 'user');
-  if (lastUserIndex < 1) return false;
-  const text = textOf(messages[lastUserIndex]!).trim().toLowerCase();
-  const priorAssistant = [...messages.slice(0, lastUserIndex)].reverse().find((message) => message.role === 'assistant');
-  const confirmationWasRequested = priorAssistant && /delet|permanent|confirm/i.test(textOf(priorAssistant));
-  return Boolean(confirmationWasRequested && /^(yes|y|confirm|confirmed|do it|delete it|go ahead|please delete|yes,? delete)([.! ]|$)/.test(text));
-}
 
 export async function createChatResponse(
   settings: AiSettings,
@@ -97,7 +84,6 @@ export async function createChatResponse(
   requestId = 'unknown',
 ) {
   const provider = createAzure(azureProviderOptions(settings));
-  const mayDelete = deletionConfirmed(messages);
   const containerId = z.string().min(1).describe('Container id or exact HalfCloud name');
 
   const tools = {
@@ -134,12 +120,9 @@ export async function createChatResponse(
       execute: ({ containerId }) => docker.restartContainer(containerId),
     }),
     deleteApplication: tool({
-      description: 'Permanently delete a HalfCloud-managed container, but not its image. Requires explicit confirmation from the user in a later message.',
-      inputSchema: z.object({ containerId, confirmed: z.literal(true) }),
-      execute: ({ containerId }) => {
-        if (!mayDelete) throw new Error('Deletion blocked: ask the user for explicit confirmation, then wait for their next message.');
-        return docker.deleteContainer(containerId);
-      },
+      description: 'Permanently delete a HalfCloud-managed container, but not its image or managed data. The interface requires explicit user approval before execution.',
+      inputSchema: z.object({ containerId }),
+      execute: ({ containerId }) => docker.deleteContainer(containerId),
     }),
     getApplicationLogs: tool({
       description: 'Get recent raw stdout/stderr logs for a HalfCloud-managed container.',
@@ -168,6 +151,7 @@ export async function createChatResponse(
     model: provider.responses(settings.deployment),
     instructions: SYSTEM_PROMPT,
     tools,
+    toolApproval: { deleteApplication: 'user-approval' },
   });
   return createAgentUIStreamResponse({
     agent,

@@ -104,12 +104,22 @@ input:focus, textarea:focus { border-color: var(--ink); box-shadow: 0 0 0 3px #1
 .tool-event small { margin-left: auto; font: 8px 'DM Mono', monospace; text-transform: uppercase; color: var(--muted); }
 .tool-event.complete .tool-icon { color: var(--green); }
 .tool-event.failed { border-color: #dba99a; color: #9f3b25; }
+.tool-event.approval { max-width: 560px; border-color: #d7a899; background: #fff9f5; }
 .tool-icon { font: 14px 'DM Mono', monospace; line-height: 1; margin-top: 1px; }
 .tool-content { min-width: 0; flex: 1; }
 .tool-content ul { margin: 6px 0 0; padding: 0; list-style: none; color: var(--muted); font: 9px/1.55 'DM Mono', monospace; }
 .tool-content li { overflow-wrap: anywhere; }
 .tool-content li::before { content: '↳ '; color: #a9ada7; }
 .tool-content a { color: #b74321; text-underline-offset: 2px; }
+.approval-widget { margin-top: 10px; padding-top: 10px; border-top: 1px solid #ead5cc; color: var(--ink); }
+.approval-widget strong { display: block; font-size: 12px; }
+.approval-widget p { margin: 5px 0 11px; color: var(--muted); font-size: 10px; line-height: 1.5; }
+.approval-widget > div { display: flex; gap: 7px; }
+.approval-widget button { border: 1px solid var(--line); background: var(--panel); border-radius: 3px; padding: 7px 12px; font: 500 9px 'DM Mono', monospace; cursor: pointer; }
+.approval-widget button:hover { border-color: #8c908b; background: #fff; }
+.approval-widget button.confirm { border-color: #b74321; background: #b74321; color: white; }
+.approval-widget button.confirm:hover { background: var(--accent); border-color: var(--accent); }
+.approval-widget button:disabled { opacity: .5; cursor: wait; }
 .chat-error { padding: 10px; background: #fff0eb; white-space: pre-wrap; overflow-wrap: anywhere; }
 .composer { margin: 0 30px 24px; border: 1px solid #c7c4ba; background: #fffefb; border-radius: 5px; display: flex; align-items: end; padding: 8px; box-shadow: 0 8px 28px #19231f0c; }
 .composer:focus-within { border-color: var(--ink); }

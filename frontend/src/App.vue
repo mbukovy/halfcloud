@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue';
 import { useChat } from '@ai-sdk/vue';
-import { DefaultChatTransport } from 'ai';
+import { DefaultChatTransport, lastAssistantMessageIsCompleteWithApprovalResponses } from 'ai';
 import { api, type ContainerInfo, type PublicSettings, type ServerStats } from './api';
 
 const authenticated = ref(false);
@@ -20,6 +20,7 @@ const actionId = ref('');
 const logs = ref<{ name: string; content: string } | null>(null);
 const prompt = ref('');
 const transcript = ref<HTMLElement>();
+const respondingApprovalId = ref('');
 let refreshTimer: number | undefined;
 
 const authenticatedFetch: typeof fetch = async (input, init) => {
@@ -28,8 +29,9 @@ const authenticatedFetch: typeof fetch = async (input, init) => {
   return response;
 };
 
-const { messages, sendMessage, status, error: chatError, stop, clearError } = useChat({
+const { messages, sendMessage, status, error: chatError, stop, clearError, addToolApprovalResponse } = useChat({
   transport: new DefaultChatTransport({ api: '/api/chat', fetch: authenticatedFetch }),
+  sendAutomaticallyWhen: lastAssistantMessageIsCompleteWithApprovalResponses,
 });
 
 const chatBusy = computed(() => status.value === 'submitted' || status.value === 'streaming');
@@ -102,15 +104,19 @@ function toolLabel(part: Record<string, unknown>) {
 function toolState(part: Record<string, unknown>) {
   const state = String(part.state ?? '');
   if (state === 'output-available') return 'complete';
-  if (state === 'output-error') return 'failed';
+  if (state === 'output-error' || state === 'output-denied') return 'failed';
+  if (state === 'approval-requested') return 'approval';
   return 'working';
 }
 
 function toolStateLabel(part: Record<string, unknown>) {
   const state = String(part.state ?? '');
   if (state === 'input-streaming') return 'preparing';
+  if (state === 'approval-requested') return 'confirmation';
+  if (state === 'approval-responded') return recordValue(part.approval)?.approved ? 'confirmed' : 'dismissed';
   if (state === 'output-available') return 'complete';
   if (state === 'output-error') return 'failed';
+  if (state === 'output-denied') return 'dismissed';
   return 'executing';
 }
 
@@ -148,6 +154,27 @@ function toolDetails(part: Record<string, unknown>) {
   if (name === 'listContainers' && Array.isArray(part.output)) details.push({ text: `Found ${part.output.length} managed application${part.output.length === 1 ? '' : 's'}` });
   if (typeof part.errorText === 'string') details.push({ text: part.errorText });
   return details;
+}
+
+function approvalRequest(part: Record<string, unknown>) {
+  if (part.state !== 'approval-requested') return undefined;
+  const approval = recordValue(part.approval);
+  return typeof approval?.id === 'string' && approval.isAutomatic !== true ? approval.id : undefined;
+}
+
+async function respondToApproval(part: Record<string, unknown>, approved: boolean) {
+  const id = approvalRequest(part);
+  if (!id || respondingApprovalId.value) return;
+  respondingApprovalId.value = id;
+  try {
+    await addToolApprovalResponse({
+      id,
+      approved,
+      reason: approved ? 'User explicitly confirmed the deletion' : 'User dismissed the deletion',
+    });
+  } finally {
+    respondingApprovalId.value = '';
+  }
 }
 
 async function bootstrap() {
@@ -373,6 +400,14 @@ onBeforeUnmount(() => {
                   <ul v-if="toolDetails(toolPart(part)!).length">
                     <li v-for="(detail, detailIndex) in toolDetails(toolPart(part)!)" :key="detailIndex"><a v-if="detail.href" :href="detail.href" target="_blank" rel="noopener noreferrer">{{ detail.text }}</a><template v-else>{{ detail.text }}</template></li>
                   </ul>
+                  <div v-if="approvalRequest(toolPart(part)!)" class="approval-widget">
+                    <strong>Delete this application permanently?</strong>
+                    <p>The container will be removed. Its image and managed data will remain.</p>
+                    <div>
+                      <button class="confirm" type="button" :disabled="Boolean(respondingApprovalId)" @click="respondToApproval(toolPart(part)!, true)">Confirm</button>
+                      <button type="button" :disabled="Boolean(respondingApprovalId)" @click="respondToApproval(toolPart(part)!, false)">Dismiss</button>
+                    </div>
+                  </div>
                 </div>
                 <small>{{ toolStateLabel(toolPart(part)!) }}</small>
               </div>
