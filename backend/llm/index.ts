@@ -97,10 +97,11 @@ export async function testModel(credentials: LlmCredentials, model: string): Pro
   try {
     const result = streamText({
       model: createLanguageModel({ ...credentials, model }),
-      prompt: 'Call the compatibility tool once with ok=true. Do not write any text.',
-      tools: { compatibility: tool({ description: 'HalfCloud compatibility check', inputSchema: z.object({ ok: z.literal(true) }) }) },
+      prompt: 'Call the compatibility tool once with status set to "ok". Do not write any text.',
+      tools: { compatibility: tool({ description: 'HalfCloud compatibility check', inputSchema: z.object({ status: z.string() }) }) },
       toolChoice: { type: 'tool', toolName: 'compatibility' },
-      maxOutputTokens: 32,
+      // Reasoning models can consume the initial output budget before emitting their tool call.
+      maxOutputTokens: 256,
     });
     let called = false;
     for await (const part of result.fullStream) if (part.type === 'tool-call' && part.toolName === 'compatibility') called = true;
