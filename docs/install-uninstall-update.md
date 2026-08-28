@@ -14,7 +14,7 @@ The installer requires:
 - outbound HTTPS access for packages, source archives, container images, certificates, and Azure requests;
 - no active host Docker socket at `/var/run/docker.sock`.
 
-A small VPS can run HalfCloud, but actual CPU, memory, and disk requirements depend on the applications. Leave enough disk space for image layers, volumes, logs, dependency installation, and one staged update build.
+A small VPS can run HalfCloud, but actual CPU, memory, and disk requirements depend on the Apps and their Services. Leave enough disk space for image layers, volumes, logs, dependency installation, and one staged update build.
 
 Do not install version 0.1 on a server that already contains Docker workloads, Caddy configuration, Node.js state, or data you cannot lose. The installation and especially uninstallation model assumes a dedicated machine.
 
@@ -72,7 +72,7 @@ The updater requires `halfcloud.service` to be running. It takes a non-blocking 
 The new release is downloaded, dependencies are installed, and assets are built before the current service is stopped. During the final swap:
 
 - only the HalfCloud control plane is restarted;
-- Caddy, rootless Docker, and application containers stay running;
+- Caddy, rootless Docker, and App Services stay running;
 - `/home/halfcloudrunner/.halfcloud` and rootless Docker data are preserved;
 - the previous application release is retained temporarily;
 - the local health endpoint is checked for up to about 60 seconds.
@@ -83,20 +83,22 @@ Updates currently track a moving branch rather than a versioned release channel.
 
 ## Back up before lifecycle changes
 
-HalfCloud does not create backups. Back up stateful applications using their native tools, such as a database dump, and verify restoration.
+HalfCloud does not create backups. Back up stateful Apps using Service-appropriate tools, such as a database dump, and verify restoration.
 
 For a broad filesystem backup, account for both:
 
-- `/home/halfcloudrunner/.halfcloud`, which contains configuration, credentials, managed bind data, and environment files;
+- `/home/halfcloudrunner/.halfcloud`, which contains configuration, credentials, managed bind data, environment files, domain state, and route password hashes;
 - the rootless Docker data directory, normally `/home/halfcloudrunner/.local/share/docker`, which contains named volumes, images, containers, and Docker metadata.
 
-Copying live database files or a live Docker data directory may produce an inconsistent backup. Stop or quiesce the relevant application, or use an application-aware backup process. Protect backups because they can contain API keys, passwords, and application data.
+Copying live database files or a live Docker data directory may produce an inconsistent backup. Stop or quiesce the relevant App, or use an application-aware backup process. Protect backups because they can contain API keys, passwords, and App data.
+
+Deleting an App keeps persistent volumes by default. If complete data removal is intended, explicitly choose or request deletion of persistent data. Uninstallation removes all retained files and the complete rootless Docker data directory.
 
 ## Uninstall
 
 Uninstallation is intentionally destructive. It permanently removes:
 
-- every HalfCloud application container, image, named volume, bind directory, log, and credential;
+- every HalfCloud App, Service container, image, named volume, bind directory, log, and credential;
 - the `halfcloudrunner` account and its entire home directory;
 - HalfCloud and Caddy services and configuration;
 - host Docker and containerd state;
@@ -129,4 +131,4 @@ journalctl -u halfcloud -f
 sudo -u halfcloudrunner docker info
 ```
 
-Because Docker is rootless, commands run as root against the default host Docker socket inspect the wrong daemon or fail. Use the `halfcloudrunner` identity when diagnosing HalfCloud containers.
+Because Docker is rootless, commands run as root against the default host Docker socket inspect the wrong daemon or fail. Use the `halfcloudrunner` identity when diagnosing the Service containers behind HalfCloud Apps.

@@ -39,21 +39,21 @@ The deployment API rejects:
 - non-localhost published port bindings;
 - operations on containers or volumes without HalfCloud management labels.
 
-Managed bind paths must remain inside the selected application's directory. Named volumes must carry matching HalfCloud labels before they can be reused or modified.
+Managed bind paths must remain inside the selected App's ID-based directory. Containers, networks, and generated volumes carry ownership labels tying them to an immutable App ID and, where applicable, a Service ID.
 
 These checks are code-enforced. They do not depend only on asking the language model to behave.
 
 ## Destructive actions require approval
 
-Deleting an application, deleting a managed volume, and recursively changing storage ownership pause until the signed-in user approves the exact tool call. If approval is dismissed, the operation is not executed.
+Deleting an App, removing a Service, deleting a managed volume, recursively changing storage ownership, and removing password protection from a route pause until the signed-in user approves the exact tool call. If approval is dismissed, the operation is not executed.
 
-Application deletion preserves named volumes and images by default. Volume deletion is separate because it destroys persistent data.
+App deletion preserves named volumes and images by default. Deleting persistent data requires an explicit choice because it cannot be recovered through HalfCloud.
 
 Approval is an important last check, but it is not protection if an attacker already controls an authenticated browser session or if a user approves a misleading request without reviewing it.
 
 ## Network exposure is narrow by default
 
-Only Caddy is intended to accept public application traffic. The control plane and application host ports bind to `127.0.0.1`. Databases and other private services can run without any published port and communicate over the `halfcloud` Docker network.
+Only Caddy is intended to accept public App traffic. The control plane and public Service host ports bind to `127.0.0.1`. Databases and other supporting Services can run without a published port. Each App receives its own private Docker network, and different Apps cannot reach one another over private networking by default.
 
 HTTPS is automatic, and the control-plane route adds HSTS, MIME-sniffing protection, frame denial, and a same-origin referrer policy. State-changing API requests require JSON and reject cross-site origins. Session cookies are HTTP-only, secure in production, and `SameSite=Strict`.
 
@@ -63,24 +63,28 @@ The installer generates a random access code and a separate random session-signi
 
 Azure credentials are stored on the VPS in a mode-`0600` file and are not returned through the settings API. Error handling and container-log display attempt to redact API keys and environment values.
 
-Application environment variables can be marked **Protect from AI**, which is enabled by default in the dashboard and credential-request widget. Agent-facing environment data is explicitly serialized: protected entries contain their name and configuration status but no `value` property. Docker still receives the real value, and administrators can view it in the authenticated Environment interface. This is an AI-disclosure boundary, not encryption at rest or a secrets vault.
+Service environment variables can be marked **Protect from AI**, which is enabled by default in the dashboard and credential-request widget. Agent-facing environment data is explicitly serialized: protected entries contain their name and configuration status but no `value` property. Docker still receives the real value, and administrators can view it in the authenticated Environment interface. This is an AI-disclosure boundary, not encryption at rest or a secrets vault.
+
+Route passwords are also entered through a dedicated form instead of chat. Caddy hashes them with Argon2id, and HalfCloud stores only the resulting hash in the target Service's route state. The route username and operation status may be visible to the AI, but the password and hash are removed from agent tool history.
 
 Important limitations:
 
 - HalfCloud currently has one shared administrator access code, not named users, roles, MFA, or revocable sessions.
 - Login throttling is in memory and resets when the service restarts.
 - A session cookie remains valid for up to 30 days unless it expires or the signing secret changes.
-- Root or the `halfcloudrunner` account can read stored credentials and application data.
+- Root or the `halfcloudrunner` account can read stored credentials and App data.
 - Log redaction is best effort and cannot recognize every secret or transformed value.
 - If a user puts a credential in normal chat or an application writes it into logs, the AI may receive it. Use the dedicated protected environment input instead of chat for credentials.
+- Environment values supplied as part of an AI deployment request have already been exposed to that model and are not protected retroactively.
+- Route protection is HTTP Basic Auth with one credential pair per hostname. It has no users, roles, MFA, SSO, credential recovery, or built-in failed-login throttling.
 
 Protect the access code as an administrator credential. Restrict network access further with a firewall, VPN, or trusted reverse proxy when appropriate.
 
-## Container-level controls
+## Runtime controls
 
-Created applications use `no-new-privileges`, a process limit of 512, rootless networking, localhost-only publication, and bounded log rotation. Images cannot request extra privileges through HalfCloud.
+Created Services use `no-new-privileges`, a process limit of 512, rootless networking, localhost-only publication, and bounded log rotation. Images cannot request extra privileges through HalfCloud.
 
-HalfCloud does not currently enforce CPU, memory, or disk quotas. A buggy or malicious image may exhaust server resources, attack other services on the shared private network, send outbound traffic, or exploit a kernel or runtime vulnerability. Only run images you trust, use immutable tags or digests where practical, and keep the host updated.
+HalfCloud does not currently enforce CPU, memory, or disk quotas. A buggy or malicious image may exhaust server resources, attack other Services in the same App network, send outbound traffic, or exploit a kernel or runtime vulnerability. Per-App networks reduce accidental cross-App access but are not a substitute for trusting images, patching the host, or enforcing resource controls.
 
 ## AI and prompt-injection risk
 
@@ -99,9 +103,9 @@ For a higher-assurance environment, inspect the scripts before running them and 
 HalfCloud aims to make the safe path the easy path:
 
 - an unprivileged runtime instead of root;
-- rootless containers instead of the host daemon;
+- rootless Service containers instead of the host daemon;
 - structured and validated operations instead of shell access;
-- private networking instead of publishing every service;
+- isolated per-App networking instead of one shared network or publishing every Service;
 - explicit approval for selected destructive operations;
 - standard infrastructure that an administrator can still inspect directly.
 

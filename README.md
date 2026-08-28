@@ -41,7 +41,9 @@ You should not need to become a DevOps engineer just to share something you buil
 HalfCloud gives you one simple place to:
 
 - launch apps and services;
+- group web processes, databases, workers, queues, and caches into one App;
 - give them a public web address;
+- attach custom domains and password-protect individual addresses;
 - keep their data between restarts;
 - see whether they are running;
 - check server health and app logs;
@@ -53,7 +55,7 @@ There are no configuration files to memorize and no maze of cloud dashboards. De
 
 HalfCloud runs on a VPS: an affordable computer you rent online. Providers such as Hetzner, DigitalOcean, Linode, Vultr, and many others can give you one in a few minutes.
 
-That single server can hold your website, API, database, automations, workers, and other tools together.
+That single server can hold your website, API, database, automations, workers, and other tools together. Each App gets an isolated private network, while its Services can reach one another by name.
 
 You pay for the server instead of paying separately for every small piece of your app. Your apps and their data stay on infrastructure you control, without locking them into a custom hosting platform.
 
@@ -61,7 +63,7 @@ You pay for the server instead of paying separately for every small piece of you
 
 HalfCloud's AI can perform the everyday actions needed to run your apps, but it does not receive an unrestricted administrator terminal.
 
-It works through a limited set of built-in actions. Risky operations ask for confirmation, and applications are kept away from the sensitive parts of the server by default.
+It works through a limited set of built-in actions. Selected high-impact operations ask for confirmation, and applications are kept away from the sensitive parts of the server by default.
 
 This does not make hosting risk-free, but it is a more careful approach than giving an AI full control and hoping for the best.
 
@@ -88,6 +90,7 @@ Before using a server that contains anything important, read [Install, uninstall
 
 ## Learn more
 
+- [What HalfCloud can do](docs/capabilities.md)
 - [Getting started](docs/getting-started.md)
 - [How HalfCloud works](docs/how-it-works.md)
 - [Why HalfCloud is safer than giving AI full server access](docs/why-is-it-safe.md)
