@@ -1,6 +1,9 @@
 interface RoutedApplication {
   hostname?: string;
-  domains?: Array<{ hostname: string }>;
+  domains?: Array<{
+    hostname: string;
+    access: { type: 'public' } | { type: 'basic_auth'; username: string; passwordHash: string };
+  }>;
   ports: Array<{ host: number; protocol: string }>;
   state: string;
 }
@@ -17,8 +20,13 @@ export class CaddyService {
       .map((application) => {
         const port = application.ports.find((candidate) => candidate.protocol === 'tcp')?.host;
         if (!port) return '';
-        const hostnames = application.domains?.map((domain) => domain.hostname) ?? [application.hostname!];
-        return `${hostnames.join(', ')} {\n  reverse_proxy 127.0.0.1:${port}\n}`;
+        const domains = application.domains ?? [{ hostname: application.hostname!, access: { type: 'public' as const } }];
+        return domains.map((domain) => {
+          const authentication = domain.access.type === 'basic_auth'
+            ? `  basic_auth {\n    ${domain.access.username} ${domain.access.passwordHash}\n  }\n`
+            : '';
+          return `${domain.hostname} {\n${authentication}  reverse_proxy 127.0.0.1:${port}\n}`;
+        }).join('\n\n');
       })
       .filter(Boolean);
     const caddyfile = `{
@@ -48,6 +56,6 @@ ${sites.join('\n\n')}
       body: caddyfile,
       signal: AbortSignal.timeout(10_000),
     });
-    if (!response.ok) throw new Error(`Caddy rejected the generated configuration: ${await response.text()}`);
+    if (!response.ok) throw new Error('Caddy rejected the generated proxy configuration');
   }
 }

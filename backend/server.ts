@@ -142,6 +142,14 @@ app.put('/api/containers/:id/domains/:hostname/primary', async (request, respons
 app.delete('/api/containers/:id/domains/:hostname', async (request, response) => {
   response.json(await docker.removeDomain(request.params.id, request.params.hostname, request.body?.allowManaged === true));
 });
+app.put('/api/routes/:routeId/basic-auth-requests/:requestId', async (request, response) => {
+  response.json(await docker.completeBasicAuthRequest(
+    request.params.routeId,
+    request.params.requestId,
+    z.string().min(1).max(128).parse(request.body?.username),
+    z.string().min(8).max(1024).parse(request.body?.password),
+  ));
+});
 
 app.post('/api/chat', async (request, response) => {
   const requestId = randomUUID();

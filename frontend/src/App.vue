@@ -36,6 +36,7 @@ const environmentDialog = reactive<{
 const environmentSnapshot = ref('[]');
 const revealedEnvironmentValues = reactive(new Set<string>());
 const environmentRequestForms = reactive<Record<string, { value: string; protectedFromAI: boolean; saving: boolean; error: string }>>({});
+const basicAuthRequestForms = reactive<Record<string, { username: string; password: string; saving: boolean; error: string }>>({});
 const logs = ref<{ id: string; name: string; content: string; tail: number; search: string; reverse: boolean; loading: boolean; error: string } | null>(null);
 const prompt = ref('');
 const transcript = ref<HTMLElement>();
@@ -119,9 +120,49 @@ function toolLabel(part: Record<string, unknown>) {
     repairStorageOwnership: 'Repairing storage ownership',
     listServiceDomains: 'Inspecting service domains', addServiceDomain: 'Adding service domain',
     removeServiceDomain: 'Removing service domain', setPrimaryServiceDomain: 'Changing primary domain',
+    inspectRouteAccess: 'Inspecting route access', requestBasicAuthSetup: 'Protecting route',
+    requestBasicAuthPasswordChange: 'Changing route credentials', removeRouteProtection: 'Making route public',
     getContainerLogs: 'Reading logs', getContainerStats: 'Reading container metrics', getServerStats: 'Reading server metrics',
   };
   return labels[name] ?? name;
+}
+
+function basicAuthRequest(part: Record<string, unknown>) {
+  const name = toolName(part);
+  if (name !== 'requestBasicAuthSetup' && name !== 'requestBasicAuthPasswordChange') return undefined;
+  const output = recordValue(part.output);
+  const requestId = output?.requestId;
+  const routeId = output?.routeId;
+  if (!output || typeof requestId !== 'string' || typeof routeId !== 'string') return undefined;
+  if (!basicAuthRequestForms[requestId]) basicAuthRequestForms[requestId] = { username: '', password: '', saving: false, error: '' };
+  return {
+    requestId,
+    routeId,
+    hostname: typeof output.hostname === 'string' ? output.hostname : 'this route',
+    changing: output.operation === 'change',
+    status: output.status === 'completed' ? 'completed' : 'pending',
+    form: basicAuthRequestForms[requestId]!,
+  };
+}
+
+async function submitBasicAuthRequest(part: Record<string, unknown>) {
+  const request = basicAuthRequest(part);
+  if (!request || request.status === 'completed' || !request.form.username || request.form.password.length < 8) return;
+  request.form.saving = true;
+  request.form.error = '';
+  try {
+    const result = await api<Record<string, unknown>>(`/api/routes/${encodeURIComponent(request.routeId)}/basic-auth-requests/${encodeURIComponent(request.requestId)}`, {
+      method: 'PUT',
+      body: JSON.stringify({ username: request.form.username, password: request.form.password }),
+    });
+    request.form.password = '';
+    part.output = result;
+    await refreshDashboard();
+  } catch (error) {
+    request.form.error = error instanceof Error ? error.message : 'Could not configure password protection';
+  } finally {
+    request.form.saving = false;
+  }
 }
 
 function toolState(part: Record<string, unknown>) {
@@ -233,6 +274,7 @@ function approvalCopy(part: Record<string, unknown>) {
   const name = toolName(part);
   if (name === 'deleteManagedVolume') return { title: 'Delete this volume permanently?', detail: 'All data in this managed volume will be permanently removed.' };
   if (name === 'repairStorageOwnership') return { title: 'Repair this storage ownership?', detail: 'The application may be briefly stopped while ownership is changed recursively.' };
+  if (name === 'removeRouteProtection') return { title: 'Make this route public?', detail: 'Anyone who knows the URL will be able to access it without a password.' };
   return { title: 'Delete this application permanently?', detail: 'The container will be removed. Its image and managed data will remain.' };
 }
 
@@ -622,6 +664,40 @@ onBeforeUnmount(() => {
                       </button>
                     </form>
                   </div>
+                  <div v-if="basicAuthRequest(toolPart(part)!)" class="environment-request-widget basic-auth-widget">
+                    <template v-if="basicAuthRequest(toolPart(part)!)!.status === 'completed'">
+                      <strong>Password protection enabled</strong>
+                      <p>Credentials were configured directly in HalfCloud and were not added to this conversation.</p>
+                    </template>
+                    <form v-else @submit.prevent="submitBasicAuthRequest(toolPart(part)!)">
+                      <strong>{{ basicAuthRequest(toolPart(part)!)!.changing ? 'Change route credentials' : 'Protect with password' }}</strong>
+                      <p>{{ basicAuthRequest(toolPart(part)!)!.hostname }}</p>
+                      <label>Username</label>
+                      <input
+                        :value="basicAuthRequest(toolPart(part)!)!.form.username"
+                        autocomplete="username"
+                        maxlength="128"
+                        pattern="[A-Za-z0-9][A-Za-z0-9._@-]*"
+                        required
+                        @input="basicAuthRequest(toolPart(part)!)!.form.username = ($event.target as HTMLInputElement).value"
+                      >
+                      <label>Password</label>
+                      <input
+                        type="password"
+                        autocomplete="new-password"
+                        minlength="8"
+                        maxlength="1024"
+                        required
+                        :value="basicAuthRequest(toolPart(part)!)!.form.password"
+                        @input="basicAuthRequest(toolPart(part)!)!.form.password = ($event.target as HTMLInputElement).value"
+                      >
+                      <p>At least 8 characters. The password goes directly to HalfCloud, is immediately hashed, and is never sent to AI.</p>
+                      <p v-if="basicAuthRequest(toolPart(part)!)!.form.error" class="form-error">{{ basicAuthRequest(toolPart(part)!)!.form.error }}</p>
+                      <button class="button primary" type="submit" :disabled="basicAuthRequest(toolPart(part)!)!.form.saving">
+                        {{ basicAuthRequest(toolPart(part)!)!.form.saving ? 'Applying…' : basicAuthRequest(toolPart(part)!)!.changing ? 'Change credentials' : 'Enable protection' }}
+                      </button>
+                    </form>
+                  </div>
                   <div v-if="approvalRequest(toolPart(part)!)" class="approval-widget">
                     <strong>{{ approvalCopy(toolPart(part)!).title }}</strong>
                     <p>{{ approvalCopy(toolPart(part)!).detail }}</p>
@@ -678,6 +754,7 @@ onBeforeUnmount(() => {
                 <small>
                   <b v-if="domain.primary">Primary</b>
                   <b v-if="domain.managed">HalfCloud domain</b>
+                  <b class="access-state" :class="domain.access.type">{{ domain.access.type === 'basic_auth' ? 'Password protected' : 'Public' }}</b>
                   <span>{{ domain.httpsReady ? 'HTTPS ready' : domain.dnsConfigured ? 'DNS ready · HTTPS pending' : `Point DNS to ${domain.dnsTarget || 'this server'}` }}</span>
                 </small>
               </div>

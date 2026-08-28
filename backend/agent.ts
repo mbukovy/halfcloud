@@ -45,6 +45,24 @@ export function sanitizeAgentMessages(messages: UIMessage[]): UIMessage[] {
 
       // Tool history is browser-controlled context. Never replay an environment mutation value to the provider.
       if (name === 'setEnvironmentVariable') return [];
+      if (name === 'requestBasicAuthSetup' || name === 'requestBasicAuthPasswordChange') {
+        const input = record.input as Record<string, unknown> | undefined;
+        const output = record.output as Record<string, unknown> | undefined;
+        return [{
+          ...record,
+          input: typeof input?.routeId === 'string' ? { routeId: input.routeId } : {},
+          ...(output ? { output: {
+            ...(typeof output.requestId === 'string' ? { requestId: output.requestId } : {}),
+            ...(typeof output.routeId === 'string' ? { routeId: output.routeId } : {}),
+            ...(typeof output.hostname === 'string' ? { hostname: output.hostname } : {}),
+            ...(typeof output.operation === 'string' ? { operation: output.operation } : {}),
+            ...(typeof output.status === 'string' ? { status: output.status } : {}),
+            ...(typeof output.access === 'string' ? { access: output.access } : {}),
+            ...(typeof output.username === 'string' ? { username: output.username } : {}),
+            ...(typeof output.success === 'boolean' ? { success: output.success } : {}),
+          } } : {}),
+        } as typeof part];
+      }
       if (name !== 'createApplication' || typeof record.input !== 'object' || record.input === null) return [part];
       const { environment: _environment, ...safeInput } = record.input as Record<string, unknown>;
       return [{ ...record, input: safeInput } as typeof part];
@@ -102,6 +120,9 @@ Rules:
 - When the user adds the first custom domain, prefer making it primary while preserving the HalfCloud-generated domain. Do not remove or replace any existing domain unless explicitly requested or required to resolve a conflict.
 - The primary domain is the preferred public URL, but every configured domain continues routing directly to the service. Changing it does not imply changing arbitrary application environment variables.
 - External DNS is the user's responsibility. When adding a custom domain, report the DNS target returned by the tool and explain that HTTPS becomes ready after DNS points to this server; Caddy manages the certificate.
+- HTTP routes may be public or password protected independently, even when they route to the same application. Use inspectRouteAccess when the route's access state is unknown.
+- Never ask for a Basic Auth username or password in chat and never pass credentials as tool arguments. Use requestBasicAuthSetup or requestBasicAuthPasswordChange so the trusted HalfCloud widget collects credentials outside AI context.
+- Removing route protection makes that hostname publicly accessible. Clearly state this consequence before calling removeRouteProtection; the interface requires explicit user approval.
 - Environment variables may be protected from AI. For protected variables, you can see their name and configuration status but never their value.
 - Never ask the user to paste API keys, passwords, tokens, credentials, or other sensitive values into chat. Use requestEnvironmentVariable so the user can submit the value directly to HalfCloud with AI protection enabled by default.
 - Use setEnvironmentVariable only for non-sensitive configuration that may remain visible to AI, such as NODE_ENV, LOG_LEVEL, PORT, or a public APP_URL. Never use it for credentials.
@@ -213,6 +234,26 @@ export async function createChatResponse(
       inputSchema: z.object({ containerId, hostname: z.string().min(1) }),
       execute: ({ containerId, hostname }) => docker.setPrimaryDomain(containerId, hostname),
     }),
+    inspectRouteAccess: tool({
+      description: 'Inspect whether one HTTP route is public or password protected. Password hashes are never returned.',
+      inputSchema: z.object({ routeId: z.string().startsWith('route_') }),
+      execute: ({ routeId }) => docker.inspectRouteAccess(routeId),
+    }),
+    requestBasicAuthSetup: tool({
+      description: 'Open a trusted credential widget to password protect a public HTTPS route. This tool intentionally accepts no credentials.',
+      inputSchema: z.object({ routeId: z.string().startsWith('route_') }),
+      execute: ({ routeId }) => docker.requestBasicAuthSetup(routeId),
+    }),
+    requestBasicAuthPasswordChange: tool({
+      description: 'Open a trusted credential widget to replace credentials for a protected HTTPS route. This tool intentionally accepts no credentials.',
+      inputSchema: z.object({ routeId: z.string().startsWith('route_') }),
+      execute: ({ routeId }) => docker.requestBasicAuthPasswordChange(routeId),
+    }),
+    removeRouteProtection: tool({
+      description: 'Remove password protection and make an HTTP route publicly accessible. Requires explicit user approval.',
+      inputSchema: z.object({ routeId: z.string().startsWith('route_') }),
+      execute: ({ routeId }) => docker.removeRouteProtection(routeId),
+    }),
     listManagedVolumes: tool({
       description: 'List HalfCloud-managed named volumes and show whether each is attached or orphaned.',
       inputSchema: z.object({ application: z.string().min(1).optional() }),
@@ -250,7 +291,7 @@ export async function createChatResponse(
     model: provider.responses(settings.deployment),
     instructions: SYSTEM_PROMPT,
     tools,
-    toolApproval: { deleteApplication: 'user-approval', deleteManagedVolume: 'user-approval', repairStorageOwnership: 'user-approval' },
+    toolApproval: { deleteApplication: 'user-approval', deleteManagedVolume: 'user-approval', repairStorageOwnership: 'user-approval', removeRouteProtection: 'user-approval' },
   });
   return createAgentUIStreamResponse({
     agent,

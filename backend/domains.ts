@@ -1,19 +1,31 @@
 import { resolve4, resolve6 } from 'node:dns/promises';
+import { randomUUID } from 'node:crypto';
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import tls from 'node:tls';
 import { z } from 'zod';
 
 const hostnamePattern = /^(?=.{1,253}$)(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$/;
+const publicAccessSchema = z.object({ type: z.literal('public') });
+const basicAuthAccessSchema = z.object({
+  type: z.literal('basic_auth'),
+  username: z.string().min(1),
+  passwordHash: z.string().min(1),
+});
 const domainSchema = z.object({
+  id: z.string().startsWith('route_'),
   hostname: z.string().regex(hostnamePattern),
   primary: z.boolean(),
   managed: z.boolean(),
+  access: z.discriminatedUnion('type', [publicAccessSchema, basicAuthAccessSchema]),
 });
 const domainsSchema = z.array(domainSchema).min(1).refine((domains) => domains.filter((domain) => domain.primary).length === 1, 'Exactly one domain must be primary');
 
 export type ServiceDomain = z.infer<typeof domainSchema>;
-export type DomainState = ServiceDomain & {
+export type RouteAccess = ServiceDomain['access'];
+export type PublicRouteAccess = { type: 'public' } | { type: 'basic_auth'; username: string };
+export type DomainState = Omit<ServiceDomain, 'access'> & {
+  access: PublicRouteAccess;
   dnsConfigured: boolean;
   httpsReady: boolean;
   state: 'pending' | 'ready' | 'error';
@@ -37,11 +49,14 @@ export class DomainStore {
 
   async get(application: string, legacyHostname?: string): Promise<ServiceDomain[]> {
     try {
-      return this.validate(JSON.parse(await readFile(this.filePath(application), 'utf8')));
+      const value = JSON.parse(await readFile(this.filePath(application), 'utf8'));
+      const normalized = this.normalizeStored(value);
+      if (JSON.stringify(value) !== JSON.stringify(normalized)) await this.save(application, normalized);
+      return normalized;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
       if (!legacyHostname) return [];
-      const migrated = [{ hostname: normalizeHostname(legacyHostname), primary: true, managed: true }];
+      const migrated = [this.createDomain(normalizeHostname(legacyHostname), true, true)];
       await this.save(application, migrated);
       return migrated;
     }
@@ -51,8 +66,8 @@ export class DomainStore {
     const managed = normalizeHostname(managedHostname);
     const custom = customHostname ? normalizeHostname(customHostname) : undefined;
     const domains: ServiceDomain[] = custom && custom !== managed
-      ? [{ hostname: custom, primary: true, managed: false }, { hostname: managed, primary: false, managed: true }]
-      : [{ hostname: managed, primary: true, managed: true }];
+      ? [this.createDomain(custom, true, false), this.createDomain(managed, false, true)]
+      : [this.createDomain(managed, true, true)];
     await this.save(application, domains);
     return domains;
   }
@@ -64,7 +79,7 @@ export class DomainStore {
     const makePrimary = domains.every((domain) => domain.managed);
     const updated = [
       ...domains.map((domain) => ({ ...domain, primary: makePrimary ? false : domain.primary })),
-      { hostname: normalized, primary: makePrimary, managed: false },
+      this.createDomain(normalized, makePrimary, false),
     ];
     await this.save(application, updated);
     return updated;
@@ -101,7 +116,7 @@ export class DomainStore {
 
   async withReadiness(domains: ServiceDomain[]): Promise<DomainState[]> {
     return Promise.all(domains.map(async (domain) => {
-      if (!this.serverAddress) return { ...domain, dnsConfigured: false, httpsReady: false, state: 'error' as const };
+      if (!this.serverAddress) return { ...this.publicDomain(domain), dnsConfigured: false, httpsReady: false, state: 'error' as const };
       try {
         const addresses = await Promise.all([
           resolve4(domain.hostname).catch(() => []),
@@ -110,14 +125,14 @@ export class DomainStore {
         const dnsConfigured = addresses.includes(this.serverAddress);
         const httpsReady = dnsConfigured ? await this.checkHttps(domain.hostname) : false;
         return {
-          ...domain,
+          ...this.publicDomain(domain),
           dnsConfigured,
           httpsReady,
           state: httpsReady ? 'ready' as const : 'pending' as const,
           dnsTarget: this.serverAddress,
         };
       } catch {
-        return { ...domain, dnsConfigured: false, httpsReady: false, state: 'error' as const, dnsTarget: this.serverAddress };
+        return { ...this.publicDomain(domain), dnsConfigured: false, httpsReady: false, state: 'error' as const, dnsTarget: this.serverAddress };
       }
     }));
   }
@@ -126,6 +141,29 @@ export class DomainStore {
     const domains = domainsSchema.parse(value).map((domain) => ({ ...domain, hostname: normalizeHostname(domain.hostname) }));
     if (new Set(domains.map((domain) => domain.hostname)).size !== domains.length) throw new Error('Service domains must be unique');
     return domains;
+  }
+
+  private normalizeStored(value: unknown) {
+    if (!Array.isArray(value)) return this.validate(value);
+    return this.validate(value.map((domain) => {
+      if (typeof domain !== 'object' || domain === null || Array.isArray(domain)) return domain;
+      return {
+        ...domain,
+        id: typeof domain.id === 'string' ? domain.id : `route_${randomUUID()}`,
+        access: domain.access ?? { type: 'public' },
+      };
+    }));
+  }
+
+  private createDomain(hostname: string, primary: boolean, managed: boolean): ServiceDomain {
+    return { id: `route_${randomUUID()}`, hostname, primary, managed, access: { type: 'public' } };
+  }
+
+  private publicDomain(domain: ServiceDomain) {
+    const access: PublicRouteAccess = domain.access.type === 'basic_auth'
+      ? { type: 'basic_auth', username: domain.access.username }
+      : { type: 'public' };
+    return { id: domain.id, hostname: domain.hostname, primary: domain.primary, managed: domain.managed, access };
   }
 
   private async save(application: string, value: ServiceDomain[]) {

@@ -3,6 +3,7 @@ import { CaddyService } from './caddy.js';
 import { DockerService, type CreateContainerInput } from './docker.js';
 import { DomainStore, normalizeHostname, type ServiceDomain } from './domains.js';
 import { EnvironmentStore, assertEnvironmentVariableName, serializeEnvironmentForAgent, type EnvironmentVariable } from './environment.js';
+import { RouteAccessRequestStore, assertBasicAuthPassword, assertBasicAuthUsername, hashBasicAuthPassword } from './route-access.js';
 
 export class ApplicationService {
   constructor(
@@ -10,6 +11,8 @@ export class ApplicationService {
     private readonly caddy = new CaddyService(),
     private readonly domains = new DomainStore(),
     private readonly environment = new EnvironmentStore(),
+    private readonly accessRequests = new RouteAccessRequestStore(),
+    private readonly hashPassword: (password: string) => Promise<string> = hashBasicAuthPassword,
   ) {}
 
   ping() { return this.docker.ping(); }
@@ -199,6 +202,49 @@ export class ApplicationService {
     return this.mutateDomains(application, (name, legacy) => this.domains.setPrimary(name, legacy, hostname));
   }
 
+  async inspectRouteAccess(routeId: string) {
+    const { domain } = await this.route(routeId);
+    return domain.access.type === 'basic_auth'
+      ? { type: 'basic_auth' as const, username: domain.access.username }
+      : { type: 'public' as const };
+  }
+
+  async requestBasicAuthSetup(routeId: string) {
+    return this.requestBasicAuth(routeId, 'setup');
+  }
+
+  async requestBasicAuthPasswordChange(routeId: string) {
+    return this.requestBasicAuth(routeId, 'change');
+  }
+
+  async completeBasicAuthRequest(routeId: string, requestId: string, username: string, password: string) {
+    assertBasicAuthUsername(username);
+    assertBasicAuthPassword(password);
+    const located = await this.route(routeId);
+    const request = await this.accessRequests.get(located.application.name, requestId);
+    if (request.routeId !== routeId || request.status !== 'pending') throw new Error('Basic Auth request is no longer pending');
+    if (request.operation === 'setup' && located.domain.access.type !== 'public') throw new Error('Route is already password protected');
+    if (request.operation === 'change' && located.domain.access.type !== 'basic_auth') throw new Error('Route is not password protected');
+
+    const passwordHash = await this.hashPassword(password);
+    const updated = located.domains.map((domain) => domain.id === routeId
+      ? { ...domain, access: { type: 'basic_auth' as const, username, passwordHash } }
+      : domain);
+    await this.replaceRouteAccess(located.application.name, located.domains, updated);
+    await this.accessRequests.complete(located.application.name, requestId);
+    return { success: true, requestId, routeId, access: 'basic_auth' as const, username, status: 'completed' as const };
+  }
+
+  async removeRouteProtection(routeId: string) {
+    const located = await this.route(routeId);
+    if (located.domain.access.type === 'public') return { success: true, routeId, access: 'public' as const };
+    const updated = located.domains.map((domain) => domain.id === routeId
+      ? { ...domain, access: { type: 'public' as const } }
+      : domain);
+    await this.replaceRouteAccess(located.application.name, located.domains, updated);
+    return { success: true, routeId, access: 'public' as const };
+  }
+
   private async mutateDomains(
     application: { name: string; hostname?: string },
     mutate: (name: string, legacyHostname?: string) => Promise<ServiceDomain[]>,
@@ -210,6 +256,45 @@ export class ApplicationService {
       return this.domains.withReadiness(updated);
     } catch (error) {
       await this.domains.replace(application.name, previous);
+      throw error;
+    }
+  }
+
+  private async requestBasicAuth(routeId: string, operation: 'setup' | 'change') {
+    const located = await this.route(routeId);
+    if (operation === 'setup' && located.domain.access.type !== 'public') throw new Error('Route is already password protected');
+    if (operation === 'change' && located.domain.access.type !== 'basic_auth') throw new Error('Route is not password protected');
+    const readiness = (await this.domains.withReadiness([located.domain]))[0]!;
+    if (!readiness.httpsReady) throw new Error('Password protection requires working HTTPS for this route');
+    const request = await this.accessRequests.create(located.application.name, routeId, operation);
+    return {
+      requestId: request.id,
+      routeId,
+      hostname: located.domain.hostname,
+      operation,
+      status: request.status,
+    };
+  }
+
+  private async route(routeId: string) {
+    const matches: Array<{ application: { name: string; hostname?: string }; domain: ServiceDomain; domains: ServiceDomain[] }> = [];
+    for (const application of await this.docker.listContainers(false)) {
+      const domains = await this.domains.get(application.name, application.hostname);
+      const domain = domains.find((candidate) => candidate.id === routeId);
+      if (domain) matches.push({ application, domain, domains });
+    }
+    if (!matches.length) throw new Error(`HTTP route ${routeId} was not found`);
+    if (matches.length > 1) throw new Error(`HTTP route ${routeId} is not unique`);
+    return matches[0]!;
+  }
+
+  private async replaceRouteAccess(application: string, previous: ServiceDomain[], updated: ServiceDomain[]) {
+    await this.domains.replace(application, updated);
+    try {
+      await this.syncRoutes();
+    } catch (error) {
+      await this.domains.replace(application, previous);
+      await this.syncRoutes().catch(() => undefined);
       throw error;
     }
   }

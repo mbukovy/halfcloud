@@ -141,6 +141,7 @@ input:focus, textarea:focus { border-color: var(--ink); box-shadow: 0 0 0 3px #1
 .environment-request-widget p { margin: 8px 0; color: var(--muted); font-size: 10px; line-height: 1.55; }
 .environment-request-widget label { margin-top: 15px; }
 .environment-request-widget .button { margin-top: 8px; padding: 9px 18px; }
+.basic-auth-widget input + label { margin-top: 12px; }
 .chat-error { padding: 10px; background: #fff0eb; white-space: pre-wrap; overflow-wrap: anywhere; }
 .conversation-footer { padding-bottom: 7px; }
 .composer { margin: 0 30px 8px; border: 1px solid #c7c4ba; background: #fffefb; border-radius: 5px; display: flex; align-items: end; padding: 8px; box-shadow: 0 8px 28px #19231f0c; }
@@ -195,6 +196,8 @@ input:focus, textarea:focus { border-color: var(--ink); box-shadow: 0 0 0 3px #1
 .domain-name > strong { display: block; font: 500 10px 'DM Mono', monospace; overflow-wrap: anywhere; }
 .domain-name small { display: flex; flex-wrap: wrap; gap: 4px 7px; margin-top: 4px; color: var(--muted); font: 8px 'DM Mono', monospace; }
 .domain-name small b { color: #a94325; font-weight: 600; }
+.domain-name small .access-state.public { color: #387861; }
+.domain-name small .access-state.basic_auth { color: #8b4b34; }
 .domain-actions { display: flex; align-items: center; gap: 4px; }
 .domain-actions a, .domain-actions button { border: 0; background: none; color: #4d5550; padding: 4px; font: 8px 'DM Mono', monospace; text-decoration: none; cursor: pointer; white-space: nowrap; }
 .domain-actions a:hover, .domain-actions button:hover { color: var(--accent); }

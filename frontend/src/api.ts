@@ -33,6 +33,7 @@ export interface ContainerInfo {
 }
 
 export interface ServiceDomain {
+  id: string;
   hostname: string;
   primary: boolean;
   managed: boolean;
@@ -40,6 +41,7 @@ export interface ServiceDomain {
   httpsReady: boolean;
   state: 'pending' | 'ready' | 'error';
   dnsTarget?: string;
+  access: { type: 'public' } | { type: 'basic_auth'; username: string };
 }
 
 export interface EnvironmentVariable {

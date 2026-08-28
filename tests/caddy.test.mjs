@@ -48,11 +48,42 @@ test('routes every domain attached to an application', async (t) => {
   process.env.HALFCLOUD_HOSTNAME = 'halfcloud.example.com';
 
   await new CaddyService().sync([{
-    domains: [{ hostname: 'n8n.example.com' }, { hostname: 'n8n.127.0.0.1.nip.io' }],
+    domains: [
+      { hostname: 'n8n.example.com', access: { type: 'public' } },
+      { hostname: 'n8n.127.0.0.1.nip.io', access: { type: 'public' } },
+    ],
     ports: [{ host: 10023, protocol: 'tcp' }],
     state: 'running',
   }]);
 
-  assert.match(body, /n8n\.example\.com, n8n\.127\.0\.0\.1\.nip\.io \{/);
+  assert.match(body, /n8n\.example\.com \{/);
+  assert.match(body, /n8n\.127\.0\.0\.1\.nip\.io \{/);
   assert.match(body, /reverse_proxy 127\.0\.0\.1:10023/);
+});
+
+test('configures Basic Auth independently for one route', async (t) => {
+  let body = '';
+  const server = createServer((incoming, response) => {
+    incoming.setEncoding('utf8');
+    incoming.on('data', (chunk) => (body += chunk));
+    incoming.on('end', () => response.writeHead(200).end());
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => server.close());
+  const address = server.address();
+  assert(address && typeof address === 'object');
+  process.env.CADDY_ADMIN_URL = `http://127.0.0.1:${address.port}`;
+  process.env.HALFCLOUD_HOSTNAME = 'halfcloud.example.com';
+
+  await new CaddyService().sync([{
+    domains: [
+      { hostname: 'public.example.com', access: { type: 'public' } },
+      { hostname: 'admin.example.com', access: { type: 'basic_auth', username: 'michal', passwordHash: '$argon2id$hash' } },
+    ],
+    ports: [{ host: 10023, protocol: 'tcp' }],
+    state: 'running',
+  }]);
+
+  assert.doesNotMatch(body.match(/public\.example\.com \{[\s\S]*?\n\}/)?.[0] ?? '', /basic_auth/);
+  assert.match(body, /admin\.example\.com \{\n  basic_auth \{\n    michal \$argon2id\$hash\n  \}/);
 });

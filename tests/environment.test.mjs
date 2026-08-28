@@ -110,3 +110,22 @@ test('provider-bound history excludes environment mutation values', () => {
   assert.equal('environment' in sanitized[0].parts.find((part) => part.type === 'tool-createApplication').input, false);
   assert.equal(sanitized[0].parts.find((part) => part.type === 'text').text, 'Deployment complete.');
 });
+
+test('provider-bound history strips credentials from Basic Auth widget records', () => {
+  const messages = [{
+    id: 'message',
+    role: 'assistant',
+    parts: [{
+      type: 'tool-requestBasicAuthSetup',
+      input: { routeId: 'route_one', password: 'never-send-this' },
+      output: { requestId: 'authreq_one', routeId: 'route_one', status: 'completed', username: 'michal', password: 'never-send-this', passwordHash: '$argon2id$secret' },
+    }],
+  }];
+
+  const sanitized = sanitizeAgentMessages(messages);
+  const serialized = JSON.stringify(sanitized);
+  assert.equal(serialized.includes('never-send-this'), false);
+  assert.equal(serialized.includes('$argon2id$secret'), false);
+  assert.deepEqual(sanitized[0].parts[0].input, { routeId: 'route_one' });
+  assert.equal(sanitized[0].parts[0].output.username, 'michal');
+});
