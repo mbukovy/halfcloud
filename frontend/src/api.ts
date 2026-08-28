@@ -24,11 +24,22 @@ export interface ContainerInfo {
   state: string;
   status: string;
   hostname?: string;
+  domains: ServiceDomain[];
   ports: Array<{ host: number; container: number; protocol: string }>;
   internalPorts: Array<{ port: number; protocol: string }>;
   cpuPercent: number;
   memoryUsed: number;
   memoryLimit: number;
+}
+
+export interface ServiceDomain {
+  hostname: string;
+  primary: boolean;
+  managed: boolean;
+  dnsConfigured: boolean;
+  httpsReady: boolean;
+  state: 'pending' | 'ready' | 'error';
+  dnsTarget?: string;
 }
 
 export interface PublicSettings {

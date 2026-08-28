@@ -73,7 +73,7 @@ The installer detects the public IPv4 address and sets the base domain to `<ip>.
 
 Caddy's admin API listens on `127.0.0.1:2019`. HalfCloud sends it a complete generated Caddyfile whenever managed application state changes. Only running containers with a hostname and a published TCP port receive a route.
 
-Caddy obtains and renews public certificates. A custom hostname works when its DNS already points to the VPS and the server is reachable on ports 80 and 443.
+Caddy obtains and renews public certificates. Each public application can have multiple hostnames routing to the same container, with one marked as its primary public URL. The generated `nip.io` hostname remains attached when a custom hostname is added. A custom hostname works when its DNS points to the VPS and the server is reachable on ports 80 and 443.
 
 ## Data locations
 

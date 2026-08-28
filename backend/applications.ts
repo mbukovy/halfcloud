@@ -1,17 +1,27 @@
 import { CaddyService } from './caddy.js';
 import { DockerService, type CreateContainerInput } from './docker.js';
+import { DomainStore, normalizeHostname, type ServiceDomain } from './domains.js';
 
 export class ApplicationService {
   constructor(
     private readonly docker: DockerService,
     private readonly caddy = new CaddyService(),
+    private readonly domains = new DomainStore(),
   ) {}
 
   ping() { return this.docker.ping(); }
   getRuntimeInfo() { return this.docker.getRuntimeInfo(); }
   assertRootless() { return this.docker.assertRootless(); }
   ensureNetwork() { return this.docker.ensureNetwork(); }
-  listContainers(includeStats = true) { return this.docker.listContainers(includeStats); }
+  async listContainers(includeStats = true) {
+    const containers = await this.docker.listContainers(includeStats);
+    return Promise.all(containers.map(async (container) => {
+      const stored = await this.domains.get(container.name, container.hostname);
+      const domainStates = await this.domains.withReadiness(stored);
+      const primary = domainStates.find((domain) => domain.primary);
+      return { ...container, domains: domainStates, hostname: primary?.hostname };
+    }));
+  }
   getContainerLogs(id: string, tail?: number) { return this.docker.getContainerLogs(id, tail); }
   getContainerStats(id: string) { return this.docker.getContainerStats(id); }
   listManagedVolumes(application?: string) { return this.docker.listManagedVolumes(application); }
@@ -29,11 +39,15 @@ export class ApplicationService {
   async createContainer(input: CreateContainerInput) {
     const hasPublicTcpPort = Object.values(input.ports).some((target) => !target.includes('/') || target.endsWith('/tcp'));
     if (input.hostname && !hasPublicTcpPort) throw new Error('A hostname requires a published TCP port');
-    const hostname = input.hostname ?? (hasPublicTcpPort ? this.defaultHostname(input.name) : undefined);
-    const result = await this.docker.createContainer({ ...input, hostname });
+    const managedHostname = hasPublicTcpPort ? this.defaultHostname(input.name) : undefined;
+    const customHostname = input.hostname ? normalizeHostname(input.hostname) : undefined;
+    if (customHostname) await this.assertHostnameAvailable(customHostname);
+    const result = await this.docker.createContainer({ ...input, hostname: managedHostname });
     try {
+      const serviceDomains = managedHostname ? await this.domains.initialize(input.name, managedHostname, customHostname) : [];
       await this.syncRoutes();
-      return { ...result, ...(hostname ? { hostname, url: `https://${hostname}` } : {}) };
+      const primary = serviceDomains.find((domain) => domain.primary);
+      return { ...result, domains: serviceDomains, ...(primary ? { hostname: primary.hostname, url: `https://${primary.hostname}` } : {}) };
     } catch (error) {
       await this.docker.deleteContainer(result.id).catch(() => undefined);
       throw error;
@@ -65,7 +79,67 @@ export class ApplicationService {
   }
 
   async syncRoutes() {
-    await this.caddy.sync(await this.docker.listContainers(false));
+    const containers = await this.docker.listContainers(false);
+    await this.caddy.sync(await Promise.all(containers.map(async (container) => ({
+      ...container,
+      domains: await this.domains.get(container.name, container.hostname),
+    }))));
+  }
+
+  async listDomains(id: string) {
+    const application = await this.application(id);
+    return this.domains.withReadiness(await this.domains.get(application.name, application.hostname));
+  }
+
+  async addDomain(id: string, hostname: string) {
+    const application = await this.application(id, true);
+    const normalized = normalizeHostname(hostname);
+    await this.assertHostnameAvailable(normalized, application.name);
+    return this.mutateDomains(application, (name, legacy) => this.domains.add(name, legacy, normalized));
+  }
+
+  async removeDomain(id: string, hostname: string, allowManaged = false) {
+    const application = await this.application(id, true);
+    return this.mutateDomains(application, (name, legacy) => this.domains.remove(name, legacy, hostname, allowManaged));
+  }
+
+  async setPrimaryDomain(id: string, hostname: string) {
+    const application = await this.application(id, true);
+    return this.mutateDomains(application, (name, legacy) => this.domains.setPrimary(name, legacy, hostname));
+  }
+
+  private async mutateDomains(
+    application: { name: string; hostname?: string },
+    mutate: (name: string, legacyHostname?: string) => Promise<ServiceDomain[]>,
+  ) {
+    const previous = await this.domains.get(application.name, application.hostname);
+    const updated = await mutate(application.name, application.hostname);
+    try {
+      await this.syncRoutes();
+      return this.domains.withReadiness(updated);
+    } catch (error) {
+      await this.domains.replace(application.name, previous);
+      throw error;
+    }
+  }
+
+  private async application(id: string, requirePublic = false) {
+    const containers = await this.docker.listContainers(false);
+    const matches = containers.filter((container) => container.id === id || container.id.startsWith(id) || container.name === id);
+    if (!matches.length) throw new Error(`Managed application ${id} was not found`);
+    if (matches.length > 1) throw new Error(`Application id ${id} is ambiguous; use the exact name or full id`);
+    const application = matches[0]!;
+    if (requirePublic && !application.ports.some((port) => port.protocol === 'tcp')) throw new Error(`${application.name} does not have a published TCP port`);
+    return application;
+  }
+
+  private async assertHostnameAvailable(hostname: string, exceptApplication?: string) {
+    for (const application of await this.docker.listContainers(false)) {
+      if (application.name === exceptApplication) continue;
+      const domains = await this.domains.get(application.name, application.hostname);
+      if (domains.some((domain) => domain.hostname === hostname)) throw new Error(`${hostname} is already attached to ${application.name}`);
+    }
+    if (hostname === process.env.HALFCLOUD_HOSTNAME?.toLowerCase()) throw new Error(`${hostname} is reserved for HalfCloud`);
   }
 
   private defaultHostname(name: string) {

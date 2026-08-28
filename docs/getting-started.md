@@ -89,7 +89,7 @@ Every managed container joins the private `halfcloud` Docker network. Other appl
 
 ## Use a custom domain
 
-Create an `A` record pointing the hostname to the VPS public IPv4 address, then ask HalfCloud to use that exact hostname when deploying the application. Caddy obtains and renews the TLS certificate after public DNS resolves and ports 80 and 443 can reach the server.
+Create an `A` record pointing the hostname to the VPS public IPv4 address, then ask HalfCloud to add that hostname to the application. The generated `nip.io` address remains available as a fallback, and the first custom hostname becomes the primary public URL. Caddy routes every attached hostname and obtains and renews their TLS certificates after public DNS resolves and ports 80 and 443 can reach the server.
 
 HalfCloud does not manage DNS records. The default `nip.io` names work without a DNS account because the server IP is embedded in the hostname.
 

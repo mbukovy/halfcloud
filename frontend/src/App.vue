@@ -3,7 +3,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } 
 import { useChat } from '@ai-sdk/vue';
 import { DefaultChatTransport, lastAssistantMessageIsCompleteWithApprovalResponses } from 'ai';
 import MarkdownIt from 'markdown-it';
-import { api, type ContainerInfo, type PublicSettings, type ServerStats } from './api';
+import { api, type ContainerInfo, type PublicSettings, type ServerStats, type ServiceDomain } from './api';
 
 const markdown = new MarkdownIt({ html: false, linkify: true, breaks: true });
 markdown.renderer.rules.link_open = (tokens, index, options, environment, renderer) => {
@@ -25,6 +25,8 @@ const containers = ref<ContainerInfo[]>([]);
 const server = ref<ServerStats | null>(null);
 const dashboardError = ref('');
 const actionId = ref('');
+const domainAction = ref('');
+const domainDialog = reactive<{ container: ContainerInfo | null; hostname: string; error: string; saving: boolean }>({ container: null, hostname: '', error: '', saving: false });
 const logs = ref<{ name: string; content: string } | null>(null);
 const prompt = ref('');
 const transcript = ref<HTMLElement>();
@@ -66,12 +68,6 @@ function renderMarkdown(text: string) {
   return markdown.render(text);
 }
 
-function publicUrl(container: ContainerInfo) {
-  return container.hostname && container.ports.some((port) => port.protocol === 'tcp')
-    ? `https://${container.hostname}`
-    : undefined;
-}
-
 function privateAddresses(container: ContainerInfo) {
   return container.internalPorts
     .filter((port) => port.protocol === 'tcp')
@@ -100,6 +96,8 @@ function toolLabel(part: Record<string, unknown>) {
     listManagedVolumes: 'Inspecting managed storage', inspectManagedVolume: 'Inspecting managed volume',
     reconcileManagedVolume: 'Reconciling managed volume', deleteManagedVolume: 'Deleting managed volume',
     repairStorageOwnership: 'Repairing storage ownership',
+    listServiceDomains: 'Inspecting service domains', addServiceDomain: 'Adding service domain',
+    removeServiceDomain: 'Removing service domain', setPrimaryServiceDomain: 'Changing primary domain',
     getContainerLogs: 'Reading logs', getContainerStats: 'Reading container metrics', getServerStats: 'Reading server metrics',
   };
   return labels[name] ?? name;
@@ -159,6 +157,7 @@ function toolDetails(part: Record<string, unknown>) {
   if (name === 'setEnvironmentVariable' && typeof input?.key === 'string') details.push({ text: `Environment key: ${input.key}` });
   if (typeof input?.volumeName === 'string') details.push({ text: `Volume: ${input.volumeName}` });
   if (typeof input?.mountTarget === 'string') details.push({ text: `Mount: ${input.mountTarget}` });
+  if (typeof input?.hostname === 'string' && name.includes('ServiceDomain')) details.push({ text: `Domain: ${input.hostname}` });
   if (name === 'listContainers' && Array.isArray(part.output)) details.push({ text: `Found ${part.output.length} managed application${part.output.length === 1 ? '' : 's'}` });
   if (typeof part.errorText === 'string') details.push({ text: part.errorText });
   return details;
@@ -326,6 +325,57 @@ async function showLogs(container: ContainerInfo) {
   }
 }
 
+function openDomainDialog(container: ContainerInfo) {
+  Object.assign(domainDialog, { container, hostname: '', error: '', saving: false });
+}
+
+async function addDomain() {
+  if (!domainDialog.container) return;
+  domainDialog.saving = true;
+  domainDialog.error = '';
+  try {
+    await api(`/api/containers/${encodeURIComponent(domainDialog.container.id)}/domains`, {
+      method: 'POST',
+      body: JSON.stringify({ hostname: domainDialog.hostname }),
+    });
+    domainDialog.container = null;
+    await refreshDashboard();
+  } catch (error) {
+    domainDialog.error = error instanceof Error ? error.message : 'Could not add domain';
+  } finally {
+    domainDialog.saving = false;
+  }
+}
+
+async function setPrimaryDomain(container: ContainerInfo, domain: ServiceDomain) {
+  await runDomainAction(container, domain, 'primary');
+}
+
+async function removeDomain(container: ContainerInfo, domain: ServiceDomain) {
+  const warning = domain.managed
+    ? `Remove HalfCloud-managed domain ${domain.hostname}? This removes the permanent fallback address.`
+    : `Remove ${domain.hostname} from ${container.name}?`;
+  if (!window.confirm(warning)) return;
+  await runDomainAction(container, domain, 'remove');
+}
+
+async function runDomainAction(container: ContainerInfo, domain: ServiceDomain, action: 'primary' | 'remove') {
+  domainAction.value = `${container.id}:${domain.hostname}`;
+  dashboardError.value = '';
+  try {
+    const base = `/api/containers/${encodeURIComponent(container.id)}/domains/${encodeURIComponent(domain.hostname)}`;
+    await api(action === 'primary' ? `${base}/primary` : base, {
+      method: action === 'primary' ? 'PUT' : 'DELETE',
+      body: JSON.stringify(action === 'remove' ? { allowManaged: domain.managed } : {}),
+    });
+    await refreshDashboard();
+  } catch (error) {
+    dashboardError.value = error instanceof Error ? error.message : `Domain ${action} failed`;
+  } finally {
+    domainAction.value = '';
+  }
+}
+
 watch(status, (current, previous) => {
   if (current === 'ready' && previous !== 'ready') void refreshDashboard();
 });
@@ -431,7 +481,7 @@ onBeforeUnmount(() => {
         </div>
         <div class="conversation-footer">
           <form class="composer" @submit.prevent="submitPrompt">
-            <textarea v-model="prompt" :disabled="!settings?.configured" rows="2" :placeholder="settings?.configured ? 'Tell HalfCloud what should be running…' : 'Configure Azure OpenAI to start…'" @keydown.enter.exact.prevent="submitPrompt"></textarea>
+            <textarea v-model="prompt" :disabled="!settings?.configured || chatBusy" rows="2" :placeholder="!settings?.configured ? 'Configure Azure OpenAI to start…' : chatBusy ? 'HalfCloud is working…' : 'Tell HalfCloud what should be running…'" @keydown.enter.exact.prevent="submitPrompt"></textarea>
             <button v-if="chatBusy" class="send-button stop" type="button" title="Stop" @click="stop">■</button>
             <button v-else class="send-button" type="submit" :disabled="!prompt.trim() || !settings?.configured" title="Send">↑</button>
           </form>
@@ -461,11 +511,25 @@ onBeforeUnmount(() => {
             <div><span>CPU</span><strong>{{ container.cpuPercent.toFixed(2) }}%</strong></div>
             <div><span>RAM</span><strong>{{ formatBytes(container.memoryUsed) }}</strong></div>
           </div>
-          <a v-if="publicUrl(container)" class="service-endpoint public" :href="publicUrl(container)" target="_blank" rel="noopener noreferrer">
-            <svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"></circle><path d="M3 12h18M12 3c2.4 2.5 3.6 5.5 3.6 9s-1.2 6.5-3.6 9c-2.4-2.5-3.6-5.5-3.6-9S9.6 5.5 12 3Z"></path></svg>
-            <span><small>PUBLIC URL</small><strong>{{ publicUrl(container) }}</strong></span>
-            <i aria-hidden="true">↗</i>
-          </a>
+          <section v-if="container.domains.length" class="domains-block">
+            <div class="domains-heading"><span>DOMAINS</span><button type="button" @click="openDomainDialog(container)">+ Add domain</button></div>
+            <div v-for="domain in container.domains" :key="domain.hostname" class="domain-row">
+              <span class="domain-state" :class="domain.state" :title="domain.httpsReady ? 'HTTPS ready' : domain.dnsConfigured ? 'DNS configured; waiting for HTTPS' : 'DNS not pointed to this server'"></span>
+              <div class="domain-name">
+                <strong>{{ domain.hostname }}</strong>
+                <small>
+                  <b v-if="domain.primary">Primary</b>
+                  <b v-if="domain.managed">HalfCloud domain</b>
+                  <span>{{ domain.httpsReady ? 'HTTPS ready' : domain.dnsConfigured ? 'DNS ready · HTTPS pending' : `Point DNS to ${domain.dnsTarget || 'this server'}` }}</span>
+                </small>
+              </div>
+              <div class="domain-actions">
+                <a :href="`https://${domain.hostname}`" target="_blank" rel="noopener noreferrer">Open</a>
+                <button v-if="!domain.primary" :disabled="domainAction === `${container.id}:${domain.hostname}`" @click="setPrimaryDomain(container, domain)">Make primary</button>
+                <button class="danger" :disabled="container.domains.length === 1 || domainAction === `${container.id}:${domain.hostname}`" @click="removeDomain(container, domain)">Remove</button>
+              </div>
+            </div>
+          </section>
           <div v-else class="service-endpoint private">
             <svg aria-hidden="true" viewBox="0 0 24 24"><rect x="5" y="10" width="14" height="11" rx="2"></rect><path d="M8 10V7a4 4 0 0 1 8 0v3"></path></svg>
             <span>
@@ -509,6 +573,21 @@ onBeforeUnmount(() => {
         <p class="eyebrow">RECENT OUTPUT / 200 LINES</p>
         <h2>{{ logs.name }} logs</h2>
         <pre>{{ logs.content }}</pre>
+      </section>
+    </div>
+
+    <div v-if="domainDialog.container" class="modal-backdrop" @click.self="domainDialog.container = null">
+      <section class="modal domain-modal">
+        <button class="modal-close" @click="domainDialog.container = null">×</button>
+        <p class="eyebrow">PUBLIC ROUTING</p>
+        <h2>Add domain to {{ domainDialog.container.name }}</h2>
+        <p>The existing HalfCloud address stays active. Point the new hostname's DNS record to this server.</p>
+        <form @submit.prevent="addDomain">
+          <label for="domain-hostname">Hostname</label>
+          <input id="domain-hostname" v-model="domainDialog.hostname" autofocus inputmode="url" autocomplete="off" placeholder="app.example.com" required>
+          <p v-if="domainDialog.error" class="form-error">{{ domainDialog.error }}</p>
+          <button class="button primary wide" :disabled="domainDialog.saving" type="submit">{{ domainDialog.saving ? 'Adding…' : 'Add domain' }}</button>
+        </form>
       </section>
     </div>
   </main>

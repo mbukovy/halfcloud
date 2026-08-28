@@ -80,6 +80,10 @@ Rules:
 - Never stop or delete a different container to resolve a port conflict. Offer the available port reported by the tool and ask the user before changing their requested port.
 - Deletion is destructive. Call deleteApplication with the exact HalfCloud name when deletion is requested; the interface will require explicit user approval before the tool executes. If approval is denied, do not retry unless the user makes a new deletion request.
 - Start, stop, restart, create, logs, stats, and listing do not need confirmation when the user's intent is clear.
+- A service may have multiple public domains. HalfCloud-generated domains should normally remain attached as permanent fallback and debug addresses.
+- When the user adds the first custom domain, prefer making it primary while preserving the HalfCloud-generated domain. Do not remove or replace any existing domain unless explicitly requested or required to resolve a conflict.
+- The primary domain is the preferred public URL, but every configured domain continues routing directly to the service. Changing it does not imply changing arbitrary application environment variables.
+- External DNS is the user's responsibility. When adding a custom domain, report the DNS target returned by the tool and explain that HTTPS becomes ready after DNS points to this server; Caddy manages the certificate.
 - After every application creation, inspect its logs and list applications again to verify that it remains running. If Docker reports health for the image, verify that status too. A successful start alone is not success.
 - If post-creation checks reveal a problem, diagnose and fix it when the correction is safe and consistent with the requested deployment. Prefer fixes that preserve the intended architecture, persistence, security, and private service exposure; do not call a deployment successful if the fix risks data loss after recreation or unnecessarily exposes a service.
 - Explain important failures plainly. Never expose API keys or claim success unless the tool result confirms it.
@@ -110,7 +114,7 @@ export async function createChatResponse(
         environment: z.record(z.string(), z.string()).optional(),
         namedVolumes: z.record(z.string(), z.string()).optional().describe('Map of application-local volume name to absolute container path; preferred for persistent application data'),
         volumes: z.record(z.string(), z.string()).optional().describe('Map of application-relative host path to absolute container path; use only when host filesystem access is needed'),
-        hostname: z.string().optional().describe('Optional DNS hostname; defaults to <name>.<server-domain>'),
+        hostname: z.string().optional().describe('Optional custom DNS hostname added alongside the generated <name>.<server-domain> fallback and made primary'),
       }),
       execute: (input) => docker.createContainer(input),
     }),
@@ -148,6 +152,26 @@ export async function createChatResponse(
       description: 'Set or replace one environment variable and safely recreate the application container. Secret values are not returned.',
       inputSchema: z.object({ containerId, key: z.string().min(1), value: z.string() }),
       execute: ({ containerId, key, value }) => docker.setEnvironmentVariable(containerId, key, value),
+    }),
+    listServiceDomains: tool({
+      description: 'List all routing domains for a public HalfCloud application, including primary, managed, DNS, and HTTPS state.',
+      inputSchema: z.object({ containerId }),
+      execute: ({ containerId }) => docker.listDomains(containerId),
+    }),
+    addServiceDomain: tool({
+      description: 'Add a custom routing domain without replacing existing domains. The first custom domain automatically becomes primary.',
+      inputSchema: z.object({ containerId, hostname: z.string().min(1) }),
+      execute: ({ containerId, hostname }) => docker.addDomain(containerId, hostname),
+    }),
+    removeServiceDomain: tool({
+      description: 'Remove one routing domain. HalfCloud-managed domains are preserved unless allowManaged is true following an explicit user request.',
+      inputSchema: z.object({ containerId, hostname: z.string().min(1), allowManaged: z.boolean().optional() }),
+      execute: ({ containerId, hostname, allowManaged }) => docker.removeDomain(containerId, hostname, allowManaged),
+    }),
+    setPrimaryServiceDomain: tool({
+      description: 'Make one existing routing domain the preferred public URL without changing application environment variables.',
+      inputSchema: z.object({ containerId, hostname: z.string().min(1) }),
+      execute: ({ containerId, hostname }) => docker.setPrimaryDomain(containerId, hostname),
     }),
     listManagedVolumes: tool({
       description: 'List HalfCloud-managed named volumes and show whether each is attached or orphaned.',

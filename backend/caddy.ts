@@ -1,5 +1,6 @@
 interface RoutedApplication {
   hostname?: string;
+  domains?: Array<{ hostname: string }>;
   ports: Array<{ host: number; protocol: string }>;
   state: string;
 }
@@ -12,11 +13,12 @@ export class CaddyService {
   async sync(applications: RoutedApplication[]) {
     if (!this.halfcloudHostname) throw new Error('HALFCLOUD_HOSTNAME is required for Caddy configuration');
     const sites = applications
-      .filter((application) => application.hostname && application.state === 'running')
+      .filter((application) => (application.domains?.length || application.hostname) && application.state === 'running')
       .map((application) => {
         const port = application.ports.find((candidate) => candidate.protocol === 'tcp')?.host;
         if (!port) return '';
-        return `${application.hostname} {\n  reverse_proxy 127.0.0.1:${port}\n}`;
+        const hostnames = application.domains?.map((domain) => domain.hostname) ?? [application.hostname!];
+        return `${hostnames.join(', ')} {\n  reverse_proxy 127.0.0.1:${port}\n}`;
       })
       .filter(Boolean);
     const caddyfile = `{

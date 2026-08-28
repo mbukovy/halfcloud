@@ -102,6 +102,18 @@ app.post('/api/containers/:id/:action', async (request, response) => {
 app.put('/api/containers/:id/environment/:key', async (request, response) => {
   response.json(await docker.setEnvironmentVariable(request.params.id, request.params.key, z.string().parse(request.body?.value)));
 });
+app.get('/api/containers/:id/domains', async (request, response) => {
+  response.json(await docker.listDomains(request.params.id));
+});
+app.post('/api/containers/:id/domains', async (request, response) => {
+  response.json(await docker.addDomain(request.params.id, z.string().parse(request.body?.hostname)));
+});
+app.put('/api/containers/:id/domains/:hostname/primary', async (request, response) => {
+  response.json(await docker.setPrimaryDomain(request.params.id, request.params.hostname));
+});
+app.delete('/api/containers/:id/domains/:hostname', async (request, response) => {
+  response.json(await docker.removeDomain(request.params.id, request.params.hostname, request.body?.allowManaged === true));
+});
 
 app.post('/api/chat', async (request, response) => {
   const requestId = randomUUID();
