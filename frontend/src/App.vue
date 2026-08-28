@@ -35,8 +35,9 @@ const environmentDialog = reactive<{
   name: string;
   value: string;
   protectedFromAI: boolean;
+  addingVariable: boolean;
   saving: boolean;
-}>({ container: null, variables: [], loading: false, error: '', name: '', value: '', protectedFromAI: true, saving: false });
+}>({ container: null, variables: [], loading: false, error: '', name: '', value: '', protectedFromAI: true, addingVariable: false, saving: false });
 const environmentSnapshot = ref('[]');
 const revealedEnvironmentValues = reactive(new Set<string>());
 const environmentRequestForms = reactive<Record<string, { value: string; protectedFromAI: boolean; saving: boolean; error: string }>>({});
@@ -297,7 +298,11 @@ function clearSession() {
 }
 
 function resetEnvironmentForm() {
-  Object.assign(environmentDialog, { name: '', value: '', protectedFromAI: true, saving: false });
+  Object.assign(environmentDialog, { name: '', value: '', protectedFromAI: true, addingVariable: false, saving: false });
+}
+
+function showAddEnvironmentVariable() {
+  Object.assign(environmentDialog, { name: '', value: '', protectedFromAI: true, addingVariable: true, error: '' });
 }
 
 function closeEnvironmentDialog() {
@@ -346,6 +351,7 @@ async function saveEnvironmentVariable() {
     if (index >= 0) environmentDialog.variables[index] = variable;
     else environmentDialog.variables.push(variable);
     environmentSnapshot.value = environmentSignature(environmentDialog.variables);
+    revealedEnvironmentValues.delete('new');
     resetEnvironmentForm();
     await refreshDashboard();
   } catch (error) {
@@ -858,51 +864,52 @@ onBeforeUnmount(() => {
         <button class="modal-close" @click="closeEnvironmentDialog">×</button>
         <p class="eyebrow">SERVICE CONFIGURATION</p>
         <h2>{{ environmentDialog.container.name }} environment</h2>
-        <div class="protection-explanation"><strong>Protected from AI</strong><span>HalfCloud removes protected values from data before it is sent to AI. The AI can still see variable names and whether they are configured.</span></div>
+        <div class="protection-explanation"><strong>Protected from AI</strong><span>HalfCloud removes protected values from context just before it is sent to AI. The AI can still see variable names and whether they are configured.</span></div>
 
         <p v-if="environmentDialog.loading" class="environment-empty">Loading environment…</p>
-        <form v-else-if="environmentDialog.variables.length" class="environment-editor" @submit.prevent="saveEnvironmentChanges">
+        <div v-else class="environment-editor">
           <div class="environment-list">
             <div class="environment-list-heading"><span>Name</span><span>Value</span><span>Protect from AI</span><span></span></div>
             <div v-for="variable in environmentDialog.variables" :key="variable.id" class="environment-row">
-              <input v-model.trim="variable.name" aria-label="Variable name" autocomplete="off" pattern="[A-Za-z_][A-Za-z0-9_]*" required>
+              <input v-model.trim="variable.name" :disabled="environmentDialog.addingVariable || environmentDialog.saving" aria-label="Variable name" autocomplete="off" pattern="[A-Za-z_][A-Za-z0-9_]*" required>
               <div class="environment-value-field">
-                <input v-model="variable.value" :type="revealedEnvironmentValues.has(variable.id) ? 'text' : 'password'" :aria-label="`${variable.name} value`" autocomplete="new-password">
-                <button type="button" @click="toggleEnvironmentValue(variable.id)">{{ revealedEnvironmentValues.has(variable.id) ? 'Hide' : 'Show' }}</button>
+                <input v-model="variable.value" :disabled="environmentDialog.addingVariable || environmentDialog.saving" :type="revealedEnvironmentValues.has(variable.id) ? 'text' : 'password'" :aria-label="`${variable.name} value`" autocomplete="new-password">
+                <button type="button" :disabled="environmentDialog.addingVariable || environmentDialog.saving" @click="toggleEnvironmentValue(variable.id)">{{ revealedEnvironmentValues.has(variable.id) ? 'Hide' : 'Show' }}</button>
               </div>
               <label class="environment-protection" :title="variable.protectedFromAI ? 'This value is omitted from AI data' : 'This value is visible to AI'">
-                <input v-model="variable.protectedFromAI" type="checkbox">
+                <input v-model="variable.protectedFromAI" :disabled="environmentDialog.addingVariable || environmentDialog.saving" type="checkbox">
                 <span>{{ variable.protectedFromAI ? 'Protected' : 'Visible' }}</span>
               </label>
-              <button class="environment-delete danger" type="button" :disabled="environmentChanges || environmentDialog.saving" title="Save or discard pending edits before deleting" @click="deleteEnvironmentVariable(variable)">Delete</button>
+              <button class="environment-delete danger" type="button" :disabled="environmentChanges || environmentDialog.addingVariable || environmentDialog.saving" title="Save or discard pending edits before deleting" @click="deleteEnvironmentVariable(variable)">Delete</button>
             </div>
+            <form v-if="environmentDialog.addingVariable" class="environment-row environment-new-row" @submit.prevent="saveEnvironmentVariable">
+              <input v-model.trim="environmentDialog.name" aria-label="New variable name" autocomplete="off" placeholder="VARIABLE_NAME" pattern="[A-Za-z_][A-Za-z0-9_]*" required autofocus>
+              <div class="environment-value-field">
+                <input v-model="environmentDialog.value" :type="revealedEnvironmentValues.has('new') ? 'text' : 'password'" aria-label="New variable value" autocomplete="new-password">
+                <button type="button" @click="toggleEnvironmentValue('new')">{{ revealedEnvironmentValues.has('new') ? 'Hide' : 'Show' }}</button>
+              </div>
+              <label class="environment-protection" title="Protected variables are omitted from AI data">
+                <input v-model="environmentDialog.protectedFromAI" type="checkbox">
+                <span>{{ environmentDialog.protectedFromAI ? 'Protected' : 'Visible' }}</span>
+              </label>
+              <div class="environment-new-actions">
+                <button type="button" :disabled="environmentDialog.saving" @click="resetEnvironmentForm">Cancel</button>
+                <button type="submit" :disabled="environmentDialog.saving">Add</button>
+              </div>
+              <p v-if="!environmentDialog.protectedFromAI && sensitiveEnvironmentName(environmentDialog.name)" class="credential-warning">This looks like a credential. Keep AI protection enabled.</p>
+            </form>
+            <p v-if="!environmentDialog.variables.length && !environmentDialog.addingVariable" class="environment-empty">No environment variables configured.</p>
           </div>
           <p v-if="environmentDialog.error" class="form-error">{{ environmentDialog.error }}</p>
-          <div class="environment-save-bar">
-            <span>{{ environmentChanges ? 'Unsaved environment changes' : 'Environment is up to date' }}</span>
-            <button class="button primary" type="submit" :disabled="!environmentChanges || environmentDialog.saving">{{ environmentDialog.saving ? 'Applying…' : 'Save changes' }}</button>
+          <div class="environment-controls">
+            <button v-if="!environmentDialog.addingVariable" class="environment-add-button" type="button" :disabled="environmentChanges || environmentDialog.saving" @click="showAddEnvironmentVariable">+ Add new</button>
+            <span v-else></span>
+            <div v-if="environmentDialog.variables.length" class="environment-save-bar">
+              <span>{{ environmentChanges ? 'Unsaved environment changes' : 'Environment is up to date' }}</span>
+              <button class="button primary" type="button" :disabled="!environmentChanges || environmentDialog.addingVariable || environmentDialog.saving" @click="saveEnvironmentChanges">{{ environmentDialog.saving ? 'Applying…' : 'Save changes' }}</button>
+            </div>
           </div>
-        </form>
-        <p v-else-if="!environmentDialog.loading" class="environment-empty">No environment variables configured.</p>
-
-        <form class="environment-form" @submit.prevent="saveEnvironmentVariable">
-          <h3>Add variable</h3>
-          <label for="environment-name">Name</label>
-          <input id="environment-name" v-model.trim="environmentDialog.name" autocomplete="off" placeholder="STRIPE_SECRET_KEY" pattern="[A-Za-z_][A-Za-z0-9_]*" required>
-          <label for="environment-value">Value</label>
-          <input id="environment-value" v-model="environmentDialog.value" autocomplete="off">
-          <label class="protection-toggle">
-            <input v-model="environmentDialog.protectedFromAI" type="checkbox">
-            <span>Protect this value from AI</span>
-          </label>
-          <p class="environment-help">Recommended for passwords, API keys, tokens, credentials, and other sensitive configuration.</p>
-          <p v-if="!environmentDialog.protectedFromAI && sensitiveEnvironmentName(environmentDialog.name)" class="credential-warning">This variable looks like a credential. We recommend keeping AI protection enabled.</p>
-          <p v-if="environmentChanges" class="environment-help">Save the changes above before adding another variable.</p>
-          <p v-if="environmentDialog.error && !environmentDialog.variables.length" class="form-error">{{ environmentDialog.error }}</p>
-          <div class="environment-form-actions">
-            <button class="button primary" :disabled="environmentDialog.saving || environmentChanges" type="submit">{{ environmentDialog.saving ? 'Applying…' : 'Add variable' }}</button>
-          </div>
-        </form>
+        </div>
       </section>
     </div>
   </main>
