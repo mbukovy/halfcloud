@@ -216,7 +216,7 @@ input:focus, textarea:focus { border-color: var(--ink); box-shadow: 0 0 0 3px #1
 .modal-close { position: absolute; right: 17px; top: 13px; border: 0; background: none; font-size: 26px; color: var(--muted); cursor: pointer; }
 .logs-modal { width: min(1120px, 100%); }
 .domain-modal form { margin-top: 24px; }
-.logs-toolbar { display: grid; grid-template-columns: minmax(220px, 1fr) 110px auto; align-items: end; gap: 10px; margin: 22px 0 10px; }
+.logs-toolbar { display: grid; grid-template-columns: minmax(220px, 1fr) 110px auto auto; align-items: end; gap: 10px; margin: 22px 0 10px; }
 .logs-toolbar label { margin: 0; }
 .logs-toolbar label > span:first-child { display: block; margin-bottom: 7px; }
 .logs-search-field { position: relative; display: block; }
@@ -232,6 +232,12 @@ input:focus, textarea:focus { border-color: var(--ink); box-shadow: 0 0 0 3px #1
 .logs-reverse input:checked + .switch-track { background: var(--green); }
 .logs-reverse input:checked + .switch-track i { transform: translateX(12px); }
 .logs-reverse:has(input:focus-visible) { border-color: var(--ink); box-shadow: 0 0 0 3px #16231f12; }
+.logs-refresh { height: 39px; display: flex; align-items: center; gap: 7px; padding: 0 12px; border: 1px solid #c9c7be; border-radius: 3px; background: #fffefb; font: 500 10px 'DM Mono', monospace; cursor: pointer; }
+.logs-refresh:hover { border-color: #8c908b; background: #fff; }
+.logs-refresh:disabled { opacity: .55; cursor: wait; }
+.logs-refresh svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+.logs-refresh.loading svg { animation: logs-refresh-spin .8s linear infinite; }
+@keyframes logs-refresh-spin { to { transform: rotate(360deg); } }
 .logs-output { min-height: 180px; max-height: 62vh; overflow: auto; background: #111b18; border-radius: 3px; }
 .logs-modal pre { margin: 0; color: #d8e2dc; padding: 20px; font: 11px/1.65 'DM Mono', monospace; white-space: pre-wrap; word-break: break-word; }
 .logs-state { display: grid; min-height: 180px; margin: 0; padding: 20px; place-items: center; color: #9ba8a1; font: 10px 'DM Mono', monospace; letter-spacing: .08em; text-transform: uppercase; }
@@ -265,11 +271,13 @@ input:focus, textarea:focus { border-color: var(--ink); box-shadow: 0 0 0 3px #1
   .auth-panel { padding: 30px 24px; }
   .modal { padding: 30px 22px; }
   .logs-toolbar { grid-template-columns: 1fr 90px; }
-  .logs-reverse { grid-column: 1 / -1; width: max-content; }
+  .logs-reverse { width: max-content; }
+  .logs-refresh { justify-self: end; }
   .domain-row { grid-template-columns: 8px minmax(0, 1fr); }
   .domain-actions { grid-column: 2; justify-content: flex-start; }
 }
 
 @media (prefers-reduced-motion: reduce) {
   .conversation-loader i b { width: 100%; animation: none; }
+  .logs-refresh.loading svg { animation: none; }
 }

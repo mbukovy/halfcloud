@@ -631,6 +631,10 @@ onBeforeUnmount(() => {
             <span class="switch-track" aria-hidden="true"><i></i></span>
             <span>Reverse</span>
           </label>
+          <button class="logs-refresh" :class="{ loading: logs.loading }" :disabled="logs.loading" type="button" @click="refreshLogs">
+            <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M20 11a8 8 0 1 0-2.3 5.7"></path><path d="M20 5v6h-6"></path></svg>
+            Refresh
+          </button>
         </div>
         <div class="logs-output">
           <p v-if="logs.loading" class="logs-state">Loading logs…</p>
