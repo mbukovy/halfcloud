@@ -26,7 +26,6 @@ const server = ref<ServerStats | null>(null);
 const dashboardError = ref('');
 const actionId = ref('');
 const domainAction = ref('');
-const domainDialog = reactive<{ container: ContainerInfo | null; hostname: string; error: string; saving: boolean }>({ container: null, hostname: '', error: '', saving: false });
 const environmentDialog = reactive<{
   container: ContainerInfo | null;
   variables: EnvironmentVariable[];
@@ -479,52 +478,15 @@ async function refreshLogs() {
   }
 }
 
-function openDomainDialog(container: ContainerInfo) {
-  Object.assign(domainDialog, { container, hostname: '', error: '', saving: false });
-}
-
-async function addDomain() {
-  if (!domainDialog.container) return;
-  domainDialog.saving = true;
-  domainDialog.error = '';
-  try {
-    await api(`/api/containers/${encodeURIComponent(domainDialog.container.id)}/domains`, {
-      method: 'POST',
-      body: JSON.stringify({ hostname: domainDialog.hostname }),
-    });
-    domainDialog.container = null;
-    await refreshDashboard();
-  } catch (error) {
-    domainDialog.error = error instanceof Error ? error.message : 'Could not add domain';
-  } finally {
-    domainDialog.saving = false;
-  }
-}
-
 async function setPrimaryDomain(container: ContainerInfo, domain: ServiceDomain) {
-  await runDomainAction(container, domain, 'primary');
-}
-
-async function removeDomain(container: ContainerInfo, domain: ServiceDomain) {
-  const warning = domain.managed
-    ? `Remove HalfCloud-managed domain ${domain.hostname}? This removes the permanent fallback address.`
-    : `Remove ${domain.hostname} from ${container.name}?`;
-  if (!window.confirm(warning)) return;
-  await runDomainAction(container, domain, 'remove');
-}
-
-async function runDomainAction(container: ContainerInfo, domain: ServiceDomain, action: 'primary' | 'remove') {
   domainAction.value = `${container.id}:${domain.hostname}`;
   dashboardError.value = '';
   try {
     const base = `/api/containers/${encodeURIComponent(container.id)}/domains/${encodeURIComponent(domain.hostname)}`;
-    await api(action === 'primary' ? `${base}/primary` : base, {
-      method: action === 'primary' ? 'PUT' : 'DELETE',
-      body: JSON.stringify(action === 'remove' ? { allowManaged: domain.managed } : {}),
-    });
+    await api(`${base}/primary`, { method: 'PUT', body: '{}' });
     await refreshDashboard();
   } catch (error) {
-    dashboardError.value = error instanceof Error ? error.message : `Domain ${action} failed`;
+    dashboardError.value = error instanceof Error ? error.message : 'Could not change primary domain';
   } finally {
     domainAction.value = '';
   }
@@ -701,7 +663,7 @@ onBeforeUnmount(() => {
             <div><span>RAM</span><strong>{{ formatBytes(container.memoryUsed) }}</strong></div>
           </div>
           <section v-if="container.domains.length" class="domains-block">
-            <div class="domains-heading"><span>DOMAINS</span><button type="button" @click="openDomainDialog(container)">+ Add domain</button></div>
+            <div class="domains-heading"><span>DOMAINS</span></div>
             <div v-for="domain in container.domains" :key="domain.hostname" class="domain-row">
               <span class="domain-state" :class="domain.state" :title="domain.httpsReady ? 'HTTPS ready' : domain.dnsConfigured ? 'DNS configured; waiting for HTTPS' : 'DNS not pointed to this server'"></span>
               <div class="domain-name">
@@ -715,7 +677,6 @@ onBeforeUnmount(() => {
               <div class="domain-actions">
                 <a :href="`https://${domain.hostname}`" target="_blank" rel="noopener noreferrer">Open</a>
                 <button v-if="!domain.primary" :disabled="domainAction === `${container.id}:${domain.hostname}`" @click="setPrimaryDomain(container, domain)">Make primary</button>
-                <button class="danger" :disabled="container.domains.length === 1 || domainAction === `${container.id}:${domain.hostname}`" @click="removeDomain(container, domain)">Remove</button>
               </div>
             </div>
           </section>
@@ -807,21 +768,6 @@ onBeforeUnmount(() => {
             <pre>{{ visibleLogs }}</pre>
           </template>
         </div>
-      </section>
-    </div>
-
-    <div v-if="domainDialog.container" class="modal-backdrop" @click.self="domainDialog.container = null">
-      <section class="modal domain-modal">
-        <button class="modal-close" @click="domainDialog.container = null">×</button>
-        <p class="eyebrow">PUBLIC ROUTING</p>
-        <h2>Add domain to {{ domainDialog.container.name }}</h2>
-        <p>The existing HalfCloud address stays active. Point the new hostname's DNS record to this server.</p>
-        <form @submit.prevent="addDomain">
-          <label for="domain-hostname">Hostname</label>
-          <input id="domain-hostname" v-model="domainDialog.hostname" autofocus inputmode="url" autocomplete="off" placeholder="app.example.com" required>
-          <p v-if="domainDialog.error" class="form-error">{{ domainDialog.error }}</p>
-          <button class="button primary wide" :disabled="domainDialog.saving" type="submit">{{ domainDialog.saving ? 'Adding…' : 'Add domain' }}</button>
-        </form>
       </section>
     </div>
 

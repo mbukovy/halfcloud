@@ -184,7 +184,6 @@ input:focus, textarea:focus { border-color: var(--ink); box-shadow: 0 0 0 3px #1
 .domains-block { margin-top: 12px; border: 1px solid #d9d6cd; border-radius: 3px; overflow: hidden; }
 .domains-heading { display: flex; align-items: center; justify-content: space-between; padding: 8px 10px; background: #f2f0e9; border-bottom: 1px solid #ddd9cf; }
 .domains-heading > span { font: 600 8px 'DM Mono', monospace; letter-spacing: .12em; color: var(--muted); }
-.domains-heading button { border: 0; background: none; color: var(--accent); padding: 2px; font: 500 9px 'DM Mono', monospace; cursor: pointer; }
 .domain-row { display: grid; grid-template-columns: 8px minmax(0, 1fr) auto; align-items: center; gap: 9px; padding: 10px; background: #fff; }
 .domain-row + .domain-row { border-top: 1px solid #e5e2da; }
 .domain-state { width: 7px; height: 7px; border-radius: 50%; background: #999; }
@@ -222,7 +221,6 @@ input:focus, textarea:focus { border-color: var(--ink); box-shadow: 0 0 0 3px #1
 .modal { position: relative; width: min(500px, 100%); max-height: 90vh; overflow: auto; background: var(--paper); border-radius: 5px; padding: 38px; box-shadow: 0 30px 80px #0004; }
 .modal-close { position: absolute; right: 17px; top: 13px; border: 0; background: none; font-size: 26px; color: var(--muted); cursor: pointer; }
 .logs-modal { width: min(1120px, 100%); }
-.domain-modal form { margin-top: 24px; }
 .environment-modal { width: min(1120px, 100%); }
 .environment-editor { margin-top: 24px; }
 .environment-list { margin: 24px 0; border: 1px solid var(--line); border-radius: 3px; overflow: hidden; }
