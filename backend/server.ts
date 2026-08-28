@@ -110,6 +110,15 @@ app.put('/api/containers/:id/environment/:key', async (request, response) => {
     protectedFromAI: z.boolean().optional().parse(request.body?.protectedFromAI),
   }));
 });
+app.put('/api/containers/:id/environment', async (request, response) => {
+  const variables = z.array(z.object({
+    id: z.string().min(1),
+    name: z.string().min(1),
+    value: z.string(),
+    protectedFromAI: z.boolean(),
+  })).max(500).parse(request.body?.variables);
+  response.json(await docker.saveEnvironmentVariables(request.params.id, variables));
+});
 app.delete('/api/containers/:id/environment/:variableId', async (request, response) => {
   response.json(await docker.deleteEnvironmentVariable(request.params.id, request.params.variableId));
 });

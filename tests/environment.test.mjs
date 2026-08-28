@@ -67,6 +67,31 @@ test('the agent cannot overwrite a protected environment variable', async (t) =>
   assert.equal(replaced, false);
 });
 
+test('bulk environment edits are applied in one container recreation', async (t) => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'halfcloud-environment-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const store = new EnvironmentStore(directory);
+  const original = await store.list('app', { FIRST: 'one', SECOND: 'two' });
+  const replacements = [];
+  const docker = {
+    getContainerEnvironment: async () => ({ containerId: 'container', name: 'app', environment: { FIRST: 'one', SECOND: 'two' } }),
+    replaceContainerEnvironment: async (_id, environment) => { replacements.push(environment); return { containerId: 'replacement' }; },
+    listContainers: async () => [],
+  };
+  const applications = new ApplicationService(docker, { sync: async () => undefined }, {}, store);
+
+  const result = await applications.saveEnvironmentVariables('app', [
+    { id: original[0].id, name: 'FIRST_RENAMED', value: 'updated', protectedFromAI: false },
+    { id: original[1].id, name: 'SECOND', value: 'changed', protectedFromAI: true },
+  ]);
+
+  assert.deepEqual(replacements, [{ FIRST_RENAMED: 'updated', SECOND: 'changed' }]);
+  assert.deepEqual(result.variables.map(({ name, value, protectedFromAI }) => ({ name, value, protectedFromAI })), [
+    { name: 'FIRST_RENAMED', value: 'updated', protectedFromAI: false },
+    { name: 'SECOND', value: 'changed', protectedFromAI: true },
+  ]);
+});
+
 test('provider-bound history excludes environment mutation values', () => {
   const messages = [{
     id: 'message',

@@ -223,19 +223,26 @@ input:focus, textarea:focus { border-color: var(--ink); box-shadow: 0 0 0 3px #1
 .modal-close { position: absolute; right: 17px; top: 13px; border: 0; background: none; font-size: 26px; color: var(--muted); cursor: pointer; }
 .logs-modal { width: min(1120px, 100%); }
 .domain-modal form { margin-top: 24px; }
-.environment-modal { width: min(780px, 100%); }
+.environment-modal { width: min(1120px, 100%); }
+.environment-editor { margin-top: 24px; }
 .environment-list { margin: 24px 0; border: 1px solid var(--line); border-radius: 3px; overflow: hidden; }
-.environment-list-heading, .environment-row { display: grid; grid-template-columns: minmax(130px, 1fr) minmax(160px, 1.4fr) 74px auto; align-items: center; gap: 10px; padding: 10px 12px; }
+.environment-editor .environment-list { margin: 0; }
+.environment-list-heading, .environment-row { display: grid; grid-template-columns: minmax(170px, .9fr) minmax(260px, 1.5fr) 125px 54px; align-items: center; gap: 12px; padding: 10px 12px; }
 .environment-list-heading { background: #e9e6de; color: var(--muted); font: 8px 'DM Mono', monospace; letter-spacing: .1em; text-transform: uppercase; }
 .environment-row { background: #fff; font-size: 11px; }
 .environment-row + .environment-row { border-top: 1px solid #e5e2da; }
-.environment-row strong, .environment-row code { overflow-wrap: anywhere; }
-.environment-row code { font: 10px 'DM Mono', monospace; }
-.environment-row > span { color: var(--muted); font: 8px 'DM Mono', monospace; text-transform: uppercase; }
-.environment-row > span.protected { color: var(--green); }
-.environment-row > div { display: flex; gap: 5px; }
-.environment-row button, .environment-form-actions > button:not(.button) { border: 0; background: none; color: #4d5550; padding: 4px; font: 8px 'DM Mono', monospace; cursor: pointer; }
-.environment-row button.danger { color: #a9442c; }
+.environment-row > input, .environment-value-field input { height: 38px; padding: 8px 10px; font: 10px 'DM Mono', monospace; }
+.environment-value-field { position: relative; min-width: 0; }
+.environment-value-field input { padding-right: 52px; }
+.environment-value-field button { position: absolute; right: 8px; top: 50%; transform: translateY(-50%); border: 0; background: none; color: #59615c; padding: 4px; font: 8px 'DM Mono', monospace; cursor: pointer; }
+.environment-protection { display: flex; align-items: center; gap: 7px; margin: 0; color: var(--muted); font: 8px 'DM Mono', monospace; letter-spacing: 0; text-transform: uppercase; cursor: pointer; }
+.environment-protection input { width: 15px; height: 15px; margin: 0; accent-color: var(--green); }
+.environment-protection:has(input:checked) { color: var(--green); }
+.environment-delete { border: 0; background: none; color: #a9442c; padding: 4px; font: 8px 'DM Mono', monospace; cursor: pointer; }
+.environment-delete:disabled { opacity: .35; cursor: default; }
+.environment-save-bar { display: flex; align-items: center; justify-content: flex-end; gap: 18px; margin-top: 12px; }
+.environment-save-bar span { color: var(--muted); font: 9px 'DM Mono', monospace; }
+.environment-save-bar .button { min-width: 150px; }
 .environment-empty { margin: 24px 0; padding: 20px; border: 1px dashed var(--line); color: var(--muted); text-align: center; font-size: 12px; }
 .environment-form { margin-top: 25px; padding-top: 22px; border-top: 1px solid var(--line); }
 .environment-form h3 { margin: 0; font-size: 16px; }
@@ -312,7 +319,10 @@ input:focus, textarea:focus { border-color: var(--ink); box-shadow: 0 0 0 3px #1
   .domain-actions { grid-column: 2; justify-content: flex-start; }
   .environment-list-heading { display: none; }
   .environment-row { grid-template-columns: minmax(0, 1fr) auto; }
-  .environment-row code { grid-column: 1 / -1; }
+  .environment-value-field { grid-column: 1 / -1; grid-row: 2; }
+  .environment-protection { grid-column: 1; grid-row: 3; }
+  .environment-delete { grid-column: 2; grid-row: 3; }
+  .environment-save-bar { align-items: flex-end; flex-direction: column; }
 }
 
 @media (prefers-reduced-motion: reduce) {

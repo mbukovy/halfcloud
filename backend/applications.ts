@@ -59,16 +59,30 @@ export class ApplicationService {
       ? { ...existing, name: input.name, value: input.value, protectedFromAI: input.protectedFromAI ?? true, updatedAt: now }
       : { id: `env_${randomUUID()}`, serviceId: runtime.name, name: input.name, value: input.value, protectedFromAI: input.protectedFromAI ?? true, createdAt: now, updatedAt: now };
     const updated = existing ? previous.map((candidate) => candidate.id === existing.id ? variable : candidate) : [...previous, variable];
-    const values = Object.fromEntries(updated.map((candidate) => [candidate.name, candidate.value]));
-    await this.environment.replaceVariables(runtime.name, updated);
-    try {
-      await this.docker.replaceContainerEnvironment(id, values);
-      await this.syncRoutes();
-      return variable;
-    } catch (error) {
-      await this.environment.replaceVariables(runtime.name, previous);
-      throw error;
+    await this.applyEnvironment(id, runtime.name, previous, updated);
+    return variable;
+  }
+
+  async saveEnvironmentVariables(
+    id: string,
+    inputs: Array<{ id: string; name: string; value: string; protectedFromAI: boolean }>,
+  ) {
+    const runtime = await this.docker.getContainerEnvironment(id);
+    const previous = await this.environment.list(runtime.name, runtime.environment);
+    const previousById = new Map(previous.map((variable) => [variable.id, variable]));
+    if (inputs.length !== previous.length || new Set(inputs.map((input) => input.id)).size !== inputs.length) {
+      throw new Error('Environment changed since it was loaded; refresh and try again');
     }
+    const now = new Date().toISOString();
+    const updated = inputs.map((input) => {
+      assertEnvironmentVariableName(input.name);
+      const existing = previousById.get(input.id);
+      if (!existing) throw new Error('Environment changed since it was loaded; refresh and try again');
+      return { ...existing, name: input.name, value: input.value, protectedFromAI: input.protectedFromAI, updatedAt: now };
+    });
+    if (new Set(updated.map((variable) => variable.name)).size !== updated.length) throw new Error('Environment variable names must be unique');
+    await this.applyEnvironment(id, runtime.name, previous, updated);
+    return { variables: updated };
   }
 
   async deleteEnvironmentVariable(id: string, variableId: string) {
@@ -77,15 +91,8 @@ export class ApplicationService {
     const variable = previous.find((candidate) => candidate.id === variableId);
     if (!variable) throw new Error(`Environment variable ${variableId} was not found`);
     const updated = previous.filter((candidate) => candidate.id !== variableId);
-    await this.environment.replaceVariables(runtime.name, updated);
-    try {
-      const result = await this.docker.replaceContainerEnvironment(id, Object.fromEntries(updated.map((candidate) => [candidate.name, candidate.value])));
-      await this.syncRoutes();
-      return { ...result, variableId, deleted: true };
-    } catch (error) {
-      await this.environment.replaceVariables(runtime.name, previous);
-      throw error;
-    }
+    const result = await this.applyEnvironment(id, runtime.name, previous, updated);
+    return { ...result, variableId, deleted: true };
   }
 
   async setEnvironmentVariableForAgent(id: string, name: string, value: string) {
@@ -213,6 +220,18 @@ export class ApplicationService {
     const application = matches[0]!;
     if (requirePublic && !application.ports.some((port) => port.protocol === 'tcp')) throw new Error(`${application.name} does not have a published TCP port`);
     return application;
+  }
+
+  private async applyEnvironment(id: string, serviceId: string, previous: EnvironmentVariable[], updated: EnvironmentVariable[]) {
+    await this.environment.replaceVariables(serviceId, updated);
+    try {
+      const result = await this.docker.replaceContainerEnvironment(id, Object.fromEntries(updated.map((variable) => [variable.name, variable.value])));
+      await this.syncRoutes();
+      return result;
+    } catch (error) {
+      await this.environment.replaceVariables(serviceId, previous);
+      throw error;
+    }
   }
 
   private async assertHostnameAvailable(hostname: string, exceptApplication?: string) {
