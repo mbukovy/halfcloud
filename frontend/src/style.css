@@ -246,6 +246,8 @@ input:focus, textarea:focus { border-color: var(--ink); box-shadow: 0 0 0 3px #1
 .environment-save-bar { display: flex; align-items: center; justify-content: flex-end; gap: 18px; margin-left: auto; }
 .environment-save-bar span { color: var(--muted); font: 9px 'DM Mono', monospace; }
 .environment-save-bar .button { min-width: 150px; }
+.environment-save-bar .button:disabled { cursor: default; }
+.environment-save-bar .button.loading:disabled { cursor: wait; }
 .environment-empty { margin: 24px 0; padding: 20px; border: 1px dashed var(--line); color: var(--muted); text-align: center; font-size: 12px; }
 .protection-toggle { display: flex; align-items: center; gap: 10px; margin: 18px 0 0; color: var(--ink); font: 500 12px 'Manrope', sans-serif; letter-spacing: 0; text-transform: none; cursor: pointer; }
 .protection-toggle input { width: 16px; height: 16px; margin: 0; accent-color: var(--green); }

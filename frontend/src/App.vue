@@ -801,7 +801,7 @@ onBeforeUnmount(() => {
             <button class="environment-add-button" type="button" :disabled="environmentDialog.saving" @click="addEnvironmentVariable">+ Add new</button>
             <div v-if="environmentDialog.variables.length || environmentChanges" class="environment-save-bar">
               <span>{{ environmentChanges ? 'Unsaved environment changes' : 'Environment is up to date' }}</span>
-              <button class="button primary" type="submit" :disabled="!environmentChanges || environmentDialog.saving">{{ environmentDialog.saving ? 'Applying…' : 'Save changes' }}</button>
+              <button class="button primary" :class="{ loading: environmentDialog.saving }" type="submit" :disabled="!environmentChanges || environmentDialog.saving">{{ environmentDialog.saving ? 'Applying…' : 'Save changes' }}</button>
             </div>
           </div>
         </form>
