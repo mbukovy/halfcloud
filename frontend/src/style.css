@@ -242,6 +242,14 @@ input:focus, textarea:focus { border-color: var(--ink); box-shadow: 0 0 0 3px #1
 .logs-modal pre { margin: 0; color: #d8e2dc; padding: 20px; font: 11px/1.65 'DM Mono', monospace; white-space: pre-wrap; word-break: break-word; }
 .logs-state { display: grid; min-height: 180px; margin: 0; padding: 20px; place-items: center; color: #9ba8a1; font: 10px 'DM Mono', monospace; letter-spacing: .08em; text-transform: uppercase; }
 .logs-state.error { color: #ff9678; text-transform: none; letter-spacing: 0; }
+.logs-refresh-error { margin: 0; padding: 10px 20px; background: #41241d; color: #ffb29c; font: 10px 'DM Mono', monospace; }
+
+@media (max-width: 700px) {
+  .logs-toolbar { grid-template-columns: minmax(0, 1fr) 90px; }
+  .logs-search { min-width: 0; }
+  .logs-reverse { width: max-content; }
+  .logs-refresh { justify-self: end; }
+}
 
 @media (max-width: 900px) {
   .auth-shell { grid-template-columns: 1fr; }
@@ -270,9 +278,6 @@ input:focus, textarea:focus { border-color: var(--ink); box-shadow: 0 0 0 3px #1
   .message.user { max-width: 88%; }
   .auth-panel { padding: 30px 24px; }
   .modal { padding: 30px 22px; }
-  .logs-toolbar { grid-template-columns: 1fr 90px; }
-  .logs-reverse { width: max-content; }
-  .logs-refresh { justify-self: end; }
   .domain-row { grid-template-columns: 8px minmax(0, 1fr); }
   .domain-actions { grid-column: 2; justify-content: flex-start; }
 }

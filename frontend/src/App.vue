@@ -637,9 +637,12 @@ onBeforeUnmount(() => {
           </button>
         </div>
         <div class="logs-output">
-          <p v-if="logs.loading" class="logs-state">Loading logs…</p>
-          <p v-else-if="logs.error" class="logs-state error">{{ logs.error }}</p>
-          <pre v-else>{{ visibleLogs }}</pre>
+          <p v-if="logs.loading && !logs.content" class="logs-state">Loading logs…</p>
+          <p v-else-if="logs.error && !logs.content" class="logs-state error">{{ logs.error }}</p>
+          <template v-else>
+            <p v-if="logs.error" class="logs-refresh-error" role="alert">{{ logs.error }}</p>
+            <pre>{{ visibleLogs }}</pre>
+          </template>
         </div>
       </section>
     </div>
