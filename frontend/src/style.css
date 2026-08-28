@@ -166,9 +166,15 @@ input:focus, textarea:focus { border-color: var(--ink); box-shadow: 0 0 0 3px #1
 .empty-containers small { font-size: 11px; }
 .container-card { margin: 0 18px 14px; background: var(--panel); border: 1px solid var(--line); border-radius: 4px; padding: 18px; }
 .app-card.multi-service { padding-bottom: 14px; }
-.app-title h3 { display: flex; align-items: baseline; gap: 8px; font-size: 17px; }
-.rename-button { border: 0; background: none; color: var(--muted); padding: 0; font: 8px 'DM Mono', monospace; text-transform: uppercase; cursor: pointer; }
+.app-title h3 { font-size: 17px; }
+.app-name-block { min-width: 0; }
+.app-name-row { display: flex; align-items: center; gap: 7px; min-height: 24px; }
+.app-name-row h3 { min-width: 0; overflow-wrap: anywhere; }
+.rename-button { display: inline-grid; flex: 0 0 25px; width: 25px; height: 25px; place-items: center; border: 0; border-radius: 2px; background: none; color: var(--muted); padding: 0; cursor: pointer; }
 .rename-button:hover { color: var(--accent); }
+.rename-button:focus-visible { outline: 2px solid var(--ink); outline-offset: 1px; }
+.rename-button svg { width: 13px; height: 13px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+.app-name-input { width: min(100%, 260px); height: 31px; padding: 5px 8px; font-size: 15px; font-weight: 700; }
 .app-services:not(.single) { display: grid; gap: 9px; margin-top: 14px; }
 .service-card { min-width: 0; }
 .app-services:not(.single) .service-card { padding: 13px; border: 1px solid #d9d6cd; border-radius: 3px; background: #faf9f5; }

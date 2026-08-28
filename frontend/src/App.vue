@@ -26,6 +26,8 @@ const server = ref<ServerStats | null>(null);
 const dashboardError = ref('');
 const actionId = ref('');
 const domainAction = ref('');
+const editingAppId = ref('');
+const appNameDraft = ref('');
 const environmentDialog = reactive<{
   container: ContainerInfo | null;
   variables: EnvironmentVariable[];
@@ -522,9 +524,26 @@ async function runAppAction(app: AppInfo, action: 'start' | 'stop' | 'restart' |
   }
 }
 
-async function renameApp(app: AppInfo) {
-  const name = window.prompt('App name', app.name)?.trim();
-  if (!name || name === app.name) return;
+async function beginRenameApp(app: AppInfo) {
+  editingAppId.value = app.id;
+  appNameDraft.value = app.name;
+  await nextTick();
+  document.getElementById(`app-name-${app.id}`)?.focus();
+}
+
+function cancelRenameApp() {
+  editingAppId.value = '';
+  appNameDraft.value = '';
+}
+
+async function saveAppName(app: AppInfo) {
+  if (editingAppId.value !== app.id) return;
+  const name = appNameDraft.value.trim();
+  if (!name || name === app.name) {
+    cancelRenameApp();
+    return;
+  }
+  editingAppId.value = '';
   actionId.value = app.id;
   try {
     await api(`/api/apps/${encodeURIComponent(app.id)}`, { method: 'PATCH', body: JSON.stringify({ name }) });
@@ -532,6 +551,7 @@ async function renameApp(app: AppInfo) {
   } catch (error) {
     dashboardError.value = error instanceof Error ? error.message : 'Rename failed';
   } finally {
+    appNameDraft.value = '';
     actionId.value = '';
   }
 }
@@ -782,7 +802,26 @@ onBeforeUnmount(() => {
         <article v-for="app in apps" :key="app.id" class="container-card app-card" :class="{ 'multi-service': app.services.length > 1 }">
           <div class="container-title app-title">
             <span class="status-dot" :class="app.status === 'running' ? 'running' : 'exited'"></span>
-            <div><h3>{{ app.name }} <button class="rename-button" title="Rename App" @click="renameApp(app)">Edit</button></h3><p>{{ app.services.length }} service{{ app.services.length === 1 ? '' : 's' }}</p></div>
+            <div class="app-name-block">
+              <div class="app-name-row">
+                <input
+                  v-if="editingAppId === app.id"
+                  :id="`app-name-${app.id}`"
+                  v-model="appNameDraft"
+                  class="app-name-input"
+                  maxlength="128"
+                  aria-label="App name"
+                  @blur="saveAppName(app)"
+                  @keydown.enter.prevent="($event.target as HTMLInputElement).blur()"
+                  @keydown.escape.prevent="cancelRenameApp"
+                >
+                <h3 v-else>{{ app.name }}</h3>
+                <button v-if="editingAppId !== app.id" class="rename-button" type="button" title="Rename App" :aria-label="`Rename ${app.name}`" @click="beginRenameApp(app)">
+                  <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M4 20h4l11-11a2.8 2.8 0 0 0-4-4L4 16v4Z"></path><path d="m13.5 6.5 4 4"></path></svg>
+                </button>
+              </div>
+              <p>{{ app.services.length }} service{{ app.services.length === 1 ? '' : 's' }}</p>
+            </div>
             <span class="state-label">{{ app.status.replace('_', ' ') }}</span>
           </div>
           <div class="container-data">
