@@ -58,6 +58,9 @@ input:focus, textarea:focus { border-color: var(--ink); box-shadow: 0 0 0 3px #1
 .server-health { font: 10px 'DM Mono', monospace; letter-spacing: .1em; }
 .health-dot, .status-dot { width: 7px; height: 7px; display: inline-block; border-radius: 50%; background: var(--green); margin-right: 8px; box-shadow: 0 0 0 3px #2f9a6b1c; }
 .header-actions { justify-self: end; display: flex; gap: 22px; }
+.active-model { min-width: 0; display: flex; align-items: center; gap: 7px; padding: 4px 8px; border: 1px solid var(--line); border-radius: 3px; background: #fffefb; color: #59615c; font: 9px 'DM Mono', monospace; }
+.active-model img { width: 17px; height: 17px; flex: 0 0 17px; object-fit: contain; }
+.active-model span { max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .text-button, .refresh-button { border: 0; background: none; cursor: pointer; color: #59615c; font-size: 12px; padding: 5px 0; }
 .text-button:hover { color: var(--ink); }
 .mobile-tabs { display: none; }
@@ -356,6 +359,7 @@ input:focus, textarea:focus { border-color: var(--ink); box-shadow: 0 0 0 3px #1
   .topbar { grid-template-columns: 1fr auto; padding: 0 16px; }
   .server-health { display: none; }
   .header-actions { gap: 10px; }
+  .active-model span { max-width: 82px; }
   .mobile-tabs { height: 47px; display: grid; grid-template-columns: repeat(3, 1fr); border-bottom: 1px solid var(--line); background: var(--panel); }
   .mobile-tabs button { position: relative; border: 0; background: transparent; color: var(--muted); font: 500 10px 'DM Mono', monospace; cursor: pointer; }
   .mobile-tabs button + button { border-left: 1px solid var(--line); }

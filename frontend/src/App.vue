@@ -700,6 +700,10 @@ onBeforeUnmount(() => {
       <div class="brand"><img class="brand-mark" src="/halfcloud-logo-ui.png" alt=""><strong>HalfCloud</strong><span class="version">0.1</span></div>
       <div class="server-health"><span class="health-dot"></span><span>HOST HEALTHY</span></div>
       <div class="header-actions">
+        <div v-if="settings?.llmReady && activeProvider" class="active-model" :title="`${activeProvider.label} · ${settings.model}`">
+          <img :src="activeProvider.icon" alt="">
+          <span>{{ settings.model }}</span>
+        </div>
         <button class="text-button" @click="openSettings">AI settings</button>
         <button class="text-button" @click="logout">Sign out</button>
       </div>
