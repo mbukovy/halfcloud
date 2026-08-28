@@ -314,6 +314,11 @@ async function runAction(container: ContainerInfo, action: 'start' | 'stop' | 'r
   }
 }
 
+async function runMenuAction(event: Event, container: ContainerInfo, action: 'start' | 'stop' | 'restart' | 'delete') {
+  (event.currentTarget as HTMLElement).closest('details')?.removeAttribute('open');
+  await runAction(container, action);
+}
+
 async function showLogs(container: ContainerInfo) {
   actionId.value = container.id;
   try {
@@ -542,11 +547,22 @@ onBeforeUnmount(() => {
             </span>
           </div>
           <div class="container-actions">
-            <button v-if="container.state !== 'running'" :disabled="actionId === container.id" @click="runAction(container, 'start')">Start</button>
-            <button v-else :disabled="actionId === container.id" @click="runAction(container, 'stop')">Stop</button>
-            <button :disabled="actionId === container.id" @click="runAction(container, 'restart')">Restart</button>
-            <button :disabled="actionId === container.id" @click="showLogs(container)">Logs</button>
-            <button class="danger" :disabled="actionId === container.id" @click="runAction(container, 'delete')">Delete</button>
+            <button class="logs-button" :disabled="actionId === container.id" @click="showLogs(container)">
+              <svg aria-hidden="true" viewBox="0 0 24 24"><path d="m7 8 4 4-4 4"></path><path d="M13 16h4"></path><rect x="3" y="4" width="18" height="16" rx="2"></rect></svg>
+              Logs
+            </button>
+            <details class="actions-menu">
+              <summary>
+                Actions
+                <svg aria-hidden="true" viewBox="0 0 12 12"><path d="m3 4.5 3 3 3-3"></path></svg>
+              </summary>
+              <div class="actions-menu-list">
+                <button v-if="container.state !== 'running'" :disabled="actionId === container.id" @click="runMenuAction($event, container, 'start')">Start</button>
+                <button v-else :disabled="actionId === container.id" @click="runMenuAction($event, container, 'stop')">Stop</button>
+                <button :disabled="actionId === container.id" @click="runMenuAction($event, container, 'restart')">Restart</button>
+                <button class="danger" :disabled="actionId === container.id" @click="runMenuAction($event, container, 'delete')">Delete</button>
+              </div>
+            </details>
           </div>
         </article>
       </section>
