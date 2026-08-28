@@ -30,6 +30,7 @@ const domainDialog = reactive<{ container: ContainerInfo | null; hostname: strin
 const logs = ref<{ name: string; content: string } | null>(null);
 const prompt = ref('');
 const transcript = ref<HTMLElement>();
+const composerInput = ref<HTMLTextAreaElement>();
 const respondingApprovalId = ref('');
 let refreshTimer: number | undefined;
 
@@ -377,7 +378,10 @@ async function runDomainAction(container: ContainerInfo, domain: ServiceDomain, 
 }
 
 watch(status, (current, previous) => {
-  if (current === 'ready' && previous !== 'ready') void refreshDashboard();
+  if (current === 'ready' && previous !== 'ready') {
+    void refreshDashboard();
+    void nextTick(() => composerInput.value?.focus());
+  }
 });
 watch(messages, () => nextTick(() => transcript.value?.scrollTo({ top: transcript.value.scrollHeight, behavior: 'smooth' })), { deep: true });
 onMounted(bootstrap);
@@ -481,7 +485,7 @@ onBeforeUnmount(() => {
         </div>
         <div class="conversation-footer">
           <form class="composer" @submit.prevent="submitPrompt">
-            <textarea v-model="prompt" :disabled="!settings?.configured || chatBusy" rows="2" :placeholder="!settings?.configured ? 'Configure Azure OpenAI to start…' : chatBusy ? 'HalfCloud is working…' : 'Tell HalfCloud what should be running…'" @keydown.enter.exact.prevent="submitPrompt"></textarea>
+            <textarea ref="composerInput" v-model="prompt" :disabled="!settings?.configured || chatBusy" rows="2" :placeholder="!settings?.configured ? 'Configure Azure OpenAI to start…' : chatBusy ? 'HalfCloud is working…' : 'Tell HalfCloud what should be running…'" @keydown.enter.exact.prevent="submitPrompt"></textarea>
             <button v-if="chatBusy" class="send-button stop" type="button" title="Stop" @click="stop">■</button>
             <button v-else class="send-button" type="submit" :disabled="!prompt.trim() || !settings?.configured" title="Send">↑</button>
           </form>
