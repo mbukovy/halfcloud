@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 186 100" fill="none">
+  <defs>
+    <linearGradient id="halfcloud-orange" x1="18" y1="17" x2="164" y2="88" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#ff6a36"/>
+      <stop offset="1" stop-color="#f45125"/>
+    </linearGradient>
+  </defs>
+  <path fill="url(#halfcloud-orange)" d="M82 22.5C82 14.5 75.4 9 67.4 9 48.2 9 32.3 21.6 30.1 38.2 15.4 39.8 4 50.9 4 64.4 4 79.1 17.4 91 34 91h41.7c3.5 0 6.3-2.5 6.3-5.6V22.5Z"/>
+  <path stroke="url(#halfcloud-orange)" stroke-width="7" stroke-linecap="round" stroke-linejoin="round" d="M92 85.5V25.2c0-2.4 1-4.8 2.8-6.5C102 11.8 112 8 122.3 8 146.9 8 166 26.7 166 49.7v1.1h1.7c10.2 0 18.3 8.5 18.3 19.4 0 11.5-9.3 20.8-20.8 20.8H98.3c-3.5 0-6.3-2.5-6.3-5.5Z" transform="translate(-4)"/>
+</svg>
