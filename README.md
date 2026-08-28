@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="frontend/public/halfcloud-logo-ui.png" width="192" alt="HalfCloud logo">
+</p>
+
 # HalfCloud
 
 > **HalfCloud is under active development. It is not ready for production apps yet.**
