@@ -417,7 +417,7 @@ onBeforeUnmount(() => {
 
 <template>
   <main v-if="loading" class="loading-screen">
-    <img class="brand-mark" src="/halfcloud-logo.png" alt="Halfcloud">
+    <img class="brand-mark" src="/halfcloud-logo-ui.png" alt="Halfcloud">
     <p>Connecting to host</p>
   </main>
 
@@ -429,7 +429,7 @@ onBeforeUnmount(() => {
       <div class="auth-signal"><span></span> HTTPS connection secured</div>
     </section>
     <section class="auth-panel">
-      <div class="brand"><img class="brand-mark" src="/halfcloud-logo.png" alt=""><strong>HalfCloud</strong></div>
+      <div class="brand"><img class="brand-mark" src="/halfcloud-logo-ui.png" alt=""><strong>HalfCloud</strong></div>
       <form @submit.prevent="login">
         <p class="step-label">ADMIN ACCESS</p>
         <h2>Sign in to this host</h2>
@@ -444,7 +444,7 @@ onBeforeUnmount(() => {
 
   <main v-else class="app-shell">
     <header class="topbar">
-      <div class="brand"><img class="brand-mark" src="/halfcloud-logo.png" alt=""><strong>HalfCloud</strong><span class="version">0.1</span></div>
+      <div class="brand"><img class="brand-mark" src="/halfcloud-logo-ui.png" alt=""><strong>HalfCloud</strong><span class="version">0.1</span></div>
       <div class="server-health"><span class="health-dot"></span><span>HOST HEALTHY</span></div>
       <div class="header-actions">
         <button class="text-button" @click="settingsOpen = true">AI settings</button>
