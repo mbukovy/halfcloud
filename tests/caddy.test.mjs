@@ -85,5 +85,5 @@ test('configures Basic Auth independently for one route', async (t) => {
   }]);
 
   assert.doesNotMatch(body.match(/public\.example\.com \{[\s\S]*?\n\}/)?.[0] ?? '', /basic_auth/);
-  assert.match(body, /admin\.example\.com \{\n  basic_auth \{\n    michal \$argon2id\$hash\n  \}/);
+  assert.match(body, /admin\.example\.com \{\n  basic_auth argon2id \{\n    michal \$argon2id\$hash\n  \}/);
 });

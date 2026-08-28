@@ -23,7 +23,7 @@ export class CaddyService {
         const domains = application.domains ?? [{ hostname: application.hostname!, access: { type: 'public' as const } }];
         return domains.map((domain) => {
           const authentication = domain.access.type === 'basic_auth'
-            ? `  basic_auth {\n    ${domain.access.username} ${domain.access.passwordHash}\n  }\n`
+            ? `  basic_auth argon2id {\n    ${domain.access.username} ${domain.access.passwordHash}\n  }\n`
             : '';
           return `${domain.hostname} {\n${authentication}  reverse_proxy 127.0.0.1:${port}\n}`;
         }).join('\n\n');
