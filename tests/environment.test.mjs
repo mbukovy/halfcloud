@@ -67,7 +67,7 @@ test('the agent cannot overwrite a protected environment variable', async (t) =>
   assert.equal(replaced, false);
 });
 
-test('bulk environment edits are applied in one container recreation', async (t) => {
+test('bulk environment edits, additions, and deletions use one container recreation', async (t) => {
   const directory = await mkdtemp(path.join(tmpdir(), 'halfcloud-environment-'));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const store = new EnvironmentStore(directory);
@@ -82,13 +82,13 @@ test('bulk environment edits are applied in one container recreation', async (t)
 
   const result = await applications.saveEnvironmentVariables('app', [
     { id: original[0].id, name: 'FIRST_RENAMED', value: 'updated', protectedFromAI: false },
-    { id: original[1].id, name: 'SECOND', value: 'changed', protectedFromAI: true },
+    { name: 'THIRD', value: 'three', protectedFromAI: true },
   ]);
 
-  assert.deepEqual(replacements, [{ FIRST_RENAMED: 'updated', SECOND: 'changed' }]);
+  assert.deepEqual(replacements, [{ FIRST_RENAMED: 'updated', THIRD: 'three' }]);
   assert.deepEqual(result.variables.map(({ name, value, protectedFromAI }) => ({ name, value, protectedFromAI })), [
     { name: 'FIRST_RENAMED', value: 'updated', protectedFromAI: false },
-    { name: 'SECOND', value: 'changed', protectedFromAI: true },
+    { name: 'THIRD', value: 'three', protectedFromAI: true },
   ]);
 });
 

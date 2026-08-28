@@ -241,12 +241,6 @@ input:focus, textarea:focus { border-color: var(--ink); box-shadow: 0 0 0 3px #1
 .environment-protection:has(input:checked) { color: var(--green); }
 .environment-delete { border: 0; background: none; color: #a9442c; padding: 4px; font: 8px 'DM Mono', monospace; cursor: pointer; }
 .environment-delete:disabled { opacity: .35; cursor: default; }
-.environment-new-row { position: relative; background: #f7f4ec; box-shadow: inset 3px 0 var(--accent); }
-.environment-new-row .credential-warning { grid-column: 1 / -1; margin: 0; }
-.environment-new-actions { display: flex; justify-content: flex-end; gap: 3px; }
-.environment-new-actions button { border: 0; background: none; padding: 4px; color: #59615c; font: 8px 'DM Mono', monospace; cursor: pointer; }
-.environment-new-actions button[type='submit'] { color: var(--accent); font-weight: 600; }
-.environment-new-actions button:disabled { opacity: .4; cursor: wait; }
 .environment-controls { display: flex; align-items: center; justify-content: space-between; gap: 18px; margin-top: 10px; }
 .environment-add-button { border: 0; background: none; padding: 5px 2px; color: #68706b; font: 9px 'DM Mono', monospace; cursor: pointer; }
 .environment-add-button:hover { color: var(--accent); }
@@ -329,7 +323,6 @@ input:focus, textarea:focus { border-color: var(--ink); box-shadow: 0 0 0 3px #1
   .environment-value-field { grid-column: 1 / -1; grid-row: 2; }
   .environment-protection { grid-column: 1; grid-row: 3; }
   .environment-delete { grid-column: 2; grid-row: 3; }
-  .environment-new-actions { grid-column: 2; grid-row: 3; }
   .environment-controls { align-items: flex-start; }
   .environment-save-bar { align-items: flex-end; flex-direction: column; }
 }

@@ -32,12 +32,8 @@ const environmentDialog = reactive<{
   variables: EnvironmentVariable[];
   loading: boolean;
   error: string;
-  name: string;
-  value: string;
-  protectedFromAI: boolean;
-  addingVariable: boolean;
   saving: boolean;
-}>({ container: null, variables: [], loading: false, error: '', name: '', value: '', protectedFromAI: true, addingVariable: false, saving: false });
+}>({ container: null, variables: [], loading: false, error: '', saving: false });
 const environmentSnapshot = ref('[]');
 const revealedEnvironmentValues = reactive(new Set<string>());
 const environmentRequestForms = reactive<Record<string, { value: string; protectedFromAI: boolean; saving: boolean; error: string }>>({});
@@ -297,19 +293,10 @@ function clearSession() {
   if (refreshTimer) window.clearInterval(refreshTimer);
 }
 
-function resetEnvironmentForm() {
-  Object.assign(environmentDialog, { name: '', value: '', protectedFromAI: true, addingVariable: false, saving: false });
-}
-
-function showAddEnvironmentVariable() {
-  Object.assign(environmentDialog, { name: '', value: '', protectedFromAI: true, addingVariable: true, error: '' });
-}
-
 function closeEnvironmentDialog() {
   Object.assign(environmentDialog, { container: null, variables: [], loading: false, error: '' });
   environmentSnapshot.value = '[]';
   revealedEnvironmentValues.clear();
-  resetEnvironmentForm();
 }
 
 function environmentSignature(variables: EnvironmentVariable[]) {
@@ -333,32 +320,17 @@ async function openEnvironmentDialog(container: ContainerInfo) {
   }
 }
 
-function sensitiveEnvironmentName(name: string) {
-  return /(?:PASSWORD|PASS|SECRET|TOKEN|KEY|API_KEY|PRIVATE|CREDENTIAL|AUTH|DATABASE_URL)/i.test(name);
-}
-
-async function saveEnvironmentVariable() {
-  const container = environmentDialog.container;
-  if (!container) return;
-  environmentDialog.saving = true;
-  environmentDialog.error = '';
-  try {
-    const variable = await api<EnvironmentVariable>(`/api/containers/${encodeURIComponent(container.name)}/environment/new`, {
-      method: 'PUT',
-      body: JSON.stringify({ name: environmentDialog.name, value: environmentDialog.value, protectedFromAI: environmentDialog.protectedFromAI }),
-    });
-    const index = environmentDialog.variables.findIndex((candidate) => candidate.id === variable.id);
-    if (index >= 0) environmentDialog.variables[index] = variable;
-    else environmentDialog.variables.push(variable);
-    environmentSnapshot.value = environmentSignature(environmentDialog.variables);
-    revealedEnvironmentValues.delete('new');
-    resetEnvironmentForm();
-    await refreshDashboard();
-  } catch (error) {
-    environmentDialog.error = error instanceof Error ? error.message : 'Could not save environment variable';
-  } finally {
-    environmentDialog.saving = false;
-  }
+function addEnvironmentVariable() {
+  const now = new Date().toISOString();
+  environmentDialog.variables.push({
+    id: `new:${crypto.randomUUID()}`,
+    serviceId: environmentDialog.container?.name ?? '',
+    name: '',
+    value: '',
+    protectedFromAI: true,
+    createdAt: now,
+    updatedAt: now,
+  });
 }
 
 async function saveEnvironmentChanges() {
@@ -369,7 +341,14 @@ async function saveEnvironmentChanges() {
   try {
     const result = await api<{ variables: EnvironmentVariable[] }>(`/api/containers/${encodeURIComponent(container.name)}/environment`, {
       method: 'PUT',
-      body: JSON.stringify({ variables: environmentDialog.variables }),
+      body: JSON.stringify({
+        variables: environmentDialog.variables.map(({ id, name, value, protectedFromAI }) => ({
+          ...(!id.startsWith('new:') ? { id } : {}),
+          name,
+          value,
+          protectedFromAI,
+        })),
+      }),
     });
     environmentDialog.variables = result.variables;
     environmentSnapshot.value = environmentSignature(result.variables);
@@ -387,22 +366,9 @@ function toggleEnvironmentValue(id: string) {
   else revealedEnvironmentValues.add(id);
 }
 
-async function deleteEnvironmentVariable(variable: EnvironmentVariable) {
-  const container = environmentDialog.container;
-  if (!container || !window.confirm(`Delete ${variable.name} from ${container.name}? The container will be recreated.`)) return;
-  environmentDialog.saving = true;
-  environmentDialog.error = '';
-  try {
-    await api(`/api/containers/${encodeURIComponent(container.name)}/environment/${encodeURIComponent(variable.id)}`, { method: 'DELETE', body: '{}' });
-    environmentDialog.variables = environmentDialog.variables.filter((candidate) => candidate.id !== variable.id);
-    environmentSnapshot.value = environmentSignature(environmentDialog.variables);
-    revealedEnvironmentValues.delete(variable.id);
-    await refreshDashboard();
-  } catch (error) {
-    environmentDialog.error = error instanceof Error ? error.message : 'Could not delete environment variable';
-  } finally {
-    environmentDialog.saving = false;
-  }
+function deleteEnvironmentVariable(variable: EnvironmentVariable) {
+  environmentDialog.variables = environmentDialog.variables.filter((candidate) => candidate.id !== variable.id);
+  revealedEnvironmentValues.delete(variable.id);
 }
 
 async function loadDashboard() {
@@ -867,49 +833,32 @@ onBeforeUnmount(() => {
         <div class="protection-explanation"><strong>Protected from AI</strong><span>HalfCloud removes protected values from context just before it is sent to AI. The AI can still see variable names and whether they are configured.</span></div>
 
         <p v-if="environmentDialog.loading" class="environment-empty">Loading environment…</p>
-        <div v-else class="environment-editor">
+        <form v-else class="environment-editor" @submit.prevent="saveEnvironmentChanges">
           <div class="environment-list">
             <div class="environment-list-heading"><span>Name</span><span>Value</span><span>Protect from AI</span><span></span></div>
             <div v-for="variable in environmentDialog.variables" :key="variable.id" class="environment-row">
-              <input v-model.trim="variable.name" :disabled="environmentDialog.addingVariable || environmentDialog.saving" aria-label="Variable name" autocomplete="off" pattern="[A-Za-z_][A-Za-z0-9_]*" required>
+              <input v-model.trim="variable.name" :disabled="environmentDialog.saving" aria-label="Variable name" autocomplete="off" placeholder="VARIABLE_NAME" pattern="[A-Za-z_][A-Za-z0-9_]*" required>
               <div class="environment-value-field">
-                <input v-model="variable.value" :disabled="environmentDialog.addingVariable || environmentDialog.saving" :type="revealedEnvironmentValues.has(variable.id) ? 'text' : 'password'" :aria-label="`${variable.name} value`" autocomplete="new-password">
-                <button type="button" :disabled="environmentDialog.addingVariable || environmentDialog.saving" @click="toggleEnvironmentValue(variable.id)">{{ revealedEnvironmentValues.has(variable.id) ? 'Hide' : 'Show' }}</button>
+                <input v-model="variable.value" :disabled="environmentDialog.saving" :type="revealedEnvironmentValues.has(variable.id) ? 'text' : 'password'" :aria-label="`${variable.name || 'New variable'} value`" autocomplete="new-password">
+                <button type="button" :disabled="environmentDialog.saving" @click="toggleEnvironmentValue(variable.id)">{{ revealedEnvironmentValues.has(variable.id) ? 'Hide' : 'Show' }}</button>
               </div>
               <label class="environment-protection" :title="variable.protectedFromAI ? 'This value is omitted from AI data' : 'This value is visible to AI'">
-                <input v-model="variable.protectedFromAI" :disabled="environmentDialog.addingVariable || environmentDialog.saving" type="checkbox">
+                <input v-model="variable.protectedFromAI" :disabled="environmentDialog.saving" type="checkbox">
                 <span>{{ variable.protectedFromAI ? 'Protected' : 'Visible' }}</span>
               </label>
-              <button class="environment-delete danger" type="button" :disabled="environmentChanges || environmentDialog.addingVariable || environmentDialog.saving" title="Save or discard pending edits before deleting" @click="deleteEnvironmentVariable(variable)">Delete</button>
+              <button class="environment-delete danger" type="button" :disabled="environmentDialog.saving" @click="deleteEnvironmentVariable(variable)">Delete</button>
             </div>
-            <form v-if="environmentDialog.addingVariable" class="environment-row environment-new-row" @submit.prevent="saveEnvironmentVariable">
-              <input v-model.trim="environmentDialog.name" aria-label="New variable name" autocomplete="off" placeholder="VARIABLE_NAME" pattern="[A-Za-z_][A-Za-z0-9_]*" required autofocus>
-              <div class="environment-value-field">
-                <input v-model="environmentDialog.value" :type="revealedEnvironmentValues.has('new') ? 'text' : 'password'" aria-label="New variable value" autocomplete="new-password">
-                <button type="button" @click="toggleEnvironmentValue('new')">{{ revealedEnvironmentValues.has('new') ? 'Hide' : 'Show' }}</button>
-              </div>
-              <label class="environment-protection" title="Protected variables are omitted from AI data">
-                <input v-model="environmentDialog.protectedFromAI" type="checkbox">
-                <span>{{ environmentDialog.protectedFromAI ? 'Protected' : 'Visible' }}</span>
-              </label>
-              <div class="environment-new-actions">
-                <button type="button" :disabled="environmentDialog.saving" @click="resetEnvironmentForm">Cancel</button>
-                <button type="submit" :disabled="environmentDialog.saving">Add</button>
-              </div>
-              <p v-if="!environmentDialog.protectedFromAI && sensitiveEnvironmentName(environmentDialog.name)" class="credential-warning">This looks like a credential. Keep AI protection enabled.</p>
-            </form>
-            <p v-if="!environmentDialog.variables.length && !environmentDialog.addingVariable" class="environment-empty">No environment variables configured.</p>
+            <p v-if="!environmentDialog.variables.length" class="environment-empty">No environment variables configured.</p>
           </div>
           <p v-if="environmentDialog.error" class="form-error">{{ environmentDialog.error }}</p>
           <div class="environment-controls">
-            <button v-if="!environmentDialog.addingVariable" class="environment-add-button" type="button" :disabled="environmentChanges || environmentDialog.saving" @click="showAddEnvironmentVariable">+ Add new</button>
-            <span v-else></span>
-            <div v-if="environmentDialog.variables.length" class="environment-save-bar">
+            <button class="environment-add-button" type="button" :disabled="environmentDialog.saving" @click="addEnvironmentVariable">+ Add new</button>
+            <div v-if="environmentDialog.variables.length || environmentChanges" class="environment-save-bar">
               <span>{{ environmentChanges ? 'Unsaved environment changes' : 'Environment is up to date' }}</span>
-              <button class="button primary" type="button" :disabled="!environmentChanges || environmentDialog.addingVariable || environmentDialog.saving" @click="saveEnvironmentChanges">{{ environmentDialog.saving ? 'Applying…' : 'Save changes' }}</button>
+              <button class="button primary" type="submit" :disabled="!environmentChanges || environmentDialog.saving">{{ environmentDialog.saving ? 'Applying…' : 'Save changes' }}</button>
             </div>
           </div>
-        </div>
+        </form>
       </section>
     </div>
   </main>

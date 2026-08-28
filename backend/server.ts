@@ -112,7 +112,7 @@ app.put('/api/containers/:id/environment/:key', async (request, response) => {
 });
 app.put('/api/containers/:id/environment', async (request, response) => {
   const variables = z.array(z.object({
-    id: z.string().min(1),
+    id: z.string().min(1).optional(),
     name: z.string().min(1),
     value: z.string(),
     protectedFromAI: z.boolean(),

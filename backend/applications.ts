@@ -65,20 +65,22 @@ export class ApplicationService {
 
   async saveEnvironmentVariables(
     id: string,
-    inputs: Array<{ id: string; name: string; value: string; protectedFromAI: boolean }>,
+    inputs: Array<{ id?: string; name: string; value: string; protectedFromAI: boolean }>,
   ) {
     const runtime = await this.docker.getContainerEnvironment(id);
     const previous = await this.environment.list(runtime.name, runtime.environment);
     const previousById = new Map(previous.map((variable) => [variable.id, variable]));
-    if (inputs.length !== previous.length || new Set(inputs.map((input) => input.id)).size !== inputs.length) {
+    const suppliedIds = inputs.flatMap((input) => input.id ? [input.id] : []);
+    if (new Set(suppliedIds).size !== suppliedIds.length || suppliedIds.some((variableId) => !previousById.has(variableId))) {
       throw new Error('Environment changed since it was loaded; refresh and try again');
     }
     const now = new Date().toISOString();
     const updated = inputs.map((input) => {
       assertEnvironmentVariableName(input.name);
-      const existing = previousById.get(input.id);
-      if (!existing) throw new Error('Environment changed since it was loaded; refresh and try again');
-      return { ...existing, name: input.name, value: input.value, protectedFromAI: input.protectedFromAI, updatedAt: now };
+      const existing = input.id ? previousById.get(input.id) : undefined;
+      return existing
+        ? { ...existing, name: input.name, value: input.value, protectedFromAI: input.protectedFromAI, updatedAt: now }
+        : { id: `env_${randomUUID()}`, serviceId: runtime.name, name: input.name, value: input.value, protectedFromAI: input.protectedFromAI, createdAt: now, updatedAt: now };
     });
     if (new Set(updated.map((variable) => variable.name)).size !== updated.length) throw new Error('Environment variable names must be unique');
     await this.applyEnvironment(id, runtime.name, previous, updated);
