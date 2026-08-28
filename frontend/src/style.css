@@ -214,9 +214,28 @@ input:focus, textarea:focus { border-color: var(--ink); box-shadow: 0 0 0 3px #1
 .modal-backdrop { position: fixed; inset: 0; z-index: 10; background: #101a17b8; display: grid; place-items: center; padding: 20px; backdrop-filter: blur(3px); }
 .modal { position: relative; width: min(500px, 100%); max-height: 90vh; overflow: auto; background: var(--paper); border-radius: 5px; padding: 38px; box-shadow: 0 30px 80px #0004; }
 .modal-close { position: absolute; right: 17px; top: 13px; border: 0; background: none; font-size: 26px; color: var(--muted); cursor: pointer; }
-.logs-modal { width: min(850px, 100%); }
+.logs-modal { width: min(1120px, 100%); }
 .domain-modal form { margin-top: 24px; }
-.logs-modal pre { max-height: 60vh; overflow: auto; background: #111b18; color: #d8e2dc; padding: 20px; border-radius: 3px; font: 11px/1.65 'DM Mono', monospace; white-space: pre-wrap; word-break: break-word; }
+.logs-toolbar { display: grid; grid-template-columns: minmax(220px, 1fr) 110px auto; align-items: end; gap: 10px; margin: 22px 0 10px; }
+.logs-toolbar label { margin: 0; }
+.logs-toolbar label > span:first-child { display: block; margin-bottom: 7px; }
+.logs-search-field { position: relative; display: block; }
+.logs-search-field svg { position: absolute; left: 12px; top: 50%; width: 15px; height: 15px; transform: translateY(-50%); fill: none; stroke: #737a75; stroke-width: 1.8; stroke-linecap: round; }
+.logs-search input { height: 39px; padding: 9px 12px 9px 37px; font: 11px 'DM Mono', monospace; }
+.logs-lines select { width: 100%; height: 39px; padding: 0 10px; border: 1px solid #c9c7be; border-radius: 3px; outline: none; background: #fffefb; color: var(--ink); font: 11px 'DM Mono', monospace; }
+.logs-lines select:focus { border-color: var(--ink); box-shadow: 0 0 0 3px #16231f12; }
+.logs-reverse { height: 39px; display: flex !important; align-items: center; gap: 9px; padding: 0 12px; border: 1px solid #c9c7be; border-radius: 3px; background: #fffefb; cursor: pointer; user-select: none; }
+.logs-reverse > span:last-child { margin: 0; }
+.logs-reverse input { position: absolute; opacity: 0; pointer-events: none; }
+.switch-track { display: block; width: 28px; height: 16px; margin: 0 !important; padding: 2px; border-radius: 10px; background: #bbbdb7; transition: background .15s; }
+.switch-track i { display: block; width: 12px; height: 12px; border-radius: 50%; background: white; box-shadow: 0 1px 2px #0003; transition: transform .15s; }
+.logs-reverse input:checked + .switch-track { background: var(--green); }
+.logs-reverse input:checked + .switch-track i { transform: translateX(12px); }
+.logs-reverse:has(input:focus-visible) { border-color: var(--ink); box-shadow: 0 0 0 3px #16231f12; }
+.logs-output { min-height: 180px; max-height: 62vh; overflow: auto; background: #111b18; border-radius: 3px; }
+.logs-modal pre { margin: 0; color: #d8e2dc; padding: 20px; font: 11px/1.65 'DM Mono', monospace; white-space: pre-wrap; word-break: break-word; }
+.logs-state { display: grid; min-height: 180px; margin: 0; padding: 20px; place-items: center; color: #9ba8a1; font: 10px 'DM Mono', monospace; letter-spacing: .08em; text-transform: uppercase; }
+.logs-state.error { color: #ff9678; text-transform: none; letter-spacing: 0; }
 
 @media (max-width: 900px) {
   .auth-shell { grid-template-columns: 1fr; }
@@ -245,6 +264,8 @@ input:focus, textarea:focus { border-color: var(--ink); box-shadow: 0 0 0 3px #1
   .message.user { max-width: 88%; }
   .auth-panel { padding: 30px 24px; }
   .modal { padding: 30px 22px; }
+  .logs-toolbar { grid-template-columns: 1fr 90px; }
+  .logs-reverse { grid-column: 1 / -1; width: max-content; }
   .domain-row { grid-template-columns: 8px minmax(0, 1fr); }
   .domain-actions { grid-column: 2; justify-content: flex-start; }
 }

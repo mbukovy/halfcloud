@@ -27,7 +27,7 @@ const dashboardError = ref('');
 const actionId = ref('');
 const domainAction = ref('');
 const domainDialog = reactive<{ container: ContainerInfo | null; hostname: string; error: string; saving: boolean }>({ container: null, hostname: '', error: '', saving: false });
-const logs = ref<{ name: string; content: string } | null>(null);
+const logs = ref<{ id: string; name: string; content: string; tail: number; search: string; reverse: boolean; loading: boolean; error: string } | null>(null);
 const prompt = ref('');
 const transcript = ref<HTMLElement>();
 const composerInput = ref<HTMLTextAreaElement>();
@@ -46,6 +46,14 @@ const { messages, sendMessage, status, error: chatError, stop, clearError, addTo
 });
 
 const chatBusy = computed(() => status.value === 'submitted' || status.value === 'streaming');
+const visibleLogs = computed(() => {
+  if (!logs.value?.content) return 'No recent logs.';
+  const search = logs.value.search.trim().toLowerCase();
+  let lines = logs.value.content.split(/\r?\n/);
+  if (search) lines = lines.filter((line) => line.toLowerCase().includes(search));
+  if (logs.value.reverse) lines.reverse();
+  return lines.join('\n') || 'No matching log lines.';
+});
 
 function formatBytes(bytes: number) {
   if (!Number.isFinite(bytes) || bytes <= 0) return '0 MB';
@@ -320,14 +328,24 @@ async function runMenuAction(event: Event, container: ContainerInfo, action: 'st
 }
 
 async function showLogs(container: ContainerInfo) {
+  logs.value = { id: container.id, name: container.name, content: '', tail: 200, search: '', reverse: false, loading: true, error: '' };
   actionId.value = container.id;
+  await refreshLogs();
+  actionId.value = '';
+}
+
+async function refreshLogs() {
+  if (!logs.value) return;
+  const current = logs.value;
+  current.loading = true;
+  current.error = '';
   try {
-    const result = await api<{ logs: string }>(`/api/containers/${encodeURIComponent(container.id)}/logs?tail=200`);
-    logs.value = { name: container.name, content: result.logs || 'No recent logs.' };
+    const result = await api<{ logs: string }>(`/api/containers/${encodeURIComponent(current.id)}/logs?tail=${current.tail}`);
+    if (logs.value === current) current.content = result.logs;
   } catch (error) {
-    dashboardError.value = error instanceof Error ? error.message : 'Could not read logs';
+    if (logs.value === current) current.error = error instanceof Error ? error.message : 'Could not read logs';
   } finally {
-    actionId.value = '';
+    if (logs.value === current) current.loading = false;
   }
 }
 
@@ -590,9 +608,35 @@ onBeforeUnmount(() => {
     <div v-if="logs" class="modal-backdrop" @click.self="logs = null">
       <section class="modal logs-modal">
         <button class="modal-close" @click="logs = null">×</button>
-        <p class="eyebrow">RECENT OUTPUT / 200 LINES</p>
+        <p class="eyebrow">RECENT OUTPUT / {{ logs.tail }} LINES</p>
         <h2>{{ logs.name }} logs</h2>
-        <pre>{{ logs.content }}</pre>
+        <div class="logs-toolbar">
+          <label class="logs-search">
+            <span>Search logs</span>
+            <span class="logs-search-field">
+              <svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="11" cy="11" r="6"></circle><path d="m16 16 4 4"></path></svg>
+              <input v-model="logs.search" type="search" placeholder="Filter log lines…" autocomplete="off">
+            </span>
+          </label>
+          <label class="logs-lines">
+            <span>Lines</span>
+            <select v-model.number="logs.tail" :disabled="logs.loading" @change="refreshLogs">
+              <option :value="200">200</option>
+              <option :value="500">500</option>
+              <option :value="1000">1,000</option>
+            </select>
+          </label>
+          <label class="logs-reverse" title="Show the latest log lines first">
+            <input v-model="logs.reverse" type="checkbox">
+            <span class="switch-track" aria-hidden="true"><i></i></span>
+            <span>Reverse</span>
+          </label>
+        </div>
+        <div class="logs-output">
+          <p v-if="logs.loading" class="logs-state">Loading logs…</p>
+          <p v-else-if="logs.error" class="logs-state error">{{ logs.error }}</p>
+          <pre v-else>{{ visibleLogs }}</pre>
+        </div>
       </section>
     </div>
 
