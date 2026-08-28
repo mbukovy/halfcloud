@@ -71,10 +71,21 @@ export interface EnvironmentVariable {
 
 export interface PublicSettings {
   configured: boolean;
-  provider: 'azure';
-  endpoint: string;
-  deployment: string;
+  providerConfigured: boolean;
+  llmReady: boolean;
+  provider?: LlmProvider;
+  endpoint?: string;
+  model?: string;
+  hasApiKey: boolean;
+  capabilities?: ModelCapabilities;
+  verifiedAt?: string;
 }
+
+export type LlmProvider = 'openai' | 'anthropic' | 'azure-foundry' | 'cerebras' | 'groq' | 'gemini';
+export interface ModelCapabilities { streaming: boolean; tools: boolean; vision?: boolean; reasoning?: boolean }
+export interface ModelInfo { id: string; name: string }
+export interface ProviderMetadata { id: LlmProvider; label: string; icon: string; requiresEndpoint: boolean; recommendedModel?: string }
+export interface LlmSettingsResponse extends PublicSettings { providers: ProviderMetadata[] }
 
 export async function api<T>(url: string, options?: RequestInit): Promise<T> {
   const response = await fetch(url, {

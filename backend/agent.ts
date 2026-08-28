@@ -1,38 +1,10 @@
-import { createAzure } from '@ai-sdk/azure';
 import { ToolLoopAgent, createAgentUIStreamResponse, tool, type UIMessage } from 'ai';
 import { z } from 'zod';
 import type { AiSettings } from './config.js';
 import type { ApplicationService } from './applications.js';
 import { getServerStats } from './metrics.js';
-
-function redact(value: string, apiKey: string) {
-  return value
-    .replaceAll(apiKey, '[REDACTED]')
-    .replace(/((?:api[-_ ]?key|authorization)["' ]*[:=]["' ]*)([^\s,"'}]+)/gi, '$1[REDACTED]')
-    .replace(/Bearer\s+[^\s,"'}]+/gi, 'Bearer [REDACTED]');
-}
-
-function errorDetails(error: unknown, apiKey: string) {
-  const details: string[] = [];
-  let current: unknown = error;
-
-  for (let depth = 0; current && depth < 4; depth++) {
-    if (current instanceof Error) {
-      const namedError = current as Error & { statusCode?: unknown; responseBody?: unknown; url?: unknown };
-      const description = `${namedError.name}: ${namedError.message}`;
-      if (!details.includes(description)) details.push(description);
-      if (namedError.statusCode != null) details.push(`HTTP status: ${String(namedError.statusCode)}`);
-      if (typeof namedError.url === 'string') details.push(`Request URL: ${namedError.url}`);
-      if (typeof namedError.responseBody === 'string') details.push(`Azure response: ${namedError.responseBody}`);
-      current = current.cause;
-    } else {
-      details.push(String(current));
-      break;
-    }
-  }
-
-  return redact(details.join('\n'), apiKey).slice(0, 4000) || 'Unknown error';
-}
+import { createLanguageModel, redactProviderError } from './llm/index.js';
+export { legacyAzureProviderOptions as azureProviderOptions } from './llm/index.js';
 
 export function sanitizeAgentMessages(messages: UIMessage[]): UIMessage[] {
   return messages.map((message) => ({
@@ -83,32 +55,6 @@ export function sanitizeAgentMessages(messages: UIMessage[]): UIMessage[] {
   }));
 }
 
-export function azureProviderOptions(settings: AiSettings) {
-  const endpoint = new URL(settings.endpoint);
-  const endpointPath = endpoint.pathname.replace(/\/+$/, '');
-  const resourceMatch = endpoint.hostname.match(/^([^.]+)\.openai\.azure\.com$/);
-  const foundryEndpoint = endpoint.hostname.endsWith('.services.ai.azure.com');
-
-  if (resourceMatch && !['', '/openai', '/openai/v1'].includes(endpointPath)) {
-    throw new Error(`Invalid Azure OpenAI endpoint path "${endpointPath}". Use the resource endpoint only, for example https://${resourceMatch[1]}.openai.azure.com`);
-  }
-
-  if (resourceMatch) return { resourceName: resourceMatch[1], apiKey: settings.apiKey };
-
-  if (foundryEndpoint) {
-    if (!['', '/openai', '/openai/v1', '/openai/v1/responses'].includes(endpointPath)) {
-      throw new Error(`Invalid Azure AI Foundry endpoint path "${endpointPath}". Use ${endpoint.origin} or ${endpoint.origin}/openai/v1/responses`);
-    }
-    return { baseURL: `${endpoint.origin}/openai/v1`, apiKey: settings.apiKey };
-  }
-
-  const basePath = endpointPath.replace(/\/v1$/, '');
-  return {
-    baseURL: `${endpoint.origin}${basePath.endsWith('/openai') ? basePath : `${basePath}/openai`}`,
-    apiKey: settings.apiKey,
-  };
-}
-
 const SYSTEM_PROMPT = `You are HalfCloud, the operator of a real VPS. Docker tool calls affect the real machine.
 
 Rules:
@@ -153,7 +99,6 @@ export async function createChatResponse(
   abortSignal?: AbortSignal,
   requestId = 'unknown',
 ) {
-  const provider = createAzure(azureProviderOptions(settings));
   const serviceId = z.string().min(1).describe('Service ID');
   const appId = z.string().min(1).describe('App ID or exact App display name');
   const serviceSchema = z.object({
@@ -302,7 +247,7 @@ export async function createChatResponse(
 
   const agent = new ToolLoopAgent({
     id: 'halfcloud-docker-operator',
-    model: provider.responses(settings.deployment),
+    model: createLanguageModel(settings),
     instructions: SYSTEM_PROMPT,
     tools,
     toolApproval: { deleteApp: 'user-approval', removeService: 'user-approval', deleteManagedVolume: 'user-approval', repairStorageOwnership: 'user-approval', removeRouteProtection: 'user-approval' },
@@ -312,9 +257,9 @@ export async function createChatResponse(
     uiMessages: sanitizeAgentMessages(messages),
     abortSignal,
     onError: (error) => {
-      const details = errorDetails(error, settings.apiKey);
-      console.error(`[chat:${requestId}] Azure OpenAI stream failed\n${details}`, error instanceof Error ? error.stack : '');
-      return `Azure OpenAI request failed (request ID: ${requestId}).\nEndpoint: ${settings.endpoint}\nDeployment: ${settings.deployment}\n${details}`;
+      const details = redactProviderError(error, settings.apiKey);
+      console.error(`[chat:${requestId}] LLM stream failed (${settings.provider}/${settings.model})\n${details}`);
+      return `AI provider request failed (request ID: ${requestId}). Please check the AI Provider settings and try again.`;
     },
   });
 }

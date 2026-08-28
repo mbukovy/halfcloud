@@ -3,7 +3,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } 
 import { useChat } from '@ai-sdk/vue';
 import { DefaultChatTransport, lastAssistantMessageIsCompleteWithApprovalResponses } from 'ai';
 import MarkdownIt from 'markdown-it';
-import { api, type AppInfo, type ContainerInfo, type EnvironmentVariable, type PublicSettings, type ServerStats, type ServiceDomain } from './api';
+import { api, type AppInfo, type ContainerInfo, type EnvironmentVariable, type LlmProvider, type LlmSettingsResponse, type ModelInfo, type ProviderMetadata, type PublicSettings, type ServerStats, type ServiceDomain } from './api';
 
 const markdown = new MarkdownIt({ html: false, linkify: true, breaks: true });
 markdown.renderer.rules.link_open = (tokens, index, options, environment, renderer) => {
@@ -17,9 +17,15 @@ const loading = ref(true);
 const accessCode = ref('');
 const loginError = ref('');
 const settings = ref<PublicSettings | null>(null);
-const settingsForm = reactive({ endpoint: '', apiKey: '', deployment: 'gpt-5.6-sol' });
+const providers = ref<ProviderMetadata[]>([]);
+const settingsForm = reactive({ provider: '' as LlmProvider | '', endpoint: '', apiKey: '', model: '', customModel: '' });
 const settingsOpen = ref(false);
+const settingsStage = ref<'summary' | 'picker' | 'configure'>('picker');
 const savingSettings = ref(false);
+const testingSettings = ref(false);
+const credentialsVerified = ref(false);
+const availableModels = ref<ModelInfo[]>([]);
+const useCustomModel = ref(false);
 const settingsError = ref('');
 const apps = ref<AppInfo[]>([]);
 const server = ref<ServerStats | null>(null);
@@ -68,6 +74,9 @@ const visibleLogs = computed(() => {
   if (logs.value.reverse) lines.reverse();
   return lines.join('\n') || 'No matching log lines.';
 });
+const selectedProvider = computed(() => providers.value.find((provider) => provider.id === settingsForm.provider));
+const selectedModel = computed(() => useCustomModel.value ? settingsForm.customModel.trim() : settingsForm.model);
+const activeProvider = computed(() => providers.value.find((provider) => provider.id === settings.value?.provider));
 
 function formatBytes(bytes: number) {
   if (!Number.isFinite(bytes) || bytes <= 0) return '0 MB';
@@ -425,14 +434,16 @@ async function loadDashboard() {
   dashboardError.value = '';
   try {
     const [newSettings, newApps, newServer] = await Promise.all([
-      api<PublicSettings>('/api/settings'),
+      api<LlmSettingsResponse>('/api/settings/llm'),
       api<AppInfo[]>('/api/apps'),
       api<ServerStats>('/api/server/stats'),
     ]);
     settings.value = newSettings;
+    providers.value = newSettings.providers;
     apps.value = newApps;
     server.value = newServer;
-    Object.assign(settingsForm, { endpoint: newSettings.endpoint, apiKey: '', deployment: newSettings.deployment });
+    Object.assign(settingsForm, { provider: newSettings.provider ?? '', endpoint: newSettings.endpoint ?? '', apiKey: '', model: newSettings.model ?? '', customModel: '' });
+    settingsStage.value = newSettings.configured ? 'summary' : 'picker';
     if (!newSettings.configured) settingsOpen.value = true;
     if (refreshTimer) window.clearInterval(refreshTimer);
     refreshTimer = window.setInterval(refreshDashboard, 7000);
@@ -454,16 +465,58 @@ async function refreshDashboard() {
   }
 }
 
+function openSettings() {
+  settingsStage.value = settings.value?.configured ? 'summary' : 'picker';
+  settingsOpen.value = true;
+}
+
+function chooseProvider(provider: ProviderMetadata) {
+  Object.assign(settingsForm, {
+    provider: provider.id,
+    endpoint: settings.value?.provider === provider.id ? settings.value.endpoint ?? '' : '',
+    apiKey: '',
+    model: settings.value?.provider === provider.id ? settings.value.model ?? '' : '',
+    customModel: '',
+  });
+  credentialsVerified.value = false;
+  availableModels.value = [];
+  useCustomModel.value = false;
+  settingsError.value = '';
+  settingsStage.value = 'configure';
+}
+
+async function testConnection() {
+  if (!settingsForm.provider) return;
+  testingSettings.value = true;
+  credentialsVerified.value = false;
+  settingsError.value = '';
+  try {
+    const result = await api<{ success: boolean; models: ModelInfo[] }>('/api/settings/llm/test', {
+      method: 'POST',
+      body: JSON.stringify({ provider: settingsForm.provider, apiKey: settingsForm.apiKey || undefined, endpoint: settingsForm.endpoint || undefined }),
+    });
+    availableModels.value = result.models;
+    credentialsVerified.value = true;
+    if (!settingsForm.model || !result.models.some((model) => model.id === settingsForm.model)) settingsForm.model = result.models[0]?.id ?? '';
+    if (!result.models.length) useCustomModel.value = true;
+  } catch (error) {
+    settingsError.value = error instanceof Error ? error.message : 'Could not test connection';
+  } finally {
+    testingSettings.value = false;
+  }
+}
+
 async function saveSettings() {
+  if (!settingsForm.provider || !credentialsVerified.value || !selectedModel.value) return;
   savingSettings.value = true;
   settingsError.value = '';
   try {
-    settings.value = await api<PublicSettings>('/api/settings', {
+    settings.value = await api<PublicSettings>('/api/settings/llm', {
       method: 'PUT',
-      body: JSON.stringify({ provider: 'azure', ...settingsForm }),
+      body: JSON.stringify({ provider: settingsForm.provider, endpoint: settingsForm.endpoint || undefined, apiKey: settingsForm.apiKey || undefined, model: selectedModel.value }),
     });
     settingsForm.apiKey = '';
-    settingsOpen.value = false;
+    settingsStage.value = 'summary';
   } catch (error) {
     settingsError.value = error instanceof Error ? error.message : 'Could not save settings';
   } finally {
@@ -647,7 +700,7 @@ onBeforeUnmount(() => {
       <div class="brand"><img class="brand-mark" src="/halfcloud-logo-ui.png" alt=""><strong>HalfCloud</strong><span class="version">0.1</span></div>
       <div class="server-health"><span class="health-dot"></span><span>HOST HEALTHY</span></div>
       <div class="header-actions">
-        <button class="text-button" @click="settingsOpen = true">AI settings</button>
+        <button class="text-button" @click="openSettings">AI settings</button>
         <button class="text-button" @click="logout">Sign out</button>
       </div>
     </header>
@@ -780,9 +833,9 @@ onBeforeUnmount(() => {
         </div>
         <div class="conversation-footer">
           <form class="composer" @submit.prevent="submitPrompt">
-            <textarea ref="composerInput" v-model="prompt" :disabled="!settings?.configured || chatBusy" rows="2" :placeholder="!settings?.configured ? 'Configure Azure OpenAI to start…' : chatBusy ? 'HalfCloud is working…' : 'Tell HalfCloud what should be running…'" @keydown.enter.exact.prevent="submitPrompt"></textarea>
+            <textarea ref="composerInput" v-model="prompt" :disabled="!settings?.llmReady || chatBusy" rows="2" :placeholder="!settings?.llmReady ? 'Configure an AI provider to start…' : chatBusy ? 'HalfCloud is working…' : 'Tell HalfCloud what should be running…'" @keydown.enter.exact.prevent="submitPrompt"></textarea>
             <button v-if="chatBusy" class="send-button stop" type="button" title="Stop" @click="stop">■</button>
-            <button v-else class="send-button" type="submit" :disabled="!prompt.trim() || !settings?.configured" title="Send">↑</button>
+            <button v-else class="send-button" type="submit" :disabled="!prompt.trim() || !settings?.llmReady" title="Send">↑</button>
           </form>
           <div class="conversation-loader" :class="{ active: chatBusy }" role="status" aria-live="polite">
             <span>{{ chatBusy ? 'Working' : '' }}</span>
@@ -876,19 +929,79 @@ onBeforeUnmount(() => {
     <div v-if="settingsOpen" class="modal-backdrop" @click.self="settings?.configured && (settingsOpen = false)">
       <section class="modal settings-modal">
         <button v-if="settings?.configured" class="modal-close" @click="settingsOpen = false">×</button>
-        <p class="eyebrow">MODEL CONNECTION</p>
-        <h2>Azure OpenAI</h2>
-        <p>Credentials stay on this VPS and are never returned to the browser.</p>
-        <form @submit.prevent="saveSettings">
-          <label for="endpoint">Endpoint</label>
-          <input id="endpoint" v-model="settingsForm.endpoint" type="url" placeholder="https://resource.openai.azure.com" required>
-          <label for="api-key">API key</label>
-          <input id="api-key" v-model="settingsForm.apiKey" type="password" autocomplete="off" :placeholder="settings?.configured ? 'Enter key to replace current credentials' : 'Azure OpenAI API key'" required>
-          <label for="deployment">Deployment / model</label>
-          <input id="deployment" v-model="settingsForm.deployment" required>
-          <p v-if="settingsError" class="form-error">{{ settingsError }}</p>
-          <button class="button primary wide" :disabled="savingSettings" type="submit">{{ savingSettings ? 'Saving…' : 'Save connection' }}</button>
-        </form>
+        <template v-if="settingsStage === 'summary' && settings?.configured">
+          <p class="eyebrow">SETTINGS / AI PROVIDER</p>
+          <h2>AI Provider</h2>
+          <div class="provider-summary">
+            <img v-if="activeProvider" :src="activeProvider.icon" alt="" @error="($event.target as HTMLImageElement).hidden = true">
+            <div><span>Provider</span><strong>{{ activeProvider?.label }}</strong></div>
+            <div><span>Model</span><strong>{{ settings.model }}</strong></div>
+            <div><span>Status</span><strong class="connected"><i></i> Connected</strong></div>
+            <div><span>API key</span><strong>••••••••••••</strong></div>
+          </div>
+          <div class="verification-list">
+            <span>✓ Connection verified</span>
+            <span v-if="settings.capabilities?.streaming">✓ Streaming supported</span>
+            <span v-if="settings.capabilities?.tools">✓ Tool calling supported</span>
+          </div>
+          <div class="settings-actions">
+            <button v-if="activeProvider" class="button" type="button" @click="chooseProvider(activeProvider)">Change model or key</button>
+            <button class="button" type="button" @click="settingsStage = 'picker'">Change provider</button>
+            <button class="button primary" type="button" @click="settingsOpen = false">Continue</button>
+          </div>
+        </template>
+
+        <template v-else-if="settingsStage === 'picker'">
+          <p class="eyebrow">AI SETUP</p>
+          <h2>Choose your AI provider</h2>
+          <p>Your provider powers the HalfCloud operator. You can change it later without reinstalling.</p>
+          <div class="provider-grid">
+            <button v-for="provider in providers" :key="provider.id" type="button" @click="chooseProvider(provider)">
+              <span class="provider-icon-shell">
+                <img :src="provider.icon" :alt="`${provider.label} icon`" @error="($event.target as HTMLImageElement).hidden = true">
+                <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 3 14.4 9.6 21 12l-6.6 2.4L12 21l-2.4-6.6L3 12l6.6-2.4L12 3Z"></path></svg>
+              </span>
+              <strong>{{ provider.label }}</strong>
+            </button>
+          </div>
+        </template>
+
+        <template v-else>
+          <button class="settings-back" type="button" @click="settingsStage = 'picker'">← All providers</button>
+          <p class="eyebrow">AI PROVIDER</p>
+          <h2>{{ selectedProvider?.label }}</h2>
+          <p>The API key stays on this VPS. It is never returned to the browser or exposed to the agent.</p>
+          <form @submit.prevent="saveSettings">
+            <template v-if="selectedProvider?.requiresEndpoint">
+              <label for="endpoint">Endpoint</label>
+              <input id="endpoint" v-model.trim="settingsForm.endpoint" type="url" placeholder="https://resource.openai.azure.com/openai/v1/" required @input="credentialsVerified = false">
+              <small class="field-help">Use the OpenAI v1-compatible Azure Foundry endpoint ending in /openai/v1/.</small>
+            </template>
+            <label for="api-key">API key</label>
+            <input id="api-key" v-model="settingsForm.apiKey" type="password" autocomplete="new-password" :placeholder="settings?.provider === settingsForm.provider ? '•••••••••••• (leave blank to keep)' : 'Enter API key'" :required="settings?.provider !== settingsForm.provider" @input="credentialsVerified = false">
+            <button class="test-connection" type="button" :disabled="testingSettings || !settingsForm.provider || (!settingsForm.apiKey && settings?.provider !== settingsForm.provider)" @click="testConnection">
+              {{ testingSettings ? 'Testing…' : credentialsVerified ? '✓ Connected' : 'Test connection' }}
+            </button>
+
+            <template v-if="credentialsVerified">
+              <label for="model">Model</label>
+              <select id="model" v-model="settingsForm.model" :disabled="useCustomModel" required>
+                <option value="" disabled>Select a model</option>
+                <option v-for="model in availableModels" :key="model.id" :value="model.id">
+                  {{ model.name || model.id }}{{ model.id === selectedProvider?.recommendedModel ? ' — Recommended' : '' }}
+                </option>
+              </select>
+              <label class="custom-model-toggle"><input v-model="useCustomModel" type="checkbox"> Other / Custom model</label>
+              <template v-if="useCustomModel">
+                <label for="custom-model">Model ID</label>
+                <input id="custom-model" v-model.trim="settingsForm.customModel" autocomplete="off" placeholder="Provider model ID" required>
+              </template>
+              <div class="compatibility-note"><span>Next check</span><strong>Streaming and tool calling</strong><p>The active configuration changes only after this model passes both checks.</p></div>
+            </template>
+            <p v-if="settingsError" class="form-error">{{ settingsError }}</p>
+            <button v-if="credentialsVerified" class="button primary wide" :disabled="savingSettings || !selectedModel" type="submit">{{ savingSettings ? 'Verifying model…' : 'Verify model and save' }}</button>
+          </form>
+        </template>
       </section>
     </div>
 

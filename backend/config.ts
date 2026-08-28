@@ -1,15 +1,16 @@
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { z } from 'zod';
+import { llmConfigurationSchema, type LlmProviderConfig, type PublicLlmSettings } from './llm/types.js';
 
-const settingsSchema = z.object({
+const legacySettingsSchema = z.object({
   provider: z.literal('azure'),
-  endpoint: z.string().url().refine((value) => value.startsWith('https://'), 'Endpoint must use HTTPS'),
+  endpoint: z.string().url(),
   apiKey: z.string().min(1),
   deployment: z.string().min(1),
 });
 
-export type AiSettings = z.infer<typeof settingsSchema>;
+export type AiSettings = LlmProviderConfig;
 
 export class SettingsStore {
   readonly dataDir: string;
@@ -20,25 +21,47 @@ export class SettingsStore {
     this.settingsPath = path.join(dataDir, 'settings.json');
   }
 
-  async get(): Promise<AiSettings | null> {
+  async get(): Promise<LlmProviderConfig | null> {
     try {
-      return settingsSchema.parse(JSON.parse(await readFile(this.settingsPath, 'utf8')));
+      const value: unknown = JSON.parse(await readFile(this.settingsPath, 'utf8'));
+      const legacy = legacySettingsSchema.safeParse(value);
+      if (legacy.success) {
+        const endpoint = new URL(legacy.data.endpoint);
+        return llmConfigurationSchema.parse({
+          provider: 'azure-foundry',
+          endpoint: `${endpoint.origin}/openai/v1`,
+          apiKey: legacy.data.apiKey,
+          model: legacy.data.deployment,
+          capabilities: { streaming: true, tools: true },
+          verifiedAt: new Date(0).toISOString(),
+        });
+      }
+      return llmConfigurationSchema.parse(value);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
       throw error;
     }
   }
 
-  async publicValue() {
+  async publicValue(): Promise<PublicLlmSettings> {
     const settings = await this.get();
     return settings
-      ? { configured: true, provider: settings.provider, endpoint: settings.endpoint, deployment: settings.deployment }
-      : { configured: false, provider: 'azure' as const, endpoint: '', deployment: 'gpt-5.6-sol' };
+      ? {
+          configured: true,
+          providerConfigured: true,
+          llmReady: true,
+          provider: settings.provider,
+          model: settings.model,
+          endpoint: settings.endpoint,
+          hasApiKey: true,
+          capabilities: settings.capabilities,
+          verifiedAt: settings.verifiedAt,
+        }
+      : { configured: false, providerConfigured: false, llmReady: false, hasApiKey: false };
   }
 
   async save(value: unknown) {
-    const settings = settingsSchema.parse(value);
-    settings.endpoint = settings.endpoint.replace(/\/+$/, '');
+    const settings = llmConfigurationSchema.parse(value);
     await mkdir(this.dataDir, { recursive: true, mode: 0o700 });
     const temporaryPath = `${this.settingsPath}.tmp`;
     await writeFile(temporaryPath, `${JSON.stringify(settings, null, 2)}\n`, { mode: 0o600 });

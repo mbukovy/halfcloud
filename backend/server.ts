@@ -11,6 +11,9 @@ import { DockerService } from './docker.js';
 import { ApplicationService } from './applications.js';
 import { createChatResponse } from './agent.js';
 import { getServerStats } from './metrics.js';
+import { credentialsSchema } from './llm/types.js';
+import { listModels, providerMetadata, testModel } from './llm/index.js';
+import type { LlmCredentials } from './llm/types.js';
 
 const app = express();
 const port = Number(process.env.PORT ?? 9000);
@@ -20,6 +23,14 @@ const docker = new ApplicationService(new DockerService());
 await docker.assertRootless();
 await docker.syncRoutes();
 const loginAttempts = new Map<string, { count: number; resetAt: number }>();
+
+async function resolveLlmCredentials(value: unknown): Promise<LlmCredentials> {
+  const input = z.object({ provider: z.enum(['openai', 'anthropic', 'azure-foundry', 'cerebras', 'groq', 'gemini']), apiKey: z.string().optional(), endpoint: z.string().optional() }).parse(value);
+  const active = await settings.get();
+  const apiKey = input.apiKey || (active?.provider === input.provider ? active.apiKey : undefined);
+  const endpoint = input.endpoint || (active?.provider === input.provider ? active.endpoint : undefined);
+  return credentialsSchema.parse({ provider: input.provider, apiKey, endpoint });
+}
 
 app.set('trust proxy', 1);
 app.disable('x-powered-by');
@@ -78,7 +89,29 @@ app.use('/api', (request, response, next) => {
 });
 
 app.get('/api/settings', async (_request, response) => response.json(await settings.publicValue()));
-app.put('/api/settings', async (request, response) => response.json(await settings.save({ ...request.body, provider: 'azure' })));
+app.get('/api/settings/llm', async (_request, response) => response.json({ ...(await settings.publicValue()), providers: providerMetadata }));
+app.get('/api/settings/llm/models', async (_request, response) => {
+  const active = await settings.get();
+  if (!active) return response.status(409).json({ error: 'Configure an AI provider first' });
+  response.json({ models: await listModels(active) });
+});
+app.post('/api/settings/llm/test', async (request, response) => {
+  const credentials = await resolveLlmCredentials(request.body);
+  const models = await listModels(credentials);
+  if (!request.body?.model) {
+    response.json({ success: true, models });
+    return;
+  }
+  const model = z.string().min(1).parse(request.body.model);
+  const capabilities = await testModel(credentials, model);
+  response.json({ success: true, models, capabilities });
+});
+app.put('/api/settings/llm', async (request, response) => {
+  const credentials = await resolveLlmCredentials(request.body);
+  const model = z.string().min(1).parse(request.body.model);
+  const capabilities = await testModel(credentials, model);
+  response.json(await settings.save({ ...credentials, model, capabilities, verifiedAt: new Date().toISOString() }));
+});
 app.get('/api/server/stats', async (_request, response) => response.json({ ...(await getServerStats()), docker: await docker.getRuntimeInfo() }));
 app.get('/api/apps', async (_request, response) => response.json(await docker.listApps()));
 app.get('/api/apps/:appId', async (request, response) => response.json(await docker.getApp(request.params.appId)));
@@ -169,7 +202,7 @@ app.post('/api/chat', async (request, response) => {
   response.setHeader('x-request-id', requestId);
   const aiSettings = await settings.get();
   if (!aiSettings) {
-    response.status(409).json({ error: 'Configure Azure OpenAI before using chat' });
+    response.status(409).json({ error: 'Configure an AI provider before using chat' });
     return;
   }
   const messages = z.array(z.object({ id: z.string(), role: z.enum(['system', 'user', 'assistant']), parts: z.array(z.any()) }).passthrough()).max(100).parse(request.body?.messages);
@@ -178,7 +211,7 @@ app.post('/api/chat', async (request, response) => {
   response.once('close', () => {
     if (!response.writableFinished) abortController.abort();
   });
-  console.log(`[chat:${requestId}] Starting Azure OpenAI request (endpoint=${aiSettings.endpoint}, deployment=${aiSettings.deployment}, messages=${messages.length})`);
+  console.log(`[chat:${requestId}] Starting LLM request (provider=${aiSettings.provider}, model=${aiSettings.model}, messages=${messages.length})`);
   const webResponse = await createChatResponse(aiSettings, docker, messages, abortController.signal, requestId);
   response.status(webResponse.status);
   webResponse.headers.forEach((value, key) => response.setHeader(key, value));
