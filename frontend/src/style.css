@@ -165,6 +165,19 @@ input:focus, textarea:focus { border-color: var(--ink); box-shadow: 0 0 0 3px #1
 .empty-containers p { margin-bottom: 5px; color: var(--ink); }
 .empty-containers small { font-size: 11px; }
 .container-card { margin: 0 18px 14px; background: var(--panel); border: 1px solid var(--line); border-radius: 4px; padding: 18px; }
+.app-card.multi-service { padding-bottom: 14px; }
+.app-title h3 { display: flex; align-items: baseline; gap: 8px; font-size: 17px; }
+.rename-button { border: 0; background: none; color: var(--muted); padding: 0; font: 8px 'DM Mono', monospace; text-transform: uppercase; cursor: pointer; }
+.rename-button:hover { color: var(--accent); }
+.app-services:not(.single) { display: grid; gap: 9px; margin-top: 14px; }
+.service-card { min-width: 0; }
+.app-services:not(.single) .service-card { padding: 13px; border: 1px solid #d9d6cd; border-radius: 3px; background: #faf9f5; }
+.service-title h3 { font-size: 13px; }
+.single-service-image { margin: 12px 0 0; color: var(--muted); font: 10px 'DM Mono', monospace; overflow-wrap: anywhere; }
+.service-actions { padding-top: 10px; }
+.service-actions button { padding: 7px 10px; }
+.app-services.single .service-actions { justify-content: flex-start; }
+.app-actions { margin-top: 13px; border-top: 1px solid #e1ded5; }
 .container-title { display: grid; grid-template-columns: auto 1fr auto; align-items: start; }
 .container-title .status-dot { margin-top: 7px; }
 .status-dot.exited, .status-dot.created { background: #a6aaa5; box-shadow: none; }

@@ -3,7 +3,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } 
 import { useChat } from '@ai-sdk/vue';
 import { DefaultChatTransport, lastAssistantMessageIsCompleteWithApprovalResponses } from 'ai';
 import MarkdownIt from 'markdown-it';
-import { api, type ContainerInfo, type EnvironmentVariable, type PublicSettings, type ServerStats, type ServiceDomain } from './api';
+import { api, type AppInfo, type ContainerInfo, type EnvironmentVariable, type PublicSettings, type ServerStats, type ServiceDomain } from './api';
 
 const markdown = new MarkdownIt({ html: false, linkify: true, breaks: true });
 markdown.renderer.rules.link_open = (tokens, index, options, environment, renderer) => {
@@ -21,7 +21,7 @@ const settingsForm = reactive({ endpoint: '', apiKey: '', deployment: 'gpt-5.6-s
 const settingsOpen = ref(false);
 const savingSettings = ref(false);
 const settingsError = ref('');
-const containers = ref<ContainerInfo[]>([]);
+const apps = ref<AppInfo[]>([]);
 const server = ref<ServerStats | null>(null);
 const dashboardError = ref('');
 const actionId = ref('');
@@ -42,7 +42,7 @@ const prompt = ref('');
 const transcript = ref<HTMLElement>();
 const composerInput = ref<HTMLTextAreaElement>();
 const respondingApprovalId = ref('');
-const mobileTab = ref<'operator' | 'containers' | 'server'>('operator');
+const mobileTab = ref<'operator' | 'apps' | 'server'>('operator');
 let refreshTimer: number | undefined;
 
 const authenticatedFetch: typeof fetch = async (input, init) => {
@@ -110,9 +110,9 @@ function toolName(part: Record<string, unknown>) {
 function toolLabel(part: Record<string, unknown>) {
   const name = toolName(part);
   const labels: Record<string, string> = {
-    listContainers: 'Inspecting applications', createApplication: 'Creating application', startApplication: 'Starting application',
-    stopApplication: 'Stopping application', restartApplication: 'Restarting application', deleteApplication: 'Deleting application',
-    getApplicationLogs: 'Reading application logs', getApplicationStatus: 'Inspecting application', getHostStatus: 'Inspecting host',
+    listApps: 'Inspecting Apps', createApp: 'Creating App', addService: 'Adding Service', renameApp: 'Renaming App',
+    startApp: 'Starting App', stopApp: 'Stopping App', restartApp: 'Restarting App', recreateApp: 'Recreating App', startService: 'Starting Service', stopService: 'Stopping Service', restartService: 'Restarting Service', recreateService: 'Recreating Service', removeService: 'Removing Service', deleteApp: 'Deleting App',
+    getAppLogs: 'Reading App logs', getServiceLogs: 'Reading Service logs', getApp: 'Inspecting App', getHostStatus: 'Inspecting host',
     setEnvironmentVariable: 'Updating application environment', listEnvironment: 'Inspecting application environment',
     inspectContainer: 'Inspecting application', requestEnvironmentVariable: 'Requesting an environment variable',
     listManagedVolumes: 'Inspecting managed storage', inspectManagedVolume: 'Inspecting managed volume',
@@ -193,13 +193,18 @@ function toolDetails(part: Record<string, unknown>) {
   const name = toolName(part);
   const input = recordValue(part.input);
   const output = recordValue(part.output);
-  const target = input?.containerId ?? input?.serviceId;
+  const target = input?.appId ?? input?.containerId ?? input?.serviceId;
 
-  if (name === 'listContainers') details.push({ text: 'Reading status, published ports, CPU and memory' });
+  if (name === 'listApps') details.push({ text: 'Reading Apps, Services, status, CPU and memory' });
   if (name === 'getHostStatus') details.push({ text: 'Reading host CPU, memory, disk and uptime' });
-  if (name === 'createApplication') {
+  if (name === 'createApp') {
     if (typeof input?.name === 'string') details.push({ text: `Name: ${input.name}` });
-    if (typeof input?.image === 'string') details.push({ text: `Image: ${input.image}` });
+    if (Array.isArray(input?.services)) {
+      for (const service of input.services) {
+        const value = recordValue(service);
+        if (typeof value?.name === 'string' && typeof value.image === 'string') details.push({ text: `${value.name}: ${value.image}` });
+      }
+    }
     const ports = recordValue(input?.ports);
     if (ports) for (const [host, container] of Object.entries(ports)) details.push({ text: `Port: ${host} → ${String(container)}` });
     const volumes = recordValue(input?.volumes);
@@ -220,7 +225,7 @@ function toolDetails(part: Record<string, unknown>) {
   if (typeof input?.volumeName === 'string') details.push({ text: `Volume: ${input.volumeName}` });
   if (typeof input?.mountTarget === 'string') details.push({ text: `Mount: ${input.mountTarget}` });
   if (typeof input?.hostname === 'string' && name.includes('ServiceDomain')) details.push({ text: `Domain: ${input.hostname}` });
-  if (name === 'listContainers' && Array.isArray(part.output)) details.push({ text: `Found ${part.output.length} managed application${part.output.length === 1 ? '' : 's'}` });
+  if (name === 'listApps' && Array.isArray(part.output)) details.push({ text: `Found ${part.output.length} App${part.output.length === 1 ? '' : 's'}` });
   if (typeof part.errorText === 'string') details.push({ text: part.errorText });
   return details;
 }
@@ -273,6 +278,7 @@ function approvalRequest(part: Record<string, unknown>) {
 function approvalCopy(part: Record<string, unknown>) {
   const name = toolName(part);
   if (name === 'deleteManagedVolume') return { title: 'Delete this volume permanently?', detail: 'All data in this managed volume will be permanently removed.' };
+  if (name === 'removeService') return { title: 'Remove this Service?', detail: 'The Service will be removed from its App. Managed persistent data will remain.' };
   if (name === 'repairStorageOwnership') return { title: 'Repair this storage ownership?', detail: 'The application may be briefly stopped while ownership is changed recursively.' };
   if (name === 'removeRouteProtection') return { title: 'Make this route public?', detail: 'Anyone who knows the URL will be able to access it without a password.' };
   return { title: 'Delete this application permanently?', detail: 'The container will be removed. Its image and managed data will remain.' };
@@ -324,7 +330,7 @@ async function logout() {
 function clearSession() {
   stop();
   authenticated.value = false;
-  containers.value = [];
+  apps.value = [];
   server.value = null;
   settings.value = null;
   settingsOpen.value = false;
@@ -350,7 +356,7 @@ async function openEnvironmentDialog(container: ContainerInfo) {
   environmentDialog.container = container;
   environmentDialog.loading = true;
   try {
-    const result = await api<{ variables: EnvironmentVariable[] }>(`/api/containers/${encodeURIComponent(container.name)}/environment`);
+    const result = await api<{ variables: EnvironmentVariable[] }>(`/api/containers/${encodeURIComponent(container.id)}/environment`);
     if (environmentDialog.container?.id === container.id) {
       environmentDialog.variables = result.variables;
       environmentSnapshot.value = environmentSignature(result.variables);
@@ -381,7 +387,7 @@ async function saveEnvironmentChanges() {
   environmentDialog.saving = true;
   environmentDialog.error = '';
   try {
-    const result = await api<{ variables: EnvironmentVariable[] }>(`/api/containers/${encodeURIComponent(container.name)}/environment`, {
+    const result = await api<{ variables: EnvironmentVariable[] }>(`/api/containers/${encodeURIComponent(container.id)}/environment`, {
       method: 'PUT',
       body: JSON.stringify({
         variables: environmentDialog.variables.map(({ id, name, value, protectedFromAI }) => ({
@@ -416,13 +422,13 @@ function deleteEnvironmentVariable(variable: EnvironmentVariable) {
 async function loadDashboard() {
   dashboardError.value = '';
   try {
-    const [newSettings, newContainers, newServer] = await Promise.all([
+    const [newSettings, newApps, newServer] = await Promise.all([
       api<PublicSettings>('/api/settings'),
-      api<ContainerInfo[]>('/api/containers'),
+      api<AppInfo[]>('/api/apps'),
       api<ServerStats>('/api/server/stats'),
     ]);
     settings.value = newSettings;
-    containers.value = newContainers;
+    apps.value = newApps;
     server.value = newServer;
     Object.assign(settingsForm, { endpoint: newSettings.endpoint, apiKey: '', deployment: newSettings.deployment });
     if (!newSettings.configured) settingsOpen.value = true;
@@ -436,8 +442,8 @@ async function loadDashboard() {
 async function refreshDashboard() {
   if (!authenticated.value) return;
   try {
-    [containers.value, server.value] = await Promise.all([
-      api<ContainerInfo[]>('/api/containers'),
+    [apps.value, server.value] = await Promise.all([
+      api<AppInfo[]>('/api/apps'),
       api<ServerStats>('/api/server/stats'),
     ]);
     dashboardError.value = '';
@@ -499,6 +505,44 @@ async function runMenuAction(event: Event, container: ContainerInfo, action: 'st
   await runAction(container, action);
 }
 
+async function runAppAction(app: AppInfo, action: 'start' | 'stop' | 'restart' | 'recreate' | 'delete') {
+  let body: Record<string, unknown> = {};
+  if (action === 'delete') {
+    if (!window.confirm(`Delete ${app.name}? Its Services and private network will be removed. Persistent data will be kept.`)) return;
+    body = { confirmed: true, deleteData: false };
+  }
+  actionId.value = app.id;
+  try {
+    await api(`/api/apps/${encodeURIComponent(app.id)}/${action}`, { method: 'POST', body: JSON.stringify(body) });
+    await refreshDashboard();
+  } catch (error) {
+    dashboardError.value = error instanceof Error ? error.message : `${action} failed`;
+  } finally {
+    actionId.value = '';
+  }
+}
+
+async function renameApp(app: AppInfo) {
+  const name = window.prompt('App name', app.name)?.trim();
+  if (!name || name === app.name) return;
+  actionId.value = app.id;
+  try {
+    await api(`/api/apps/${encodeURIComponent(app.id)}`, { method: 'PATCH', body: JSON.stringify({ name }) });
+    await refreshDashboard();
+  } catch (error) {
+    dashboardError.value = error instanceof Error ? error.message : 'Rename failed';
+  } finally {
+    actionId.value = '';
+  }
+}
+
+async function showAppLogs(app: AppInfo) {
+  logs.value = { id: app.id, name: app.name, content: '', tail: 200, search: '', reverse: false, loading: true, error: '' };
+  actionId.value = app.id;
+  await refreshLogs(true);
+  actionId.value = '';
+}
+
 async function showLogs(container: ContainerInfo) {
   logs.value = { id: container.id, name: container.name, content: '', tail: 200, search: '', reverse: false, loading: true, error: '' };
   actionId.value = container.id;
@@ -506,13 +550,14 @@ async function showLogs(container: ContainerInfo) {
   actionId.value = '';
 }
 
-async function refreshLogs() {
+async function refreshLogs(appLevel = false) {
   if (!logs.value) return;
   const current = logs.value;
   current.loading = true;
   current.error = '';
   try {
-    const result = await api<{ logs: string }>(`/api/containers/${encodeURIComponent(current.id)}/logs?tail=${current.tail}`);
+    const base = appLevel || apps.value.some((app) => app.id === current.id) ? '/api/apps' : '/api/containers';
+    const result = await api<{ logs: string }>(`${base}/${encodeURIComponent(current.id)}/logs?tail=${current.tail}`);
     if (logs.value === current) current.content = result.logs;
   } catch (error) {
     if (logs.value === current) current.error = error instanceof Error ? error.message : 'Could not read logs';
@@ -589,7 +634,7 @@ onBeforeUnmount(() => {
 
     <nav class="mobile-tabs" aria-label="Dashboard sections" role="tablist">
       <button type="button" role="tab" :aria-selected="mobileTab === 'operator'" aria-controls="operator-panel" @click="mobileTab = 'operator'">AI Operator</button>
-      <button type="button" role="tab" :aria-selected="mobileTab === 'containers'" aria-controls="containers-panel" @click="mobileTab = 'containers'">Containers</button>
+      <button type="button" role="tab" :aria-selected="mobileTab === 'apps'" aria-controls="apps-panel" @click="mobileTab = 'apps'">Apps</button>
       <button type="button" role="tab" :aria-selected="mobileTab === 'server'" aria-controls="server-panel" @click="mobileTab = 'server'">Server</button>
     </nav>
 
@@ -618,7 +663,7 @@ onBeforeUnmount(() => {
             <div class="suggestions">
               <button @click="prompt = 'Run nginx'">Run nginx</button>
               <button @click="prompt = 'How is my server doing?'">How is my server doing?</button>
-              <button @click="prompt = 'Inspect my containers and tell me what needs attention'">Find containers that need attention</button>
+              <button @click="prompt = 'Inspect my Apps and tell me what needs attention'">Find Apps that need attention</button>
             </div>
           </div>
           <article v-for="message in messages" :key="message.id" class="message" :class="message.role">
@@ -726,67 +771,62 @@ onBeforeUnmount(() => {
         </div>
       </section>
 
-      <section id="containers-panel" class="containers-panel" :class="{ 'mobile-panel-active': mobileTab === 'containers' }" role="tabpanel">
+      <section id="apps-panel" class="containers-panel" :class="{ 'mobile-panel-active': mobileTab === 'apps' }" role="tabpanel">
         <div class="section-heading compact">
-          <div><p class="eyebrow">DOCKER ENGINE</p><h2>Containers <sup>{{ containers.length }}</sup></h2></div>
+          <div><p class="eyebrow">DEPLOYED SYSTEMS</p><h2>Apps <sup>{{ apps.length }}</sup></h2></div>
           <button class="refresh-button" title="Refresh" @click="refreshDashboard">↻</button>
         </div>
-        <div v-if="containers.length === 0" class="empty-containers">
-          <span>00</span><p>No managed containers yet.</p><small>Ask HalfCloud to run one.</small>
+        <div v-if="apps.length === 0" class="empty-containers">
+          <span>00</span><p>No Apps yet.</p><small>Ask HalfCloud to deploy one.</small>
         </div>
-        <article v-for="container in containers" :key="container.id" class="container-card">
-          <div class="container-title">
-            <span class="status-dot" :class="container.state"></span>
-            <div><h3>{{ container.name }}</h3><p>{{ container.image }}</p></div>
-            <span class="state-label">{{ container.state }}</span>
+        <article v-for="app in apps" :key="app.id" class="container-card app-card" :class="{ 'multi-service': app.services.length > 1 }">
+          <div class="container-title app-title">
+            <span class="status-dot" :class="app.status === 'running' ? 'running' : 'exited'"></span>
+            <div><h3>{{ app.name }} <button class="rename-button" title="Rename App" @click="renameApp(app)">Edit</button></h3><p>{{ app.services.length }} service{{ app.services.length === 1 ? '' : 's' }}</p></div>
+            <span class="state-label">{{ app.status.replace('_', ' ') }}</span>
           </div>
           <div class="container-data">
-            <div><span>PUBLISHED</span><strong>{{ container.ports.length ? container.ports.map(p => `${p.host} → ${p.container}`).join(', ') : 'None' }}</strong></div>
-            <div><span>CPU</span><strong>{{ container.cpuPercent.toFixed(2) }}%</strong></div>
-            <div><span>RAM</span><strong>{{ formatBytes(container.memoryUsed) }}</strong></div>
+            <div><span>SERVICES</span><strong>{{ app.runningServices }}/{{ app.services.length }} running</strong></div>
+            <div><span>CPU</span><strong>{{ app.cpuPercent.toFixed(2) }}%</strong></div>
+            <div><span>RAM</span><strong>{{ formatBytes(app.memoryUsed) }}</strong></div>
           </div>
-          <section v-if="container.domains.length" class="domains-block">
-            <div class="domains-heading"><span>DOMAINS</span></div>
-            <div v-for="domain in container.domains" :key="domain.hostname" class="domain-row">
-              <span class="domain-state" :class="domain.state" :title="domain.httpsReady ? 'HTTPS ready' : domain.dnsConfigured ? 'DNS configured; waiting for HTTPS' : 'DNS not pointed to this server'"></span>
-              <div class="domain-name">
-                <strong>{{ domain.hostname }}</strong>
-                <small>
-                  <b v-if="domain.primary">Primary</b>
-                  <b v-if="domain.managed">HalfCloud domain</b>
-                  <b class="access-state" :class="domain.access.type">{{ domain.access.type === 'basic_auth' ? 'Password protected' : 'Public' }}</b>
-                  <span>{{ domain.httpsReady ? 'HTTPS ready' : domain.dnsConfigured ? 'DNS ready · HTTPS pending' : `Point DNS to ${domain.dnsTarget || 'this server'}` }}</span>
-                </small>
+          <div class="app-services" :class="{ single: app.services.length === 1 }">
+            <section v-for="service in app.services" :key="service.serviceId" class="service-card">
+              <div v-if="app.services.length > 1" class="container-title service-title">
+                <span class="status-dot" :class="service.state"></span>
+                <div><h3>{{ service.name }}</h3><p>{{ service.image }}</p></div>
+                <span class="state-label">{{ service.state }}</span>
               </div>
-              <div class="domain-actions">
-                <a :href="`https://${domain.hostname}`" target="_blank" rel="noopener noreferrer">Open</a>
-                <button v-if="!domain.primary" :disabled="domainAction === `${container.id}:${domain.hostname}`" @click="setPrimaryDomain(container, domain)">Make primary</button>
+              <p v-else class="single-service-image">{{ service.image }}</p>
+              <section v-if="service.domains.length" class="domains-block">
+                <div class="domains-heading"><span>DOMAINS{{ app.services.length > 1 ? ` · ${service.name}` : '' }}</span></div>
+                <div v-for="domain in service.domains" :key="domain.hostname" class="domain-row">
+                  <span class="domain-state" :class="domain.state"></span>
+                  <div class="domain-name"><strong>{{ domain.hostname }}</strong><small><b v-if="domain.primary">Primary</b><b v-if="domain.managed">HalfCloud domain</b><span>{{ domain.httpsReady ? 'HTTPS ready' : domain.dnsConfigured ? 'HTTPS pending' : `Point DNS to ${domain.dnsTarget || 'this server'}` }}</span></small></div>
+                  <div class="domain-actions"><a :href="`https://${domain.hostname}`" target="_blank" rel="noopener noreferrer">Open</a><button v-if="!domain.primary" :disabled="domainAction === `${service.id}:${domain.hostname}`" @click="setPrimaryDomain(service, domain)">Make primary</button></div>
+                </div>
+              </section>
+              <div v-else class="service-endpoint private">
+                <svg aria-hidden="true" viewBox="0 0 24 24"><rect x="5" y="10" width="14" height="11" rx="2"></rect><path d="M8 10V7a4 4 0 0 1 8 0v3"></path></svg>
+                <span><small>PRIVATE IN THIS APP</small><strong>{{ privateAddresses(service).length ? privateAddresses(service).join(', ') : `${service.name}:<port>` }}</strong></span>
               </div>
-            </div>
-          </section>
-          <div v-else class="service-endpoint private">
-            <svg aria-hidden="true" viewBox="0 0 24 24"><rect x="5" y="10" width="14" height="11" rx="2"></rect><path d="M8 10V7a4 4 0 0 1 8 0v3"></path></svg>
-            <span>
-              <small>PRIVATE NETWORK · USE IN ENV</small>
-              <strong>{{ privateAddresses(container).length ? privateAddresses(container).join(', ') : `${container.name}:<port>` }}</strong>
-            </span>
+              <div class="container-actions service-actions">
+                <button class="environment-button" :disabled="actionId === service.id" @click="openEnvironmentDialog(service)">Environment</button>
+                <button v-if="app.services.length > 1" class="logs-button" :disabled="actionId === service.id" @click="showLogs(service)">Logs</button>
+                <button v-if="app.services.length > 1" :disabled="actionId === service.id" @click="runAction(service, 'restart')">Restart</button>
+              </div>
+            </section>
           </div>
-          <div class="container-actions">
-            <button class="environment-button" :disabled="actionId === container.id" @click="openEnvironmentDialog(container)">Environment</button>
-            <button class="logs-button" :disabled="actionId === container.id" @click="showLogs(container)">
-              <svg aria-hidden="true" viewBox="0 0 24 24"><path d="m7 8 4 4-4 4"></path><path d="M13 16h4"></path><rect x="3" y="4" width="18" height="16" rx="2"></rect></svg>
-              Logs
-            </button>
+          <div class="container-actions app-actions">
+            <button class="logs-button" :disabled="actionId === app.id" @click="showAppLogs(app)">Logs</button>
             <details class="actions-menu">
-              <summary>
-                Actions
-                <svg aria-hidden="true" viewBox="0 0 12 12"><path d="m3 4.5 3 3 3-3"></path></svg>
-              </summary>
+              <summary>App actions <svg aria-hidden="true" viewBox="0 0 12 12"><path d="m3 4.5 3 3 3-3"></path></svg></summary>
               <div class="actions-menu-list">
-                <button v-if="container.state !== 'running'" :disabled="actionId === container.id" @click="runMenuAction($event, container, 'start')">Start</button>
-                <button v-else :disabled="actionId === container.id" @click="runMenuAction($event, container, 'stop')">Stop</button>
-                <button :disabled="actionId === container.id" @click="runMenuAction($event, container, 'restart')">Restart</button>
-                <button class="danger" :disabled="actionId === container.id" @click="runMenuAction($event, container, 'delete')">Delete</button>
+                <button v-if="app.status === 'stopped'" :disabled="actionId === app.id" @click="runAppAction(app, 'start')">Start all</button>
+                <button v-else :disabled="actionId === app.id" @click="runAppAction(app, 'stop')">Stop all</button>
+                <button :disabled="actionId === app.id" @click="runAppAction(app, 'restart')">Restart all</button>
+                <button :disabled="actionId === app.id" @click="runAppAction(app, 'recreate')">Recreate all</button>
+                <button class="danger" :disabled="actionId === app.id" @click="runAppAction(app, 'delete')">Delete App</button>
               </div>
             </details>
           </div>
@@ -828,7 +868,7 @@ onBeforeUnmount(() => {
           </label>
           <label class="logs-lines">
             <span>Lines</span>
-            <select v-model.number="logs.tail" :disabled="logs.loading" @change="refreshLogs">
+            <select v-model.number="logs.tail" :disabled="logs.loading" @change="refreshLogs()">
               <option :value="200">200</option>
               <option :value="500">500</option>
               <option :value="1000">1,000</option>
@@ -839,7 +879,7 @@ onBeforeUnmount(() => {
             <span class="switch-track" aria-hidden="true"><i></i></span>
             <span>Reverse</span>
           </label>
-          <button class="logs-refresh" :class="{ loading: logs.loading }" :disabled="logs.loading" type="button" @click="refreshLogs">
+          <button class="logs-refresh" :class="{ loading: logs.loading }" :disabled="logs.loading" type="button" @click="refreshLogs()">
             <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M20 11a8 8 0 1 0-2.3 5.7"></path><path d="M20 5v6h-6"></path></svg>
             Refresh
           </button>

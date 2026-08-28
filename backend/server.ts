@@ -18,7 +18,6 @@ const auth = await AuthService.create();
 const settings = new SettingsStore();
 const docker = new ApplicationService(new DockerService());
 await docker.assertRootless();
-await docker.ensureNetwork();
 await docker.syncRoutes();
 const loginAttempts = new Map<string, { count: number; resetAt: number }>();
 
@@ -81,6 +80,20 @@ app.use('/api', (request, response, next) => {
 app.get('/api/settings', async (_request, response) => response.json(await settings.publicValue()));
 app.put('/api/settings', async (request, response) => response.json(await settings.save({ ...request.body, provider: 'azure' })));
 app.get('/api/server/stats', async (_request, response) => response.json({ ...(await getServerStats()), docker: await docker.getRuntimeInfo() }));
+app.get('/api/apps', async (_request, response) => response.json(await docker.listApps()));
+app.get('/api/apps/:appId', async (request, response) => response.json(await docker.getApp(request.params.appId)));
+app.patch('/api/apps/:appId', async (request, response) => response.json(await docker.renameApp(request.params.appId, z.string().min(1).max(128).parse(request.body?.name))));
+app.get('/api/apps/:appId/logs', async (request, response) => response.json(await docker.getAppLogs(request.params.appId, Number(request.query.tail ?? 200))));
+app.post('/api/apps/:appId/:action', async (request, response) => {
+  const action = z.enum(['start', 'stop', 'restart', 'recreate', 'delete']).parse(request.params.action);
+  if (action === 'delete') {
+    if (request.body?.confirmed !== true) return response.status(400).json({ error: 'Deletion requires confirmation' });
+    response.json(await docker.deleteApp(request.params.appId, request.body?.deleteData === true));
+    return;
+  }
+  const methods = { start: docker.startApp.bind(docker), stop: docker.stopApp.bind(docker), restart: docker.restartApp.bind(docker), recreate: docker.recreateApp.bind(docker) };
+  response.json(await methods[action](request.params.appId));
+});
 app.get('/api/containers', async (_request, response) => response.json(await docker.listContainers()));
 app.get('/api/containers/:id/environment', async (request, response) => {
   response.json({ variables: await docker.listEnvironment(request.params.id) });

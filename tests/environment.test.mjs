@@ -99,6 +99,8 @@ test('provider-bound history excludes environment mutation values', () => {
     parts: [
       { type: 'tool-setEnvironmentVariable', input: { serviceId: 'app', name: 'TOKEN', value: 'never-send-this' }, output: { configured: true } },
       { type: 'tool-createApplication', input: { name: 'app', image: 'image', ports: {}, environment: { TOKEN: 'never-send-this' } } },
+      { type: 'tool-createApp', input: { name: 'WordPress', services: [{ name: 'mysql', image: 'mysql:8', ports: {}, environment: { MYSQL_PASSWORD: 'never-send-this' } }] } },
+      { type: 'tool-addService', input: { appId: 'app_one', service: { name: 'redis', image: 'redis', ports: {}, environment: { PASSWORD: 'never-send-this' } } } },
       { type: 'text', text: 'Deployment complete.' },
     ],
   }];
@@ -108,6 +110,8 @@ test('provider-bound history excludes environment mutation values', () => {
   assert.equal(JSON.stringify(sanitized).includes('never-send-this'), false);
   assert.equal(sanitized[0].parts.some((part) => part.type === 'tool-setEnvironmentVariable'), false);
   assert.equal('environment' in sanitized[0].parts.find((part) => part.type === 'tool-createApplication').input, false);
+  assert.equal('environment' in sanitized[0].parts.find((part) => part.type === 'tool-createApp').input.services[0], false);
+  assert.equal('environment' in sanitized[0].parts.find((part) => part.type === 'tool-addService').input.service, false);
   assert.equal(sanitized[0].parts.find((part) => part.type === 'text').text, 'Deployment complete.');
 });
 

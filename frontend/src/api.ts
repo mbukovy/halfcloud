@@ -19,6 +19,9 @@ export interface ServerStats {
 
 export interface ContainerInfo {
   id: string;
+  appId: string;
+  serviceId: string;
+  runtimeName: string;
   name: string;
   image: string;
   state: string;
@@ -30,6 +33,18 @@ export interface ContainerInfo {
   cpuPercent: number;
   memoryUsed: number;
   memoryLimit: number;
+}
+
+export interface AppInfo {
+  id: string;
+  name: string;
+  status: 'running' | 'partially_running' | 'stopped' | 'degraded' | 'failed';
+  services: ContainerInfo[];
+  cpuPercent: number;
+  memoryUsed: number;
+  runningServices: number;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface ServiceDomain {

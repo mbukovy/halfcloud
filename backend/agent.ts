@@ -63,8 +63,21 @@ export function sanitizeAgentMessages(messages: UIMessage[]): UIMessage[] {
           } } : {}),
         } as typeof part];
       }
-      if (name !== 'createApplication' || typeof record.input !== 'object' || record.input === null) return [part];
-      const { environment: _environment, ...safeInput } = record.input as Record<string, unknown>;
+      if ((name !== 'createApp' && name !== 'addService' && name !== 'createApplication') || typeof record.input !== 'object' || record.input === null) return [part];
+      const input = record.input as Record<string, unknown>;
+      if (name === 'createApplication') {
+        const { environment: _environment, ...safeInput } = input;
+        return [{ ...record, input: safeInput } as typeof part];
+      }
+      const safeInput = name === 'createApp' && Array.isArray(input.services)
+        ? { ...input, services: input.services.map((service) => {
+          if (typeof service !== 'object' || service === null) return service;
+          const { environment: _environment, ...safeService } = service as Record<string, unknown>;
+          return safeService;
+        }) }
+        : name === 'addService' && typeof input.service === 'object' && input.service !== null
+          ? { ...input, service: (() => { const { environment: _environment, ...safeService } = input.service as Record<string, unknown>; return safeService; })() }
+        : (() => { const { environment: _environment, ...safe } = input; return safe; })();
       return [{ ...record, input: safeInput } as typeof part];
     }),
   }));
@@ -100,11 +113,13 @@ const SYSTEM_PROMPT = `You are HalfCloud, the operator of a real VPS. Docker too
 
 Rules:
 - Assume the user may have little experience with Docker, VPS administration, application deployment, networking, or domains. Use plain language, explain important choices and failures without jargon, and do not assume they know which settings an application needs.
-- Inspect current Docker state before making assumptions. Prefer the provided tools over instructions involving Docker CLI.
+- Treat Apps as the primary organizational and operational unit. Every Service belongs to one App; containers are an internal runtime detail.
+- Inspect current App state before making assumptions. Prefer the provided tools over instructions involving Docker CLI.
 - Only modify containers carrying the HalfCloud managed label. The tools enforce this boundary.
-- Before creating an application, list applications to understand names and published ports. createApplication performs the final port check.
-- Choose a sensible short container name when intent is clear. Use official images and explicit image tags (usually :latest) unless the user names another image.
-- All applications share the private halfcloud Docker network and can reach each other by container name on their internal ports. Use an empty ports object for databases, queues, workers, and other private-only services; do not publish a host port or assign a hostname unless the user explicitly needs public access.
+- Before creating an App, list Apps to understand names and published ports. createApp performs the final port check.
+- Prefer descriptive App names. Choose short stable Service names such as web, worker, mysql, or redis. Use official images and explicit image tags (usually :latest) unless the user names another image.
+- Each App has an isolated private network. Services in the same App reach each other by Service name on internal ports; Services in other Apps are not reachable. Use an empty ports object for databases, queues, workers, and other private-only Services.
+- A request such as "deploy WordPress with MySQL" means one App with wordpress and mysql Services. A request to add a database, worker, cache, queue, or supporting component to an App must use addService and must not create another App.
 - For public web images, infer their standard internal port. The ports object maps a localhost host port in the 10000-19999 range to a container port.
 - Deployments run on rootless Docker. Never request privileged mode, host networking, devices, Docker sockets, or arbitrary host paths.
 - If an application requires privileged host access, explain that it cannot currently be deployed safely by HalfCloud. Never suggest silently elevating it.
@@ -114,7 +129,7 @@ Rules:
 - Before changing existing storage, inspect what is already deployed. Do not delete data, replace a volume, or perform a destructive migration without clearly explaining the risk and obtaining the user's approval.
 - Use the managed storage tools to inspect or reconcile storage. Volume deletion and ownership repair require explicit approval. Ownership repair is restricted to storage already mounted by the selected HalfCloud application.
 - Never stop or delete a different container to resolve a port conflict. Offer the available port reported by the tool and ask the user before changing their requested port.
-- Deletion is destructive. Call deleteApplication with the exact HalfCloud name when deletion is requested; the interface will require explicit user approval before the tool executes. If approval is denied, do not retry unless the user makes a new deletion request.
+- App deletion is destructive. Persistent data is kept unless deleteData is explicitly true. Never set deleteData to true without an explicit user request to delete all data; the interface requires approval.
 - Start, stop, restart, create, logs, stats, and listing do not need confirmation when the user's intent is clear.
 - A service may have multiple public domains. HalfCloud-generated domains should normally remain attached as permanent fallback and debug addresses.
 - When the user adds the first custom domain, prefer making it primary while preserving the HalfCloud-generated domain. Do not remove or replace any existing domain unless explicitly requested or required to resolve a conflict.
@@ -126,10 +141,10 @@ Rules:
 - Environment variables may be protected from AI. For protected variables, you can see their name and configuration status but never their value.
 - Never ask the user to paste API keys, passwords, tokens, credentials, or other sensitive values into chat. Use requestEnvironmentVariable so the user can submit the value directly to HalfCloud with AI protection enabled by default.
 - Use setEnvironmentVariable only for non-sensitive configuration that may remain visible to AI, such as NODE_ENV, LOG_LEVEL, PORT, or a public APP_URL. Never use it for credentials.
-- After every application creation, inspect its logs and list applications again to verify that it remains running. If Docker reports health for the image, verify that status too. A successful start alone is not success.
+- After every App creation or Service addition, inspect relevant logs and list Apps again to verify that every Service remains running. If Docker reports health for an image, verify that status too. A successful start alone is not success.
 - If post-creation checks reveal a problem, diagnose and fix it when the correction is safe and consistent with the requested deployment. Prefer fixes that preserve the intended architecture, persistence, security, and private service exposure; do not call a deployment successful if the fix risks data loss after recreation or unnecessarily exposes a service.
 - Explain important failures plainly. Never expose API keys or claim success unless the tool result confirms it.
-- Keep responses concise and operational. After creating a public application, state its name and public HTTPS URL. For a private service, state its container name and internal port instead.`;
+- Keep responses concise and operational. After creating a public App, state its name and public HTTPS URL. For a private Service, state its Service name and internal port instead.`;
 
 export async function createChatResponse(
   settings: AiSettings,
@@ -139,76 +154,75 @@ export async function createChatResponse(
   requestId = 'unknown',
 ) {
   const provider = createAzure(azureProviderOptions(settings));
-  const containerId = z.string().min(1).describe('Container id or exact HalfCloud name');
+  const serviceId = z.string().min(1).describe('Service ID');
+  const appId = z.string().min(1).describe('App ID or exact App display name');
+  const serviceSchema = z.object({
+    name: z.string().min(1).describe('Stable lowercase Service name used for private DNS'),
+    image: z.string().min(1),
+    ports: z.record(z.string(), z.string()).describe('Map of localhost host port (10000-19999) to container port; use {} for a private Service'),
+    environment: z.record(z.string(), z.string()).optional(),
+    namedVolumes: z.record(z.string(), z.string()).optional(),
+    volumes: z.record(z.string(), z.string()).optional(),
+    hostname: z.string().optional(),
+  });
 
   const tools = {
-    listContainers: tool({
-      description: 'List every HalfCloud-managed container, including current status, ports, CPU, and memory.',
+    listApps: tool({
+      description: 'List Apps with their Services, aggregate status, domains, CPU, and memory.',
       inputSchema: z.object({}),
-      execute: () => docker.listContainers(),
+      execute: () => docker.listApps(),
     }),
-    createApplication: tool({
-      description: 'Deploy a rootless HalfCloud application on the shared private network, optionally expose a published TCP port through Caddy HTTPS, and verify it started.',
-      inputSchema: z.object({
-        name: z.string().min(1),
-        image: z.string().min(1),
-        ports: z.record(z.string(), z.string()).describe('Map of localhost host port (10000-19999) to container port, e.g. {"10023":"5678"}; use {} for a private-only service'),
-        environment: z.record(z.string(), z.string()).optional(),
-        namedVolumes: z.record(z.string(), z.string()).optional().describe('Map of application-local volume name to absolute container path; preferred for persistent application data'),
-        volumes: z.record(z.string(), z.string()).optional().describe('Map of application-relative host path to absolute container path; use only when host filesystem access is needed'),
-        hostname: z.string().optional().describe('Optional custom DNS hostname added alongside the generated <name>.<server-domain> fallback and made primary'),
-      }),
-      execute: (input) => docker.createContainer(input),
+    createApp: tool({
+      description: 'Create one App containing one or more Services on its own isolated private network. Use one call for systems such as WordPress plus MySQL.',
+      inputSchema: z.object({ name: z.string().min(1), services: z.array(serviceSchema).min(1) }),
+      execute: (input) => docker.createApp(input),
     }),
-    startApplication: tool({
-      description: 'Start a stopped HalfCloud-managed container.',
-      inputSchema: z.object({ containerId }),
-      execute: ({ containerId }) => docker.startContainer(containerId),
+    addService: tool({
+      description: 'Add a supporting Service to an existing App and its isolated network.',
+      inputSchema: z.object({ appId, service: serviceSchema }),
+      execute: ({ appId, service }) => docker.addService(appId, service),
     }),
-    stopApplication: tool({
-      description: 'Gracefully stop a running HalfCloud-managed container.',
-      inputSchema: z.object({ containerId }),
-      execute: ({ containerId }) => docker.stopContainer(containerId),
+    renameApp: tool({
+      description: 'Change only an App display name without recreating or renaming runtime resources.',
+      inputSchema: z.object({ appId, name: z.string().min(1).max(128) }),
+      execute: ({ appId, name }) => docker.renameApp(appId, name),
     }),
-    restartApplication: tool({
-      description: 'Restart a HalfCloud-managed container.',
-      inputSchema: z.object({ containerId }),
-      execute: ({ containerId }) => docker.restartContainer(containerId),
+    startApp: tool({ description: 'Start every Service in an App.', inputSchema: z.object({ appId }), execute: ({ appId }) => docker.startApp(appId) }),
+    stopApp: tool({ description: 'Stop every Service in an App.', inputSchema: z.object({ appId }), execute: ({ appId }) => docker.stopApp(appId) }),
+    restartApp: tool({ description: 'Restart every Service in an App.', inputSchema: z.object({ appId }), execute: ({ appId }) => docker.restartApp(appId) }),
+    recreateApp: tool({ description: 'Recreate every runtime Service in an App while preserving managed volumes.', inputSchema: z.object({ appId }), execute: ({ appId }) => docker.recreateApp(appId) }),
+    startService: tool({ description: 'Start only one Service in an App.', inputSchema: z.object({ appId, serviceId }), execute: ({ appId, serviceId }) => docker.startService(appId, serviceId) }),
+    stopService: tool({ description: 'Stop only one Service in an App.', inputSchema: z.object({ appId, serviceId }), execute: ({ appId, serviceId }) => docker.stopService(appId, serviceId) }),
+    restartService: tool({ description: 'Restart only one Service in an App.', inputSchema: z.object({ appId, serviceId }), execute: ({ appId, serviceId }) => docker.restartService(appId, serviceId) }),
+    recreateService: tool({ description: 'Recreate only one Service in an App while preserving managed volumes.', inputSchema: z.object({ appId, serviceId }), execute: ({ appId, serviceId }) => docker.recreateService(appId, serviceId) }),
+    removeService: tool({ description: 'Remove one Service from a multi-Service App while retaining managed data. Requires approval.', inputSchema: z.object({ appId, serviceId }), execute: ({ appId, serviceId }) => docker.removeService(appId, serviceId) }),
+    deleteApp: tool({
+      description: 'Delete an App and its runtime Services/network. Data is retained unless deleteData is explicitly true. Requires approval.',
+      inputSchema: z.object({ appId, deleteData: z.boolean().default(false) }),
+      execute: ({ appId, deleteData }) => docker.deleteApp(appId, deleteData),
     }),
-    deleteApplication: tool({
-      description: 'Permanently delete a HalfCloud-managed container, but not its image or managed data. The interface requires explicit user approval before execution.',
-      inputSchema: z.object({ containerId }),
-      execute: ({ containerId }) => docker.deleteContainer(containerId),
-    }),
-    getApplicationLogs: tool({
-      description: 'Get recent raw stdout/stderr logs for a HalfCloud-managed container.',
-      inputSchema: z.object({ containerId, tail: z.number().int().min(1).max(1000).optional() }),
-      execute: ({ containerId, tail }) => docker.getContainerLogs(containerId, tail),
-    }),
-    getApplicationStatus: tool({
-      description: 'Get current CPU and memory use for one HalfCloud-managed container.',
-      inputSchema: z.object({ containerId }),
-      execute: ({ containerId }) => docker.getContainerStats(containerId),
-    }),
+    getAppLogs: tool({ description: 'Get combined recent logs for all Services in an App with Service prefixes.', inputSchema: z.object({ appId, tail: z.number().int().min(1).max(1000).optional() }), execute: ({ appId, tail }) => docker.getAppLogs(appId, tail) }),
+    getServiceLogs: tool({ description: 'Get recent logs from only one Service.', inputSchema: z.object({ serviceId, tail: z.number().int().min(1).max(1000).optional() }), execute: ({ serviceId, tail }) => docker.getContainerLogs(serviceId, tail) }),
+    getApp: tool({ description: 'Get one App with its Services, status, domains, CPU, and memory.', inputSchema: z.object({ appId }), execute: ({ appId }) => docker.getApp(appId) }),
     inspectContainer: tool({
       description: 'Inspect one managed container through a controlled schema, including AI-safe environment metadata. Raw Docker inspect output is never returned.',
-      inputSchema: z.object({ serviceId: containerId }),
+      inputSchema: z.object({ serviceId }),
       execute: ({ serviceId }) => docker.inspectContainerForAgent(serviceId),
     }),
     listEnvironment: tool({
       description: 'List environment variables for a service. Values protected from AI are omitted and represented only as configured.',
-      inputSchema: z.object({ serviceId: containerId }),
+      inputSchema: z.object({ serviceId }),
       execute: ({ serviceId }) => docker.listEnvironmentForAgent(serviceId),
     }),
     setEnvironmentVariable: tool({
       description: 'Set or replace a non-sensitive environment variable that may remain visible to AI, then safely recreate the application container.',
-      inputSchema: z.object({ serviceId: containerId, name: z.string().min(1), value: z.string() }),
+      inputSchema: z.object({ serviceId, name: z.string().min(1), value: z.string() }),
       execute: ({ serviceId, name, value }) => docker.setEnvironmentVariableForAgent(serviceId, name, value),
     }),
     requestEnvironmentVariable: tool({
       description: 'Request a sensitive environment value through a dedicated direct-to-HalfCloud input. This tool intentionally has no value argument.',
       inputSchema: z.object({
-        serviceId: containerId,
+        serviceId,
         name: z.string().min(1),
         description: z.string().max(500).optional(),
       }),
@@ -216,22 +230,22 @@ export async function createChatResponse(
     }),
     listServiceDomains: tool({
       description: 'List all routing domains for a public HalfCloud application, including primary, managed, DNS, and HTTPS state.',
-      inputSchema: z.object({ containerId }),
+      inputSchema: z.object({ containerId: serviceId }),
       execute: ({ containerId }) => docker.listDomains(containerId),
     }),
     addServiceDomain: tool({
       description: 'Add a custom routing domain without replacing existing domains. The first custom domain automatically becomes primary.',
-      inputSchema: z.object({ containerId, hostname: z.string().min(1) }),
+      inputSchema: z.object({ containerId: serviceId, hostname: z.string().min(1) }),
       execute: ({ containerId, hostname }) => docker.addDomain(containerId, hostname),
     }),
     removeServiceDomain: tool({
       description: 'Remove one routing domain. HalfCloud-managed domains are preserved unless allowManaged is true following an explicit user request.',
-      inputSchema: z.object({ containerId, hostname: z.string().min(1), allowManaged: z.boolean().optional() }),
+      inputSchema: z.object({ containerId: serviceId, hostname: z.string().min(1), allowManaged: z.boolean().optional() }),
       execute: ({ containerId, hostname, allowManaged }) => docker.removeDomain(containerId, hostname, allowManaged),
     }),
     setPrimaryServiceDomain: tool({
       description: 'Make one existing routing domain the preferred public URL without changing application environment variables.',
-      inputSchema: z.object({ containerId, hostname: z.string().min(1) }),
+      inputSchema: z.object({ containerId: serviceId, hostname: z.string().min(1) }),
       execute: ({ containerId, hostname }) => docker.setPrimaryDomain(containerId, hostname),
     }),
     inspectRouteAccess: tool({
@@ -265,7 +279,7 @@ export async function createChatResponse(
       execute: ({ volumeName }) => docker.inspectManagedVolume(volumeName),
     }),
     reconcileManagedVolume: tool({
-      description: 'Validate and recognize a correctly labeled orphaned HalfCloud volume so createApplication can safely reuse it.',
+      description: 'Validate and recognize a correctly labeled orphaned HalfCloud volume so it can be safely reused.',
       inputSchema: z.object({ application: z.string().min(1), localName: z.string().min(1) }),
       execute: ({ application, localName }) => docker.reconcileManagedVolume(application, localName),
     }),
@@ -276,7 +290,7 @@ export async function createChatResponse(
     }),
     repairStorageOwnership: tool({
       description: 'Recursively repair ownership of one mounted managed storage path to match the application image user. Requires explicit user approval.',
-      inputSchema: z.object({ containerId, mountTarget: z.string().startsWith('/') }),
+      inputSchema: z.object({ containerId: serviceId, mountTarget: z.string().startsWith('/') }),
       execute: ({ containerId, mountTarget }) => docker.repairStorageOwnership(containerId, mountTarget),
     }),
     getHostStatus: tool({
@@ -291,7 +305,7 @@ export async function createChatResponse(
     model: provider.responses(settings.deployment),
     instructions: SYSTEM_PROMPT,
     tools,
-    toolApproval: { deleteApplication: 'user-approval', deleteManagedVolume: 'user-approval', repairStorageOwnership: 'user-approval', removeRouteProtection: 'user-approval' },
+    toolApproval: { deleteApp: 'user-approval', removeService: 'user-approval', deleteManagedVolume: 'user-approval', repairStorageOwnership: 'user-approval', removeRouteProtection: 'user-approval' },
   });
   return createAgentUIStreamResponse({
     agent,

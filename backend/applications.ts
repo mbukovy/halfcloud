@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { AppStore } from './apps.js';
 import { CaddyService } from './caddy.js';
 import { DockerService, type CreateContainerInput } from './docker.js';
 import { DomainStore, normalizeHostname, type ServiceDomain } from './domains.js';
@@ -13,20 +14,136 @@ export class ApplicationService {
     private readonly environment = new EnvironmentStore(),
     private readonly accessRequests = new RouteAccessRequestStore(),
     private readonly hashPassword: (password: string) => Promise<string> = hashBasicAuthPassword,
+    private readonly apps = new AppStore(),
   ) {}
 
   ping() { return this.docker.ping(); }
   getRuntimeInfo() { return this.docker.getRuntimeInfo(); }
   assertRootless() { return this.docker.assertRootless(); }
-  ensureNetwork() { return this.docker.ensureNetwork(); }
+  ensureAppNetwork(appId: string) { return this.docker.ensureAppNetwork(appId); }
   async listContainers(includeStats = true) {
     const containers = await this.docker.listContainers(includeStats);
     return Promise.all(containers.map(async (container) => {
-      const stored = await this.domains.get(container.name, container.hostname);
+      const stored = await this.domains.get(container.serviceId ?? container.name, container.hostname);
       const domainStates = await this.domains.withReadiness(stored);
       const primary = domainStates.find((domain) => domain.primary);
       return { ...container, domains: domainStates, hostname: primary?.hostname };
     }));
+  }
+
+  async listApps(includeStats = true) {
+    const [apps, services] = await Promise.all([this.apps.list(), this.listContainers(includeStats)]);
+    return apps.map((app) => {
+      const appServices = services.filter((service) => service.appId === app.id);
+      const running = appServices.filter((service) => service.state === 'running').length;
+      const failed = appServices.some((service) => ['dead', 'restarting'].includes(service.state));
+      const status = !appServices.length ? 'failed' : running === appServices.length ? 'running' : running === 0 ? 'stopped' : failed ? 'degraded' : 'partially_running';
+      return {
+        ...app,
+        status,
+        services: appServices,
+        cpuPercent: Number(appServices.reduce((total, service) => total + service.cpuPercent, 0).toFixed(2)),
+        memoryUsed: appServices.reduce((total, service) => total + service.memoryUsed, 0),
+        runningServices: running,
+      };
+    });
+  }
+
+  async getApp(idOrName: string, includeStats = true) {
+    const app = await this.apps.get(idOrName);
+    return (await this.listApps(includeStats)).find((candidate) => candidate.id === app.id)!;
+  }
+
+  async createApp(input: { name: string; services: Array<Omit<CreateContainerInput, 'appId' | 'serviceId' | 'serviceName' | 'publicName' | 'name'> & { name: string }> }) {
+    if (!input.services.length) throw new Error('An App requires at least one Service');
+    const names = input.services.map((service) => this.serviceName(service.name));
+    if (new Set(names).size !== names.length) throw new Error('Service names must be unique within an App');
+    const app = await this.apps.create(input.name);
+    const created: string[] = [];
+    try {
+      for (const [index, service] of input.services.entries()) {
+        const result = await this.createServiceRecord(app.id, { ...service, name: names[index]! });
+        created.push(result.id);
+      }
+      return this.getApp(app.id);
+    } catch (error) {
+      for (const id of created.reverse()) await this.docker.deleteContainer(id).catch(() => undefined);
+      await this.docker.deleteAppNetwork(app.id).catch(() => undefined);
+      await this.apps.deleteApp(app.id).catch(() => undefined);
+      await this.syncRoutes().catch(() => undefined);
+      throw error;
+    }
+  }
+
+  async addService(appIdOrName: string, input: Omit<CreateContainerInput, 'appId' | 'serviceId' | 'serviceName' | 'publicName' | 'name'> & { name: string }) {
+    const app = await this.apps.get(appIdOrName);
+    const name = this.serviceName(input.name);
+    const existing = (await this.getApp(app.id, false)).services;
+    if (existing.some((service) => service.name === name)) throw new Error(`Service ${name} already exists in ${app.name}`);
+    await this.createServiceRecord(app.id, { ...input, name });
+    return this.getApp(app.id);
+  }
+
+  async renameApp(appIdOrName: string, name: string) {
+    return this.apps.renameApp(appIdOrName, name);
+  }
+
+  async startApp(idOrName: string) { return this.appAction(idOrName, (id) => this.startContainer(id), (state) => state !== 'running'); }
+  async stopApp(idOrName: string) { return this.appAction(idOrName, (id) => this.stopContainer(id), (state) => state === 'running'); }
+  async restartApp(idOrName: string) { return this.appAction(idOrName, (id) => this.restartContainer(id)); }
+  async recreateApp(idOrName: string) {
+    const result = await this.appAction(idOrName, (id) => this.docker.recreateContainer(id));
+    await this.syncRoutes();
+    return result;
+  }
+
+  async deleteApp(idOrName: string, deleteData = false) {
+    const app = await this.getApp(idOrName, false);
+    for (const service of app.services) await this.docker.deleteContainer(service.id);
+    await this.docker.deleteAppNetwork(app.id);
+    if (deleteData) {
+      for (const volume of await this.docker.listManagedVolumes()) {
+        if (app.services.some((service) => service.serviceId === volume.application)) await this.docker.deleteManagedVolume(volume.name);
+      }
+    }
+    await this.apps.deleteApp(app.id);
+    await this.syncRoutes();
+    return { appId: app.id, deleted: true, persistentDataDeleted: deleteData };
+  }
+
+  async getAppLogs(idOrName: string, tail = 200) {
+    const app = await this.getApp(idOrName, false);
+    const entries = await Promise.all(app.services.map(async (service) => ({ name: service.name, ...(await this.docker.getContainerLogs(service.id, tail)) })));
+    const logs = entries
+      .flatMap((entry) => entry.logs.split('\n').filter(Boolean).map((line) => ({ line, output: `[${entry.name}] ${line}` })))
+      .sort((left, right) => left.line.localeCompare(right.line))
+      .map((entry) => entry.output)
+      .join('\n');
+    return { appId: app.id, logs };
+  }
+
+  async service(appIdOrName: string, serviceIdOrName: string) {
+    const app = await this.getApp(appIdOrName, false);
+    const matches = app.services.filter((service) => service.serviceId === serviceIdOrName || service.id === serviceIdOrName || service.id.startsWith(serviceIdOrName) || service.name === serviceIdOrName);
+    if (!matches.length) throw new Error(`Service ${serviceIdOrName} was not found in ${app.name}`);
+    if (matches.length > 1) throw new Error(`Service ${serviceIdOrName} is ambiguous`);
+    return matches[0]!;
+  }
+
+  async startService(appIdOrName: string, serviceIdOrName: string) { return this.startContainer((await this.service(appIdOrName, serviceIdOrName)).id); }
+  async stopService(appIdOrName: string, serviceIdOrName: string) { return this.stopContainer((await this.service(appIdOrName, serviceIdOrName)).id); }
+  async restartService(appIdOrName: string, serviceIdOrName: string) { return this.restartContainer((await this.service(appIdOrName, serviceIdOrName)).id); }
+  async recreateService(appIdOrName: string, serviceIdOrName: string) {
+    const result = await this.docker.recreateContainer((await this.service(appIdOrName, serviceIdOrName)).id);
+    await this.syncRoutes();
+    return result;
+  }
+  async removeService(appIdOrName: string, serviceIdOrName: string) {
+    const app = await this.getApp(appIdOrName, false);
+    if (app.services.length === 1) throw new Error('Delete the App instead of removing its only Service');
+    const service = await this.service(app.id, serviceIdOrName);
+    await this.deleteContainer(service.id);
+    return { appId: app.id, serviceId: service.serviceId, deleted: true };
   }
   getContainerLogs(id: string, tail?: number) { return this.docker.getContainerLogs(id, tail); }
   getContainerStats(id: string) { return this.docker.getContainerStats(id); }
@@ -110,18 +227,19 @@ export class ApplicationService {
 
   async requestEnvironmentVariable(id: string, name: string, description?: string) {
     const application = await this.application(id);
-    const request = await this.environment.createRequest(application.name, name, description);
+    const request = await this.environment.createRequest(application.serviceId ?? application.name, name, description);
     return { requestId: request.id, serviceId: request.serviceId, name: request.name, description: request.description, status: request.status };
   }
 
   async completeEnvironmentRequest(id: string, requestId: string, value: string, protectedFromAI = true) {
     const application = await this.application(id);
-    const request = await this.environment.getRequest(application.name, requestId);
+    const serviceKey = application.serviceId ?? application.name;
+    const request = await this.environment.getRequest(serviceKey, requestId);
     if (request.status !== 'pending') throw new Error(`Environment request ${requestId} is ${request.status}`);
     const variables = await this.listEnvironment(id);
     const existing = variables.find((variable) => variable.name === request.name);
     await this.saveEnvironmentVariable(id, { variableId: existing?.id, name: request.name, value, protectedFromAI });
-    const completed = await this.environment.setRequestStatus(application.name, requestId, 'completed');
+    const completed = await this.environment.setRequestStatus(serviceKey, requestId, 'completed');
     return { requestId: completed.id, serviceId: completed.serviceId, name: completed.name, status: completed.status, protectedFromAI };
   }
 
@@ -132,13 +250,13 @@ export class ApplicationService {
   async createContainer(input: CreateContainerInput) {
     const hasPublicTcpPort = Object.values(input.ports).some((target) => !target.includes('/') || target.endsWith('/tcp'));
     if (input.hostname && !hasPublicTcpPort) throw new Error('A hostname requires a published TCP port');
-    const managedHostname = hasPublicTcpPort ? this.defaultHostname(input.name) : undefined;
+    const managedHostname = hasPublicTcpPort ? this.defaultHostname(input.publicName) : undefined;
     const customHostname = input.hostname ? normalizeHostname(input.hostname) : undefined;
     if (customHostname) await this.assertHostnameAvailable(customHostname);
     const result = await this.docker.createContainer({ ...input, hostname: managedHostname });
     try {
-      await this.environment.initialize(input.name, input.environment ?? {}, false);
-      const serviceDomains = managedHostname ? await this.domains.initialize(input.name, managedHostname, customHostname) : [];
+      await this.environment.initialize(input.serviceId, input.environment ?? {}, false);
+      const serviceDomains = managedHostname ? await this.domains.initialize(input.serviceId, managedHostname, customHostname) : [];
       await this.syncRoutes();
       const primary = serviceDomains.find((domain) => domain.primary);
       return { ...result, domains: serviceDomains, ...(primary ? { hostname: primary.hostname, url: `https://${primary.hostname}` } : {}) };
@@ -176,19 +294,19 @@ export class ApplicationService {
     const containers = await this.docker.listContainers(false);
     await this.caddy.sync(await Promise.all(containers.map(async (container) => ({
       ...container,
-      domains: await this.domains.get(container.name, container.hostname),
+       domains: await this.domains.get(container.serviceId ?? container.name, container.hostname),
     }))));
   }
 
   async listDomains(id: string) {
     const application = await this.application(id);
-    return this.domains.withReadiness(await this.domains.get(application.name, application.hostname));
+    return this.domains.withReadiness(await this.domains.get(application.serviceId ?? application.name, application.hostname));
   }
 
   async addDomain(id: string, hostname: string) {
     const application = await this.application(id, true);
     const normalized = normalizeHostname(hostname);
-    await this.assertHostnameAvailable(normalized, application.name);
+    await this.assertHostnameAvailable(normalized, application.serviceId ?? application.name);
     return this.mutateDomains(application, (name, legacy) => this.domains.add(name, legacy, normalized));
   }
 
@@ -221,7 +339,8 @@ export class ApplicationService {
     assertBasicAuthUsername(username);
     assertBasicAuthPassword(password);
     const located = await this.route(routeId);
-    const request = await this.accessRequests.get(located.application.name, requestId);
+    const serviceKey = located.application.serviceId ?? located.application.name;
+    const request = await this.accessRequests.get(serviceKey, requestId);
     if (request.routeId !== routeId || request.status !== 'pending') throw new Error('Basic Auth request is no longer pending');
     if (request.operation === 'setup' && located.domain.access.type !== 'public') throw new Error('Route is already password protected');
     if (request.operation === 'change' && located.domain.access.type !== 'basic_auth') throw new Error('Route is not password protected');
@@ -230,8 +349,8 @@ export class ApplicationService {
     const updated = located.domains.map((domain) => domain.id === routeId
       ? { ...domain, access: { type: 'basic_auth' as const, username, passwordHash } }
       : domain);
-    await this.replaceRouteAccess(located.application.name, located.domains, updated);
-    await this.accessRequests.complete(located.application.name, requestId);
+    await this.replaceRouteAccess(serviceKey, located.domains, updated);
+    await this.accessRequests.complete(serviceKey, requestId);
     return { success: true, requestId, routeId, access: 'basic_auth' as const, username, status: 'completed' as const };
   }
 
@@ -241,21 +360,22 @@ export class ApplicationService {
     const updated = located.domains.map((domain) => domain.id === routeId
       ? { ...domain, access: { type: 'public' as const } }
       : domain);
-    await this.replaceRouteAccess(located.application.name, located.domains, updated);
+    await this.replaceRouteAccess(located.application.serviceId ?? located.application.name, located.domains, updated);
     return { success: true, routeId, access: 'public' as const };
   }
 
   private async mutateDomains(
-    application: { name: string; hostname?: string },
+    application: { name: string; serviceId?: string; hostname?: string },
     mutate: (name: string, legacyHostname?: string) => Promise<ServiceDomain[]>,
   ) {
-    const previous = await this.domains.get(application.name, application.hostname);
-    const updated = await mutate(application.name, application.hostname);
+    const serviceKey = application.serviceId ?? application.name;
+    const previous = await this.domains.get(serviceKey, application.hostname);
+    const updated = await mutate(serviceKey, application.hostname);
     try {
       await this.syncRoutes();
       return this.domains.withReadiness(updated);
     } catch (error) {
-      await this.domains.replace(application.name, previous);
+      await this.domains.replace(serviceKey, previous);
       throw error;
     }
   }
@@ -266,7 +386,7 @@ export class ApplicationService {
     if (operation === 'change' && located.domain.access.type !== 'basic_auth') throw new Error('Route is not password protected');
     const readiness = (await this.domains.withReadiness([located.domain]))[0]!;
     if (!readiness.httpsReady) throw new Error('Password protection requires working HTTPS for this route');
-    const request = await this.accessRequests.create(located.application.name, routeId, operation);
+    const request = await this.accessRequests.create(located.application.serviceId ?? located.application.name, routeId, operation);
     return {
       requestId: request.id,
       routeId,
@@ -277,9 +397,9 @@ export class ApplicationService {
   }
 
   private async route(routeId: string) {
-    const matches: Array<{ application: { name: string; hostname?: string }; domain: ServiceDomain; domains: ServiceDomain[] }> = [];
+    const matches: Array<{ application: { name: string; serviceId?: string; hostname?: string }; domain: ServiceDomain; domains: ServiceDomain[] }> = [];
     for (const application of await this.docker.listContainers(false)) {
-      const domains = await this.domains.get(application.name, application.hostname);
+      const domains = await this.domains.get(application.serviceId ?? application.name, application.hostname);
       const domain = domains.find((candidate) => candidate.id === routeId);
       if (domain) matches.push({ application, domain, domains });
     }
@@ -301,7 +421,7 @@ export class ApplicationService {
 
   private async application(id: string, requirePublic = false) {
     const containers = await this.docker.listContainers(false);
-    const matches = containers.filter((container) => container.id === id || container.id.startsWith(id) || container.name === id);
+    const matches = containers.filter((container) => container.id === id || container.id.startsWith(id) || container.serviceId === id || container.runtimeName === id || container.name === id);
     if (!matches.length) throw new Error(`Managed application ${id} was not found`);
     if (matches.length > 1) throw new Error(`Application id ${id} is ambiguous; use the exact name or full id`);
     const application = matches[0]!;
@@ -323,8 +443,9 @@ export class ApplicationService {
 
   private async assertHostnameAvailable(hostname: string, exceptApplication?: string) {
     for (const application of await this.docker.listContainers(false)) {
-      if (application.name === exceptApplication) continue;
-      const domains = await this.domains.get(application.name, application.hostname);
+      const serviceKey = application.serviceId ?? application.name;
+      if (serviceKey === exceptApplication) continue;
+      const domains = await this.domains.get(serviceKey, application.hostname);
       if (domains.some((domain) => domain.hostname === hostname)) throw new Error(`${hostname} is already attached to ${application.name}`);
     }
     if (hostname === process.env.HALFCLOUD_HOSTNAME?.toLowerCase()) throw new Error(`${hostname} is reserved for HalfCloud`);
@@ -334,5 +455,28 @@ export class ApplicationService {
     const domain = process.env.HALFCLOUD_BASE_DOMAIN;
     if (!domain) throw new Error('HALFCLOUD_BASE_DOMAIN is required to expose applications');
     return `${name.toLowerCase()}.${domain}`;
+  }
+
+  private async createServiceRecord(appId: string, input: Omit<CreateContainerInput, 'appId' | 'serviceId' | 'serviceName' | 'publicName' | 'name'> & { name: string }) {
+    const serviceId = `service_${randomUUID()}`;
+    const runtimeName = `hc_${appId.slice(4, 12)}_${serviceId.slice(8, 16)}`;
+    const app = await this.apps.get(appId);
+    const existingServices = (await this.listContainers(false)).filter((service) => service.appId === appId);
+    const appSlug = app.name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || app.id.slice(4, 12);
+    const publicName = existingServices.length ? `${appSlug}-${input.name}`.slice(0, 63).replace(/-$/, '') : appSlug.slice(0, 63);
+    return this.createContainer({ ...input, appId, serviceId, serviceName: input.name, publicName, name: runtimeName });
+  }
+
+  private serviceName(value: string) {
+    const name = value.trim().toLowerCase();
+    if (!/^[a-z0-9][a-z0-9-]{0,62}$/.test(name)) throw new Error('Service names must use lowercase letters, numbers, and hyphens');
+    return name;
+  }
+
+  private async appAction(idOrName: string, action: (serviceId: string) => Promise<unknown>, applies = (_state: string) => true) {
+    const app = await this.getApp(idOrName, false);
+    const results = [];
+    for (const service of app.services) if (applies(service.state)) results.push(await action(service.id));
+    return { appId: app.id, services: results };
   }
 }

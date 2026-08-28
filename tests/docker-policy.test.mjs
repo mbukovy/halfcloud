@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { assertManagedVolumeLabels, createOrReuseManagedNetwork, createOrReuseManagedVolume, managedBindPath, managedNetworkName, rootlessSocketPath, validateHostPort } from '../dist/backend/docker.js';
+import { appNetworkName, assertManagedVolumeLabels, createOrReuseAppNetwork, createOrReuseManagedVolume, managedBindPath, rootlessSocketPath, validateHostPort } from '../dist/backend/docker.js';
 
 test('requires an explicit rootless user Docker socket', () => {
   assert.equal(rootlessSocketPath('unix:///run/user/1001/docker.sock'), '/run/user/1001/docker.sock');
@@ -61,7 +61,7 @@ test('inspects the dockerode volume handle before validating labels', async () =
   });
 });
 
-test('creates one managed bridge network when it does not exist', async () => {
+test('creates an isolated managed bridge network for an App', async () => {
   let createOptions;
   let exists = false;
   const docker = {
@@ -73,30 +73,31 @@ test('creates one managed bridge network when it does not exist', async () => {
       return {
         async inspect() {
           if (!exists) throw Object.assign(new Error('not found'), { statusCode: 404 });
-          return { Name: name, Id: 'network-id', Driver: 'bridge', Labels: { 'halfcloud.managed': 'true' } };
+          return { Name: name, Id: 'network-id', Driver: 'bridge', Labels: { 'halfcloud.managed': 'true', 'halfcloud.app.id': appId } };
         },
       };
     },
   };
 
-  const network = await createOrReuseManagedNetwork(docker);
-  assert.equal(managedNetworkName, 'halfcloud');
-  assert.equal(network.Name, 'halfcloud');
+  const appId = 'app_12345678-1234-1234-1234-123456789abc';
+  const network = await createOrReuseAppNetwork(docker, appId);
+  assert.equal(appNetworkName(appId), `halfcloud_${appId}`);
+  assert.equal(network.Name, `halfcloud_${appId}`);
   assert.deepEqual(createOptions, {
-    Name: 'halfcloud',
+    Name: `halfcloud_${appId}`,
     CheckDuplicate: true,
     Driver: 'bridge',
-    Labels: { 'halfcloud.managed': 'true' },
+    Labels: { 'halfcloud.managed': 'true', 'halfcloud.app.id': appId },
   });
 });
 
-test('refuses to reuse an unmanaged network with the reserved name', async () => {
+test('refuses to reuse a network not owned by the App', async () => {
   const docker = {
     async createNetwork() {},
-    getNetwork() {
-      return { async inspect() { return { Name: 'halfcloud', Id: 'other', Driver: 'bridge', Labels: {} }; } };
+    getNetwork(name) {
+      return { async inspect() { return { Name: name, Id: 'other', Driver: 'bridge', Labels: { 'halfcloud.managed': 'true', 'halfcloud.app.id': 'app_00000000-0000-0000-0000-000000000000' } }; } };
     },
   };
 
-  await assert.rejects(createOrReuseManagedNetwork(docker), /not managed by HalfCloud/);
+  await assert.rejects(createOrReuseAppNetwork(docker, 'app_12345678-1234-1234-1234-123456789abc'), /not managed by HalfCloud/);
 });
