@@ -41,6 +41,7 @@ const prompt = ref('');
 const transcript = ref<HTMLElement>();
 const composerInput = ref<HTMLTextAreaElement>();
 const respondingApprovalId = ref('');
+const mobileTab = ref<'operator' | 'containers' | 'server'>('operator');
 let refreshTimer: number | undefined;
 
 const authenticatedFetch: typeof fetch = async (input, init) => {
@@ -544,7 +545,13 @@ onBeforeUnmount(() => {
       </div>
     </header>
 
-    <section v-if="server" class="metrics-strip">
+    <nav class="mobile-tabs" aria-label="Dashboard sections" role="tablist">
+      <button type="button" role="tab" :aria-selected="mobileTab === 'operator'" aria-controls="operator-panel" @click="mobileTab = 'operator'">AI Operator</button>
+      <button type="button" role="tab" :aria-selected="mobileTab === 'containers'" aria-controls="containers-panel" @click="mobileTab = 'containers'">Containers</button>
+      <button type="button" role="tab" :aria-selected="mobileTab === 'server'" aria-controls="server-panel" @click="mobileTab = 'server'">Server</button>
+    </nav>
+
+    <section v-if="server" id="server-panel" class="metrics-strip" :class="{ 'mobile-panel-active': mobileTab === 'server' }" role="tabpanel">
       <div><span>CPU</span><strong>{{ server.cpuPercent.toFixed(1) }}%</strong><i><b :style="{ width: `${Math.min(server.cpuPercent, 100)}%` }"></b></i></div>
       <div><span>MEMORY</span><strong>{{ formatBytes(server.memoryUsed) }} / {{ formatBytes(server.memoryTotal) }}</strong><i><b :style="{ width: `${server.memoryTotal ? server.memoryUsed / server.memoryTotal * 100 : 0}%` }"></b></i></div>
       <div><span>DISK</span><strong>{{ formatBytes(server.diskUsed) }} / {{ formatBytes(server.diskTotal) }}</strong><i><b :style="{ width: `${server.diskTotal ? server.diskUsed / server.diskTotal * 100 : 0}%` }"></b></i></div>
@@ -554,7 +561,7 @@ onBeforeUnmount(() => {
     <p v-if="dashboardError" class="global-error">{{ dashboardError }}</p>
 
     <div class="workspace">
-      <section class="chat-panel">
+      <section id="operator-panel" class="chat-panel" :class="{ 'mobile-panel-active': mobileTab === 'operator' }" role="tabpanel">
         <div class="section-heading">
            <div><p class="eyebrow">AI OPERATOR</p><h1>Ask HalfCloud</h1></div>
            <div class="chat-heading-actions">
@@ -643,7 +650,7 @@ onBeforeUnmount(() => {
         </div>
       </section>
 
-      <section class="containers-panel">
+      <section id="containers-panel" class="containers-panel" :class="{ 'mobile-panel-active': mobileTab === 'containers' }" role="tabpanel">
         <div class="section-heading compact">
           <div><p class="eyebrow">DOCKER ENGINE</p><h2>Containers <sup>{{ containers.length }}</sup></h2></div>
           <button class="refresh-button" title="Refresh" @click="refreshDashboard">↻</button>
@@ -790,7 +797,7 @@ onBeforeUnmount(() => {
               </div>
               <label class="environment-protection" :title="variable.protectedFromAI ? 'This value is omitted from AI data' : 'This value is visible to AI'">
                 <input v-model="variable.protectedFromAI" :disabled="environmentDialog.saving" type="checkbox">
-                <span>{{ variable.protectedFromAI ? 'Protected' : 'Visible' }}</span>
+                <span v-if="variable.protectedFromAI">Protected</span>
               </label>
               <button class="environment-delete danger" type="button" :disabled="environmentDialog.saving" @click="deleteEnvironmentVariable(variable)">Delete</button>
             </div>
