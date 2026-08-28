@@ -471,13 +471,13 @@ onBeforeUnmount(() => {
         </div>
         <div ref="transcript" class="transcript">
           <div v-if="messages.length === 0" class="empty-chat">
-            <div class="prompt-glyph">⌁</div>
+            <img class="empty-chat-logo" src="/halfcloud-logo-ui.png" alt="HalfCloud">
             <h2>What should be running?</h2>
             <p>Describe the outcome. HalfCloud will inspect Docker, choose sensible defaults, and carry it out.</p>
             <div class="suggestions">
-              <button @click="prompt = 'Run nginx on port 8080'">Run nginx on port 8080</button>
+              <button @click="prompt = 'Run nginx'">Run nginx</button>
               <button @click="prompt = 'How is my server doing?'">How is my server doing?</button>
-              <button @click="prompt = 'Show me all running containers'">Show running containers</button>
+              <button @click="prompt = 'Inspect my containers and tell me what needs attention'">Find containers that need attention</button>
             </div>
           </div>
           <article v-for="message in messages" :key="message.id" class="message" :class="message.role">
