@@ -42,6 +42,16 @@ export interface ServiceDomain {
   dnsTarget?: string;
 }
 
+export interface EnvironmentVariable {
+  id: string;
+  serviceId: string;
+  name: string;
+  value: string;
+  protectedFromAI: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface PublicSettings {
   configured: boolean;
   provider: 'azure';

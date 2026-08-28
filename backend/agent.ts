@@ -34,6 +34,24 @@ function errorDetails(error: unknown, apiKey: string) {
   return redact(details.join('\n'), apiKey).slice(0, 4000) || 'Unknown error';
 }
 
+export function sanitizeAgentMessages(messages: UIMessage[]): UIMessage[] {
+  return messages.map((message) => ({
+    ...message,
+    parts: message.parts.flatMap((part) => {
+      if (typeof part !== 'object' || part === null) return [part];
+      const record = part as unknown as Record<string, unknown>;
+      const type = typeof record.type === 'string' ? record.type : '';
+      const name = type === 'dynamic-tool' ? record.toolName : type.startsWith('tool-') ? type.slice(5) : undefined;
+
+      // Tool history is browser-controlled context. Never replay an environment mutation value to the provider.
+      if (name === 'setEnvironmentVariable') return [];
+      if (name !== 'createApplication' || typeof record.input !== 'object' || record.input === null) return [part];
+      const { environment: _environment, ...safeInput } = record.input as Record<string, unknown>;
+      return [{ ...record, input: safeInput } as typeof part];
+    }),
+  }));
+}
+
 export function azureProviderOptions(settings: AiSettings) {
   const endpoint = new URL(settings.endpoint);
   const endpointPath = endpoint.pathname.replace(/\/+$/, '');
@@ -84,6 +102,9 @@ Rules:
 - When the user adds the first custom domain, prefer making it primary while preserving the HalfCloud-generated domain. Do not remove or replace any existing domain unless explicitly requested or required to resolve a conflict.
 - The primary domain is the preferred public URL, but every configured domain continues routing directly to the service. Changing it does not imply changing arbitrary application environment variables.
 - External DNS is the user's responsibility. When adding a custom domain, report the DNS target returned by the tool and explain that HTTPS becomes ready after DNS points to this server; Caddy manages the certificate.
+- Environment variables may be protected from AI. For protected variables, you can see their name and configuration status but never their value.
+- Never ask the user to paste API keys, passwords, tokens, credentials, or other sensitive values into chat. Use requestEnvironmentVariable so the user can submit the value directly to HalfCloud with AI protection enabled by default.
+- Use setEnvironmentVariable only for non-sensitive configuration that may remain visible to AI, such as NODE_ENV, LOG_LEVEL, PORT, or a public APP_URL. Never use it for credentials.
 - After every application creation, inspect its logs and list applications again to verify that it remains running. If Docker reports health for the image, verify that status too. A successful start alone is not success.
 - If post-creation checks reveal a problem, diagnose and fix it when the correction is safe and consistent with the requested deployment. Prefer fixes that preserve the intended architecture, persistence, security, and private service exposure; do not call a deployment successful if the fix risks data loss after recreation or unnecessarily exposes a service.
 - Explain important failures plainly. Never expose API keys or claim success unless the tool result confirms it.
@@ -148,10 +169,29 @@ export async function createChatResponse(
       inputSchema: z.object({ containerId }),
       execute: ({ containerId }) => docker.getContainerStats(containerId),
     }),
+    inspectContainer: tool({
+      description: 'Inspect one managed container through a controlled schema, including AI-safe environment metadata. Raw Docker inspect output is never returned.',
+      inputSchema: z.object({ serviceId: containerId }),
+      execute: ({ serviceId }) => docker.inspectContainerForAgent(serviceId),
+    }),
+    listEnvironment: tool({
+      description: 'List environment variables for a service. Values protected from AI are omitted and represented only as configured.',
+      inputSchema: z.object({ serviceId: containerId }),
+      execute: ({ serviceId }) => docker.listEnvironmentForAgent(serviceId),
+    }),
     setEnvironmentVariable: tool({
-      description: 'Set or replace one environment variable and safely recreate the application container. Secret values are not returned.',
-      inputSchema: z.object({ containerId, key: z.string().min(1), value: z.string() }),
-      execute: ({ containerId, key, value }) => docker.setEnvironmentVariable(containerId, key, value),
+      description: 'Set or replace a non-sensitive environment variable that may remain visible to AI, then safely recreate the application container.',
+      inputSchema: z.object({ serviceId: containerId, name: z.string().min(1), value: z.string() }),
+      execute: ({ serviceId, name, value }) => docker.setEnvironmentVariableForAgent(serviceId, name, value),
+    }),
+    requestEnvironmentVariable: tool({
+      description: 'Request a sensitive environment value through a dedicated direct-to-HalfCloud input. This tool intentionally has no value argument.',
+      inputSchema: z.object({
+        serviceId: containerId,
+        name: z.string().min(1),
+        description: z.string().max(500).optional(),
+      }),
+      execute: ({ serviceId, name, description }) => docker.requestEnvironmentVariable(serviceId, name, description),
     }),
     listServiceDomains: tool({
       description: 'List all routing domains for a public HalfCloud application, including primary, managed, DNS, and HTTPS state.',
@@ -214,7 +254,7 @@ export async function createChatResponse(
   });
   return createAgentUIStreamResponse({
     agent,
-    uiMessages: messages,
+    uiMessages: sanitizeAgentMessages(messages),
     abortSignal,
     onError: (error) => {
       const details = errorDetails(error, settings.apiKey);

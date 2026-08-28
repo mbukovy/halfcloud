@@ -1,12 +1,15 @@
+import { randomUUID } from 'node:crypto';
 import { CaddyService } from './caddy.js';
 import { DockerService, type CreateContainerInput } from './docker.js';
 import { DomainStore, normalizeHostname, type ServiceDomain } from './domains.js';
+import { EnvironmentStore, assertEnvironmentVariableName, serializeEnvironmentForAgent, type EnvironmentVariable } from './environment.js';
 
 export class ApplicationService {
   constructor(
     private readonly docker: DockerService,
     private readonly caddy = new CaddyService(),
     private readonly domains = new DomainStore(),
+    private readonly environment = new EnvironmentStore(),
   ) {}
 
   ping() { return this.docker.ping(); }
@@ -30,10 +33,88 @@ export class ApplicationService {
   reconcileManagedVolume(application: string, localName: string) { return this.docker.reconcileManagedVolume(application, localName); }
   repairStorageOwnership(id: string, mountTarget: string) { return this.docker.repairStorageOwnership(id, mountTarget); }
 
-  async setEnvironmentVariable(id: string, key: string, value: string) {
-    const result = await this.docker.setEnvironmentVariable(id, key, value);
-    await this.syncRoutes();
-    return result;
+  async listEnvironment(id: string) {
+    const runtime = await this.docker.getContainerEnvironment(id);
+    return this.environment.list(runtime.name, runtime.environment);
+  }
+
+  async listEnvironmentForAgent(id: string) {
+    return { variables: serializeEnvironmentForAgent(await this.listEnvironment(id)) };
+  }
+
+  async saveEnvironmentVariable(
+    id: string,
+    input: { variableId?: string; name: string; value: string; protectedFromAI?: boolean },
+  ) {
+    assertEnvironmentVariableName(input.name);
+    const runtime = await this.docker.getContainerEnvironment(id);
+    const previous = await this.environment.list(runtime.name, runtime.environment);
+    const existing = input.variableId ? previous.find((variable) => variable.id === input.variableId) : undefined;
+    if (input.variableId && !existing) throw new Error(`Environment variable ${input.variableId} was not found`);
+    if (previous.some((variable) => variable.name === input.name && variable.id !== existing?.id)) {
+      throw new Error(`Environment variable ${input.name} already exists`);
+    }
+    const now = new Date().toISOString();
+    const variable: EnvironmentVariable = existing
+      ? { ...existing, name: input.name, value: input.value, protectedFromAI: input.protectedFromAI ?? true, updatedAt: now }
+      : { id: `env_${randomUUID()}`, serviceId: runtime.name, name: input.name, value: input.value, protectedFromAI: input.protectedFromAI ?? true, createdAt: now, updatedAt: now };
+    const updated = existing ? previous.map((candidate) => candidate.id === existing.id ? variable : candidate) : [...previous, variable];
+    const values = Object.fromEntries(updated.map((candidate) => [candidate.name, candidate.value]));
+    await this.environment.replaceVariables(runtime.name, updated);
+    try {
+      await this.docker.replaceContainerEnvironment(id, values);
+      await this.syncRoutes();
+      return variable;
+    } catch (error) {
+      await this.environment.replaceVariables(runtime.name, previous);
+      throw error;
+    }
+  }
+
+  async deleteEnvironmentVariable(id: string, variableId: string) {
+    const runtime = await this.docker.getContainerEnvironment(id);
+    const previous = await this.environment.list(runtime.name, runtime.environment);
+    const variable = previous.find((candidate) => candidate.id === variableId);
+    if (!variable) throw new Error(`Environment variable ${variableId} was not found`);
+    const updated = previous.filter((candidate) => candidate.id !== variableId);
+    await this.environment.replaceVariables(runtime.name, updated);
+    try {
+      const result = await this.docker.replaceContainerEnvironment(id, Object.fromEntries(updated.map((candidate) => [candidate.name, candidate.value])));
+      await this.syncRoutes();
+      return { ...result, variableId, deleted: true };
+    } catch (error) {
+      await this.environment.replaceVariables(runtime.name, previous);
+      throw error;
+    }
+  }
+
+  async setEnvironmentVariableForAgent(id: string, name: string, value: string) {
+    const variables = await this.listEnvironment(id);
+    const existing = variables.find((variable) => variable.name === name);
+    if (existing?.protectedFromAI) throw new Error(`${name} is protected from AI and can only be changed in the Environment interface`);
+    const variable = await this.saveEnvironmentVariable(id, { variableId: existing?.id, name, value, protectedFromAI: false });
+    return { serviceId: variable.serviceId, name: variable.name, configured: true, protectedFromAI: false };
+  }
+
+  async requestEnvironmentVariable(id: string, name: string, description?: string) {
+    const application = await this.application(id);
+    const request = await this.environment.createRequest(application.name, name, description);
+    return { requestId: request.id, serviceId: request.serviceId, name: request.name, description: request.description, status: request.status };
+  }
+
+  async completeEnvironmentRequest(id: string, requestId: string, value: string, protectedFromAI = true) {
+    const application = await this.application(id);
+    const request = await this.environment.getRequest(application.name, requestId);
+    if (request.status !== 'pending') throw new Error(`Environment request ${requestId} is ${request.status}`);
+    const variables = await this.listEnvironment(id);
+    const existing = variables.find((variable) => variable.name === request.name);
+    await this.saveEnvironmentVariable(id, { variableId: existing?.id, name: request.name, value, protectedFromAI });
+    const completed = await this.environment.setRequestStatus(application.name, requestId, 'completed');
+    return { requestId: completed.id, serviceId: completed.serviceId, name: completed.name, status: completed.status, protectedFromAI };
+  }
+
+  async inspectContainerForAgent(id: string) {
+    return { ...(await this.docker.inspectContainer(id)), environment: (await this.listEnvironmentForAgent(id)).variables };
   }
 
   async createContainer(input: CreateContainerInput) {
@@ -44,6 +125,7 @@ export class ApplicationService {
     if (customHostname) await this.assertHostnameAvailable(customHostname);
     const result = await this.docker.createContainer({ ...input, hostname: managedHostname });
     try {
+      await this.environment.initialize(input.name, input.environment ?? {}, false);
       const serviceDomains = managedHostname ? await this.domains.initialize(input.name, managedHostname, customHostname) : [];
       await this.syncRoutes();
       const primary = serviceDomains.find((domain) => domain.primary);

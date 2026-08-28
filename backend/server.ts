@@ -82,6 +82,9 @@ app.get('/api/settings', async (_request, response) => response.json(await setti
 app.put('/api/settings', async (request, response) => response.json(await settings.save({ ...request.body, provider: 'azure' })));
 app.get('/api/server/stats', async (_request, response) => response.json({ ...(await getServerStats()), docker: await docker.getRuntimeInfo() }));
 app.get('/api/containers', async (_request, response) => response.json(await docker.listContainers()));
+app.get('/api/containers/:id/environment', async (request, response) => {
+  response.json({ variables: await docker.listEnvironment(request.params.id) });
+});
 app.get('/api/containers/:id/logs', async (request, response) => {
   response.json(await docker.getContainerLogs(request.params.id, Number(request.query.tail ?? 200)));
 });
@@ -100,7 +103,23 @@ app.post('/api/containers/:id/:action', async (request, response) => {
   response.json(await methods[action](id));
 });
 app.put('/api/containers/:id/environment/:key', async (request, response) => {
-  response.json(await docker.setEnvironmentVariable(request.params.id, request.params.key, z.string().parse(request.body?.value)));
+  response.json(await docker.saveEnvironmentVariable(request.params.id, {
+    variableId: request.params.key === 'new' ? undefined : request.params.key,
+    name: z.string().parse(request.body?.name),
+    value: z.string().parse(request.body?.value),
+    protectedFromAI: z.boolean().optional().parse(request.body?.protectedFromAI),
+  }));
+});
+app.delete('/api/containers/:id/environment/:variableId', async (request, response) => {
+  response.json(await docker.deleteEnvironmentVariable(request.params.id, request.params.variableId));
+});
+app.put('/api/containers/:id/environment-requests/:requestId', async (request, response) => {
+  response.json(await docker.completeEnvironmentRequest(
+    request.params.id,
+    request.params.requestId,
+    z.string().parse(request.body?.value),
+    z.boolean().optional().parse(request.body?.protectedFromAI) ?? true,
+  ));
 });
 app.get('/api/containers/:id/domains', async (request, response) => {
   response.json(await docker.listDomains(request.params.id));

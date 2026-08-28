@@ -75,7 +75,7 @@ For software that needs configuration, include what you know:
 Run myorg/example-api:1.4. It listens on port 3000 and needs NODE_ENV=production.
 ```
 
-Do not paste secrets into a request unless they are required as application environment variables. Chat content is sent to the configured AI provider.
+Do not paste secrets into chat. Chat content is sent to the configured AI provider. When an application needs a credential, HalfCloud presents a dedicated environment-variable form that submits the value directly to the server instead.
 
 ## Deploy a private dependency
 

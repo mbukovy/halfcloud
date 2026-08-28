@@ -440,16 +440,26 @@ export class DockerService {
     return { containerId: container.id, mountTarget, owner: inspection.Config.User, repaired: true, state: wasRunning ? 'running' : 'exited' };
   }
 
-  async setEnvironmentVariable(id: string, key: string, value: string) {
-    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) throw new Error(`Invalid environment variable name ${key}`);
+  async getContainerEnvironment(id: string) {
+    const container = await this.managedContainer(id);
+    const inspection = await container.inspect();
+    return {
+      containerId: container.id,
+      name: inspection.Config.Labels?.['halfcloud.name'] ?? inspection.Name.replace(/^\//, ''),
+      environment: Object.fromEntries((inspection.Config.Env ?? []).map((entry) => {
+        const separator = entry.indexOf('=');
+        return [entry.slice(0, separator), entry.slice(separator + 1)];
+      })),
+    };
+  }
+
+  async replaceContainerEnvironment(id: string, nextEnvironment: Record<string, string>) {
+    for (const key of Object.keys(nextEnvironment)) {
+      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) throw new Error(`Invalid environment variable name ${key}`);
+    }
     const container = await this.managedContainer(id);
     const inspection = await container.inspect();
     const name = inspection.Name.replace(/^\//, '');
-    const environment = new Map((inspection.Config.Env ?? []).map((entry) => {
-      const separator = entry.indexOf('=');
-      return [entry.slice(0, separator), entry.slice(separator + 1)];
-    }));
-    environment.set(key, value);
     await createOrReuseManagedNetwork(this.docker);
     const backupName = `${name}-halfcloud-backup-${Date.now()}`;
     const wasRunning = inspection.State.Running;
@@ -464,9 +474,10 @@ export class DockerService {
         Entrypoint: inspection.Config.Entrypoint,
         WorkingDir: inspection.Config.WorkingDir,
         User: inspection.Config.User,
-        Env: [...environment].map(([environmentKey, environmentValue]) => `${environmentKey}=${environmentValue}`),
+        Env: Object.entries(nextEnvironment).map(([key, value]) => `${key}=${value}`),
         Labels: inspection.Config.Labels,
         ExposedPorts: inspection.Config.ExposedPorts,
+        Healthcheck: inspection.Config.Healthcheck,
         HostConfig: {
           NetworkMode: managedNetworkName,
           PortBindings: inspection.HostConfig.PortBindings,
@@ -479,16 +490,33 @@ export class DockerService {
         },
       });
       if (wasRunning) await replacement.start();
-      await container.remove({ force: true, v: false });
       const appDir = path.join(this.appsDir, name);
-      await writeFile(path.join(appDir, '.env'), `${[...environment].map(([environmentKey, environmentValue]) => `${environmentKey}=${environmentValue.replace(/\n/g, '\\n')}`).join('\n')}\n`, { mode: 0o600 });
-      return { containerId: replacement.id, name, key, state: wasRunning ? 'running' : 'exited' };
+      await writeFile(path.join(appDir, '.env'), `${Object.entries(nextEnvironment).map(([key, value]) => `${key}=${value.replace(/\n/g, '\\n')}`).join('\n')}${Object.keys(nextEnvironment).length ? '\n' : ''}`, { mode: 0o600 });
+      await container.remove({ force: true, v: false });
+      return { containerId: replacement.id, name, state: wasRunning ? 'running' : 'exited' };
     } catch (error) {
       if (replacement) await replacement.remove({ force: true }).catch(() => undefined);
       await container.rename({ name });
       if (wasRunning) await container.start().catch(() => undefined);
       throw error;
     }
+  }
+
+  async inspectContainer(id: string) {
+    const container = await this.managedContainer(id);
+    const inspection = await container.inspect();
+    return {
+      id: inspection.Id,
+      name: inspection.Config.Labels?.['halfcloud.name'] ?? inspection.Name.replace(/^\//, ''),
+      image: inspection.Config.Image,
+      state: inspection.State.Status,
+      ports: Object.entries(inspection.NetworkSettings.Ports ?? {}).flatMap(([target, bindings]) =>
+        (bindings ?? []).map((binding) => ({ target, hostPort: binding.HostPort, hostIp: binding.HostIp }))),
+      mounts: inspection.Mounts.map((mount) => ({ type: mount.Type, target: mount.Destination, ...(mount.Name ? { name: mount.Name } : {}) })),
+      networks: Object.keys(inspection.NetworkSettings.Networks ?? {}),
+      restartPolicy: inspection.HostConfig.RestartPolicy?.Name ?? 'no',
+      health: inspection.State.Health?.Status ?? null,
+    };
   }
 
   async getContainerLogs(id: string, tail = 200) {

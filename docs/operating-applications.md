@@ -37,15 +37,19 @@ Deleting an application removes its container but deliberately leaves its image 
 
 ## Environment variables
 
-Ask HalfCloud to set variables during deployment or afterward:
+Use the **Environment** action on an application to add, edit, or delete variables. New variables are protected from AI by default. The value remains visible to the administrator in this interface because this version stores environment values in plaintext.
+
+For non-sensitive configuration, you can also ask HalfCloud to set a variable:
 
 ```text
 Set LOG_LEVEL=debug on example-api and restart it.
 ```
 
-Changing a variable recreates the container while preserving its managed storage, ports, image, labels, and restart policy. If the application was running, the replacement is started before the old container is removed. The values are also written to the application's `.env` file with mode `0600`.
+Changing a variable recreates the container while preserving its managed storage, ports, image, labels, health check, and restart policy. If the application was running, the replacement is started before the old container is removed. The values are also written to the application's `.env` file with mode `0600`.
 
-Environment variables are visible to processes in their container and to the HalfCloud control plane. Recent logs are scrubbed for exact environment values of at least four characters, but this is a best-effort safeguard, not a substitute for ensuring applications do not log secrets.
+**Protect from AI** is intended for passwords, API keys, tokens, credentials, and other sensitive configuration. The agent sees a protected variable's name and that it is configured, but HalfCloud omits its value from structured agent tools and container inspection. When the agent needs a credential, it requests a dedicated form whose value goes directly to the environment API rather than through chat.
+
+Protection from AI is not encryption at rest. Environment variables remain visible to processes in their container and to the HalfCloud control plane. Recent logs are scrubbed for exact environment values of at least four characters, but applications can log transformed or otherwise unrecognized values. The guarantee is that HalfCloud does not intentionally expose protected values through agent APIs and structured service data, not that a value can never appear in application output.
 
 ## Lifecycle actions
 

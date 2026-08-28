@@ -51,6 +51,8 @@ HalfCloud verifies at startup that the Docker daemon reports rootless mode. It a
 
 The model never receives a general shell tool. Docker operations are implemented in application code and reject requests outside the supported policy.
 
+Environment management has separate administrator and agent representations. The authenticated Environment API can return raw values to the dashboard. Agent tools use an explicit serializer that entirely omits `value` for protected variables, and the controlled container-inspection tool never forwards raw Docker `Config.Env`. A credential requested in chat is submitted from its dedicated widget directly to the Environment API.
+
 ## Application creation
 
 For a typical public application, HalfCloud:
@@ -83,7 +85,7 @@ Caddy obtains and renews public certificates. Each public application can have m
 | `/home/halfcloudrunner/.halfcloud/config/service.env` | Runtime configuration and session secret |
 | `/home/halfcloudrunner/.halfcloud/secrets/access-code` | Sign-in access code |
 | `/home/halfcloudrunner/.halfcloud/data/settings.json` | Azure endpoint, deployment, and API key |
-| `/home/halfcloudrunner/.halfcloud/apps/<name>` | Per-application environment file and managed bind data |
+| `/home/halfcloudrunner/.halfcloud/apps/<name>` | Per-application environment values, AI-protection metadata, requests, and managed bind data |
 | `/home/halfcloudrunner/.local/share/docker` | Rootless Docker images, containers, named volumes, and metadata |
 | `/etc/systemd/system/halfcloud.service` | Host systemd service definition |
 | `/etc/caddy/Caddyfile` | Initial Caddy configuration; runtime configuration is loaded through the local admin API |

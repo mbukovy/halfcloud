@@ -63,6 +63,8 @@ The installer generates a random access code and a separate random session-signi
 
 Azure credentials are stored on the VPS in a mode-`0600` file and are not returned through the settings API. Error handling and container-log display attempt to redact API keys and environment values.
 
+Application environment variables can be marked **Protect from AI**, which is enabled by default in the dashboard and credential-request widget. Agent-facing environment data is explicitly serialized: protected entries contain their name and configuration status but no `value` property. Docker still receives the real value, and administrators can view it in the authenticated Environment interface. This is an AI-disclosure boundary, not encryption at rest or a secrets vault.
+
 Important limitations:
 
 - HalfCloud currently has one shared administrator access code, not named users, roles, MFA, or revocable sessions.
@@ -70,6 +72,7 @@ Important limitations:
 - A session cookie remains valid for up to 30 days unless it expires or the signing secret changes.
 - Root or the `halfcloudrunner` account can read stored credentials and application data.
 - Log redaction is best effort and cannot recognize every secret or transformed value.
+- If a user puts a credential in normal chat or an application writes it into logs, the AI may receive it. Use the dedicated protected environment input instead of chat for credentials.
 
 Protect the access code as an administrator credential. Restrict network access further with a firewall, VPN, or trusted reverse proxy when appropriate.
 
