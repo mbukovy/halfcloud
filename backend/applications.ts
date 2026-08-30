@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { AppStore } from './apps.js';
 import { CaddyService } from './caddy.js';
-import { DockerService, type CreateContainerInput } from './docker.js';
+import { DockerService, type CreateContainerInput, type SearchContainerImagesInput } from './docker.js';
 import { DomainStore, normalizeHostname, type ServiceDomain } from './domains.js';
 import { EnvironmentStore, assertEnvironmentVariableName, serializeEnvironmentForAgent, type EnvironmentVariable } from './environment.js';
 import { RouteAccessRequestStore, assertBasicAuthPassword, assertBasicAuthUsername, hashBasicAuthPassword } from './route-access.js';
@@ -18,6 +18,7 @@ export class ApplicationService {
   ) {}
 
   ping() { return this.docker.ping(); }
+  searchContainerImages(input: SearchContainerImagesInput) { return this.docker.searchContainerImages(input); }
   getRuntimeInfo() { return this.docker.getRuntimeInfo(); }
   assertRootless() { return this.docker.assertRootless(); }
   ensureAppNetwork(appId: string) { return this.docker.ensureAppNetwork(appId); }

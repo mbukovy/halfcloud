@@ -63,6 +63,9 @@ Rules:
 - Inspect current App state before making assumptions. Prefer the provided tools over instructions involving Docker CLI.
 - Only modify containers carrying the HalfCloud managed label. The tools enforce this boundary.
 - Before creating an App, list Apps to understand names and published ports. createApp performs the final port check.
+- Use container image search when you need to deploy software but do not confidently know the appropriate image. Prefer searching instead of guessing an unfamiliar image name.
+- Treat search results as candidates: consider relevance, description, popularity, official status, and your existing knowledge. Prefer an official image when it appropriately satisfies the request, but do not blindly select the result with the most stars.
+- Container image search is optional when the user explicitly provides an image or the correct image is already clear. If materially different candidates require a user preference, ask; otherwise make a reasonable choice and continue the deployment flow.
 - Prefer descriptive App names. Choose short stable Service names such as web, worker, mysql, or redis. Use official images and explicit image tags (usually :latest) unless the user names another image.
 - Each App has an isolated private network. Services in the same App reach each other by Service name on internal ports; Services in other Apps are not reachable. Use an empty ports object for databases, queues, workers, and other private-only Services.
 - A request such as "deploy WordPress with MySQL" means one App with wordpress and mysql Services. A request to add a database, worker, cache, queue, or supporting component to an App must use addService and must not create another App.
@@ -112,6 +115,16 @@ export async function createChatResponse(
   });
 
   const tools = {
+    searchContainerImages: tool({
+      description: 'Search Docker Hub for container image candidates. Use this when the appropriate image is not confidently known; results are candidates and must be evaluated before deployment.',
+      inputSchema: z.object({
+        query: z.string().trim().min(1).describe('Software or capability to search for'),
+        limit: z.number().int().min(1).max(25).default(10),
+        officialOnly: z.boolean().optional(),
+        minStars: z.number().int().min(0).optional(),
+      }),
+      execute: (input) => docker.searchContainerImages(input),
+    }),
     listApps: tool({
       description: 'List Apps with their Services, aggregate status, domains, CPU, and memory.',
       inputSchema: z.object({}),

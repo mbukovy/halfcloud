@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { appNetworkName, assertManagedVolumeLabels, createOrReuseAppNetwork, createOrReuseManagedVolume, managedBindPath, rootlessSocketPath, validateHostPort } from '../dist/backend/docker.js';
+import { appNetworkName, assertManagedVolumeLabels, createOrReuseAppNetwork, createOrReuseManagedVolume, managedBindPath, rootlessSocketPath, searchContainerImages, validateHostPort } from '../dist/backend/docker.js';
 
 test('requires an explicit rootless user Docker socket', () => {
   assert.equal(rootlessSocketPath('unix:///run/user/1001/docker.sock'), '/run/user/1001/docker.sock');
@@ -13,6 +13,68 @@ test('limits application publications to the managed port range', () => {
   validateHostPort(10000);
   validateHostPort(19999);
   for (const port of [80, 9999, 20000, 65535, 10000.5]) assert.throws(() => validateHostPort(port), /10000-19999/);
+});
+
+test('searches Docker Hub with supported filters and normalizes results', async () => {
+  let searchOptions;
+  const client = {
+    async searchImages(options) {
+      searchOptions = options;
+      return [
+        { name: 'filebrowser/filebrowser', description: 'Web file browser', star_count: 4100, is_official: false, is_automated: false },
+        { name: 'library/low-stars', description: 'Not popular enough', star_count: 10, is_official: true },
+        { name: 'library/unknown-stars', description: 'Popularity unavailable', is_official: true },
+        { name: 'library/httpd', description: 'Apache HTTP Server', star_count: 5000, is_official: true, extra: 'ignored' },
+      ];
+    },
+  };
+
+  const results = await searchContainerImages(client, { query: '  file browser  ', limit: 5, minStars: 100, officialOnly: true });
+  assert.deepEqual(searchOptions, {
+    term: 'file browser',
+    limit: 5,
+    filters: { 'is-official': ['true'], stars: ['100'] },
+  });
+  assert.deepEqual(results, [{
+    name: 'library/httpd',
+    description: 'Apache HTTP Server',
+    starCount: 5000,
+    official: true,
+    source: 'Docker Hub',
+  }]);
+});
+
+test('defaults image search to ten results and handles empty results', async () => {
+  let searchOptions;
+  const results = await searchContainerImages({
+    async searchImages(options) {
+      searchOptions = options;
+      return [];
+    },
+  }, { query: 'pastebin' });
+  assert.deepEqual(searchOptions, { term: 'pastebin', limit: 10 });
+  assert.deepEqual(results, []);
+});
+
+test('limits normalized image search results', async () => {
+  const results = await searchContainerImages({
+    async searchImages() {
+      return Array.from({ length: 5 }, (_, index) => ({ name: `example/image-${index}`, is_official: false }));
+    },
+  }, { query: 'example', limit: 2 });
+  assert.deepEqual(results.map((result) => result.name), ['example/image-0', 'example/image-1']);
+});
+
+test('validates image search inputs before calling Docker', async () => {
+  const client = { async searchImages() { throw new Error('must not be called'); } };
+  await assert.rejects(searchContainerImages(client, { query: '   ' }), /cannot be empty/);
+  for (const limit of [0, 26, 1.5]) await assert.rejects(searchContainerImages(client, { query: 'postgres', limit }), /between 1 and 25/);
+  for (const minStars of [-1, 1.5]) await assert.rejects(searchContainerImages(client, { query: 'postgres', minStars }), /non-negative integer/);
+});
+
+test('returns Docker image search failures as errors', async () => {
+  const failure = new Error('registry unavailable');
+  await assert.rejects(searchContainerImages({ async searchImages() { throw failure; } }, { query: 'uptime monitor' }), failure);
 });
 
 test('limits bind mounts to application-relative paths', () => {

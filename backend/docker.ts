@@ -19,6 +19,61 @@ export interface CreateContainerInput {
   hostname?: string;
 }
 
+export interface SearchContainerImagesInput {
+  query: string;
+  limit?: number;
+  officialOnly?: boolean;
+  minStars?: number;
+}
+
+export interface ContainerImageSearchResult {
+  name: string;
+  description: string;
+  starCount?: number;
+  official: boolean;
+  source: 'Docker Hub';
+}
+
+interface ImageSearchClient {
+  searchImages(options: { term: string; limit: number; filters?: Record<string, string[]> }): Promise<unknown>;
+}
+
+export async function searchContainerImages(client: ImageSearchClient, input: SearchContainerImagesInput): Promise<ContainerImageSearchResult[]> {
+  const query = input.query.trim();
+  const limit = input.limit ?? 10;
+  const minStars = input.minStars ?? 0;
+  if (!query) throw new Error('Container image search query cannot be empty');
+  if (!Number.isInteger(limit) || limit < 1 || limit > 25) throw new Error('Container image search limit must be between 1 and 25');
+  if (!Number.isInteger(minStars) || minStars < 0) throw new Error('Minimum star count must be a non-negative integer');
+
+  const filters: Record<string, string[]> = {};
+  if (input.officialOnly) filters['is-official'] = ['true'];
+  if (minStars > 0) filters.stars = [String(minStars)];
+  const response = await client.searchImages({
+    term: query,
+    limit,
+    ...(Object.keys(filters).length ? { filters } : {}),
+  });
+  if (!Array.isArray(response)) throw new Error('Docker returned an invalid container image search response');
+
+  return response.flatMap((value): ContainerImageSearchResult[] => {
+    if (typeof value !== 'object' || value === null) return [];
+    const result = value as Record<string, unknown>;
+    if (typeof result.name !== 'string' || !result.name) return [];
+    const stars = typeof result.star_count === 'number' && Number.isFinite(result.star_count) ? result.star_count : undefined;
+    const official = result.is_official === true;
+    if (input.officialOnly && !official) return [];
+    if (minStars > 0 && (stars === undefined || stars < minStars)) return [];
+    return [{
+      name: result.name,
+      description: typeof result.description === 'string' ? result.description : '',
+      ...(stars !== undefined ? { starCount: stars } : {}),
+      official,
+      source: 'Docker Hub',
+    }];
+  }).slice(0, limit);
+}
+
 interface ManagedVolumeClient {
   createVolume(options: Docker.VolumeCreateOptions): Promise<unknown>;
   getVolume(name: string): { inspect(): Promise<Docker.VolumeInspectInfo> };
@@ -127,6 +182,10 @@ export class DockerService {
 
   async ping() {
     await this.docker.ping();
+  }
+
+  searchContainerImages(input: SearchContainerImagesInput) {
+    return searchContainerImages(this.docker, input);
   }
 
   async getRuntimeInfo() {
