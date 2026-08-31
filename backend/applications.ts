@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { AppStore } from './apps.js';
 import { CaddyService } from './caddy.js';
-import { DockerService, type CreateContainerInput, type DeploymentProgress, type SearchContainerImagesInput } from './docker.js';
+import { DockerService, type CreateContainerInput, type DeploymentProgress, type ManagedVolumeFilter, type SearchContainerImagesInput } from './docker.js';
 import { DomainStore, normalizeHostname, type ServiceDomain } from './domains.js';
 import { EnvironmentStore, assertEnvironmentVariableName, environmentRequestTargets, serializeEnvironmentForAgent, type EnvironmentTarget, type EnvironmentVariable } from './environment.js';
 import { RouteAccessRequestStore, assertBasicAuthPassword, assertBasicAuthUsername, hashBasicAuthPassword } from './route-access.js';
@@ -150,7 +150,7 @@ export class ApplicationService {
   }
   getContainerLogs(id: string, tail?: number) { return this.docker.getContainerLogs(id, tail); }
   getContainerStats(id: string) { return this.docker.getContainerStats(id); }
-  listManagedVolumes(application?: string) { return this.docker.listManagedVolumes(application); }
+  listManagedVolumes(filter?: ManagedVolumeFilter) { return this.docker.listManagedVolumes(filter); }
   inspectManagedVolume(volumeName: string) { return this.docker.inspectManagedVolume(volumeName); }
   deleteManagedVolume(volumeName: string) { return this.docker.deleteManagedVolume(volumeName); }
   reconcileManagedVolume(application: string, localName: string) { return this.docker.reconcileManagedVolume(application, localName); }

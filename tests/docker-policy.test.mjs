@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { appNetworkName, assertManagedVolumeLabels, createOrReuseAppNetwork, createOrReuseManagedVolume, managedBindPath, rootlessSocketPath, searchContainerImages, validateHostPort } from '../dist/backend/docker.js';
+import { appNetworkName, assertManagedVolumeLabels, createOrReuseAppNetwork, createOrReuseManagedVolume, DockerService, managedBindPath, rootlessSocketPath, searchContainerImages, validateHostPort } from '../dist/backend/docker.js';
 
 test('requires an explicit rootless user Docker socket', () => {
   assert.equal(rootlessSocketPath('unix:///run/user/1001/docker.sock'), '/run/user/1001/docker.sock');
@@ -121,6 +121,31 @@ test('inspects the dockerode volume handle before validating labels', async () =
     'halfcloud.application': 'n8n',
     'halfcloud.volume': 'data',
   });
+});
+
+test('finds orphaned managed volumes by their retained App ID', async () => {
+  let listOptions;
+  const service = Object.create(DockerService.prototype);
+  service.docker = {
+    async listVolumes(options) {
+      listOptions = options;
+      return { Volumes: [
+        { Name: 'halfcloud-service_web-data', Labels: { 'halfcloud.managed': 'true', 'halfcloud.app.id': 'app_nextcloud', 'halfcloud.service.id': 'service_web', 'halfcloud.application': 'service_web', 'halfcloud.volume': 'data' }, Driver: 'local' },
+        { Name: 'halfcloud-service_db-data', Labels: { 'halfcloud.managed': 'true', 'halfcloud.app.id': 'app_nextcloud', 'halfcloud.service.id': 'service_db', 'halfcloud.application': 'service_db', 'halfcloud.volume': 'data' }, Driver: 'local' },
+      ] };
+    },
+    async listContainers() {
+      return [{ Id: 'container-db', Names: ['/nextcloud-db'], Mounts: [{ Type: 'volume', Name: 'halfcloud-service_db-data' }] }];
+    },
+  };
+
+  const volumes = await service.listManagedVolumes({ appId: 'app_nextcloud', orphaned: true });
+
+  assert.deepEqual(listOptions, { filters: { label: ['halfcloud.managed=true', 'halfcloud.app.id=app_nextcloud'] } });
+  assert.deepEqual(volumes.map((volume) => volume.name), ['halfcloud-service_web-data']);
+  assert.equal(volumes[0].appId, 'app_nextcloud');
+  assert.equal(volumes[0].serviceId, 'service_web');
+  assert.equal(volumes[0].orphaned, true);
 });
 
 test('creates an isolated managed bridge network for an App', async () => {

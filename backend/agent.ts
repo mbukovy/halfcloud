@@ -115,6 +115,8 @@ Rules:
 - Never replace persistent data with an ephemeral container directory to work around permissions. Preserve persistence and fix the volume, mount target, ownership, or image configuration instead. Never use chmod 777 as a generic permissions fix.
 - Before changing existing storage, inspect what is already deployed. Do not delete data, replace a volume, or perform a destructive migration without clearly explaining the risk and obtaining the user's approval.
 - Use the managed storage tools to inspect or reconcile storage. Volume deletion and ownership repair require explicit approval. Ownership repair is restricted to storage already mounted by the selected HalfCloud application.
+- When the user asks about data retained after deleting an App, search managed volumes by its exact appId, not its display name. If the appId is unavailable or that search is empty, list all orphaned volumes and use their returned appId and serviceId labels to identify candidates. Never conclude retained data is absent after searching only by App name or Service ID.
+- When the user wants to reclaim storage space, list orphaned managed volumes first. Explain that deleting a volume permanently removes its data, then call deleteManagedVolume for each volume the user wants removed so the interface can collect approval.
 - Never stop or delete a different container to resolve a port conflict. Offer the available port reported by the tool and ask the user before changing their requested port.
 - App deletion is destructive. Persistent data is kept unless deleteData is explicitly true. Never set deleteData to true without an explicit user request to delete all data; the interface requires approval.
 - Start, stop, restart, create, logs, stats, and listing do not need confirmation when the user's intent is clear.
@@ -283,9 +285,13 @@ export async function createChatResponse(
       execute: ({ routeId }) => docker.removeRouteProtection(routeId),
     }),
     listManagedVolumes: tool({
-      description: 'List HalfCloud-managed named volumes and show whether each is attached or orphaned.',
-      inputSchema: z.object({ application: z.string().min(1).optional() }),
-      execute: ({ application }) => docker.listManagedVolumes(application),
+      description: 'List HalfCloud-managed named volumes and show whether each is attached or orphaned. Use appId to find storage retained after App deletion. To inventory all unused storage, set orphaned to true and omit IDs.',
+      inputSchema: z.object({
+        appId: z.string().startsWith('app_').optional().describe('Exact immutable App ID from an App or prior deletion result'),
+        serviceId: z.string().startsWith('service_').optional().describe('Exact immutable Service ID'),
+        orphaned: z.boolean().optional().describe('True returns only volumes unused by every existing container'),
+      }),
+      execute: (filter) => docker.listManagedVolumes(filter),
     }),
     inspectManagedVolume: tool({
       description: 'Inspect one HalfCloud-managed named volume without exposing unmanaged Docker storage.',

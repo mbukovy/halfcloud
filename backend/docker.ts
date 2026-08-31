@@ -173,6 +173,12 @@ interface DockerStats {
   memory_stats?: { usage?: number; limit?: number; stats?: { cache?: number; inactive_file?: number } };
 }
 
+export interface ManagedVolumeFilter {
+  appId?: string;
+  serviceId?: string;
+  orphaned?: boolean;
+}
+
 export class DockerService {
   private readonly docker: Docker;
   private readonly appsDir: string;
@@ -470,9 +476,12 @@ export class DockerService {
     return { name, deleted: true };
   }
 
-  async listManagedVolumes(application?: string) {
-    if (application && !/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$/.test(application)) throw new Error('Invalid application name');
-    const filters = ['halfcloud.managed=true', ...(application ? [`halfcloud.application=${application}`] : [])];
+  async listManagedVolumes(filter: ManagedVolumeFilter = {}) {
+    const filters = [
+      'halfcloud.managed=true',
+      ...(filter.appId ? [`halfcloud.app.id=${filter.appId}`] : []),
+      ...(filter.serviceId ? [`halfcloud.service.id=${filter.serviceId}`] : []),
+    ];
     const { Volumes: volumes = [] } = await this.docker.listVolumes({ filters: { label: filters } });
     const containers = await this.docker.listContainers({ all: true });
     const attached = new Map<string, string[]>();
@@ -484,7 +493,7 @@ export class DockerService {
         attached.set(mount.Name, names);
       }
     }
-    return volumes.map((volume) => ({
+    const results = volumes.map((volume) => ({
       name: volume.Name,
       application: volume.Labels?.['halfcloud.application'],
       appId: volume.Labels?.['halfcloud.app.id'],
@@ -494,6 +503,7 @@ export class DockerService {
       attachedTo: attached.get(volume.Name) ?? [],
       orphaned: !(attached.get(volume.Name)?.length),
     }));
+    return filter.orphaned === undefined ? results : results.filter((volume) => volume.orphaned === filter.orphaned);
   }
 
   async inspectManagedVolume(volumeName: string) {
