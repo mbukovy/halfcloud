@@ -321,6 +321,10 @@ function toolDetails(part: Record<string, unknown>) {
   if (typeof input?.volumeName === 'string') details.push({ text: `Volume: ${input.volumeName}` });
   if (typeof input?.mountTarget === 'string') details.push({ text: `Mount: ${input.mountTarget}` });
   if (typeof input?.hostname === 'string' && name.includes('ServiceDomain')) details.push({ text: `Domain: ${input.hostname}` });
+  if (typeof input?.routeId === 'string') {
+    const match = apps.value.flatMap((app) => app.services.flatMap((service) => service.domains)).find((domain) => domain.id === input.routeId);
+    details.push({ text: `Route: ${match?.hostname ?? input.routeId}` });
+  }
   if (name === 'listApps' && Array.isArray(part.output)) details.push({ text: `Found ${part.output.length} App${part.output.length === 1 ? '' : 's'}` });
   if (typeof part.errorText === 'string') details.push({ text: part.errorText });
   return details;
@@ -401,12 +405,21 @@ function approvalRequest(part: Record<string, unknown>) {
 
 function approvalCopy(part: Record<string, unknown>) {
   const name = toolName(part);
-  if (name === 'deleteManagedVolume') return { title: 'Delete this volume permanently?', detail: 'All data in this managed volume will be permanently removed.' };
-  if (name === 'deleteUnusedVolume') return { title: 'Delete this unused volume permanently?', detail: 'All data in this volume will be permanently removed. Unlabeled volumes may not have been created by HalfCloud.' };
-  if (name === 'removeService') return { title: 'Remove this Service?', detail: 'The Service will be removed from its App. Managed persistent data will remain.' };
-  if (name === 'repairStorageOwnership') return { title: 'Repair this storage ownership?', detail: 'The application may be briefly stopped while ownership is changed recursively.' };
-  if (name === 'removeRouteProtection') return { title: 'Make this route public?', detail: 'Anyone who knows the URL will be able to access it without a password.' };
-  return { title: 'Delete this application permanently?', detail: 'The container will be removed. Its image and managed data will remain.' };
+  const targets = toolDetails(part).map((detail) => detail.text);
+  if (name === 'deleteManagedVolume') return { title: 'Delete this volume permanently?', detail: 'All data in this managed volume will be permanently removed.', targets };
+  if (name === 'deleteUnusedVolume') return { title: 'Delete this unused volume permanently?', detail: 'All data in this volume will be permanently removed. Unlabeled volumes may not have been created by HalfCloud.', targets };
+  if (name === 'removeService') return { title: 'Remove this Service?', detail: 'The Service will be removed from its App. Managed persistent data will remain.', targets };
+  if (name === 'repairStorageOwnership') return { title: 'Repair this storage ownership?', detail: 'The application may be briefly stopped while ownership is changed recursively.', targets };
+  if (name === 'removeRouteProtection') return { title: 'Make this route public?', detail: 'Anyone who knows the URL will be able to access it without a password.', targets };
+  if (name === 'deleteApp') {
+    const deletesData = recordValue(part.input)?.deleteData === true;
+    return {
+      title: 'Delete this App permanently?',
+      detail: deletesData ? 'The App and all its managed persistent data will be permanently removed.' : 'The App will be removed. Its image and managed persistent data will remain.',
+      targets,
+    };
+  }
+  return { title: 'Confirm this operation?', detail: 'Review the target before continuing.', targets };
 }
 
 async function respondToApproval(part: Record<string, unknown>, approved: boolean) {
@@ -970,6 +983,7 @@ onBeforeUnmount(() => {
                   </div>
                   <div v-if="approvalRequest(part)" class="approval-widget">
                     <strong>{{ approvalCopy(part).title }}</strong>
+                    <span v-for="target in approvalCopy(part).targets" :key="target" class="approval-target">{{ target }}</span>
                     <p>{{ approvalCopy(part).detail }}</p>
                     <div>
                       <button class="confirm" type="button" :disabled="Boolean(respondingApprovalId)" @click="respondToApproval(part, true)">Continue</button>

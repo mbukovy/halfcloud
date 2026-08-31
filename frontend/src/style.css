@@ -132,6 +132,7 @@ input:focus, textarea:focus { border-color: var(--ink); box-shadow: 0 0 0 3px #1
 .tool-content a { color: #b74321; text-underline-offset: 2px; }
 .approval-widget { margin-top: 10px; padding-top: 10px; border-top: 1px solid #ead5cc; color: var(--ink); }
 .approval-widget strong { display: block; font-size: 12px; }
+.approval-widget .approval-target { display: block; margin-top: 5px; overflow-wrap: anywhere; color: var(--ink); font: 500 10px 'DM Mono', monospace; }
 .approval-widget p { margin: 5px 0 11px; color: var(--muted); font-size: 10px; line-height: 1.5; }
 .approval-widget > div { display: flex; gap: 7px; }
 .approval-widget button { border: 1px solid var(--line); background: var(--panel); border-radius: 3px; padding: 7px 12px; font: 500 9px 'DM Mono', monospace; cursor: pointer; }
@@ -385,9 +386,9 @@ input:focus, textarea:focus { border-color: var(--ink); box-shadow: 0 0 0 3px #1
   .mobile-tabs button[aria-selected='true'] { color: var(--ink); background: #fffefb; }
   .mobile-tabs button[aria-selected='true']::after { content: ''; position: absolute; right: 14px; bottom: -1px; left: 14px; height: 2px; background: var(--accent); }
   .mobile-tabs button:focus-visible { z-index: 1; outline: 2px solid var(--ink); outline-offset: -3px; }
-  .metrics-strip { padding: 0 16px; grid-template-columns: 1fr 1fr; }
-  .metrics-strip > div { padding: 12px 10px; border-bottom: 1px solid var(--line); }
-  .metrics-strip > div:nth-child(2) { border-right: 0; }
+  .metrics-strip { padding: 0 16px; grid-template-columns: 1fr; }
+  .metrics-strip > div { padding: 12px 10px; border-right: 0; border-bottom: 1px solid var(--line); }
+  .metrics-strip > div:first-child { padding-left: 10px; }
   .workspace { display: block; }
   .metrics-strip, .chat-panel, .containers-panel { display: none; }
   .metrics-strip.mobile-panel-active { display: grid; }
