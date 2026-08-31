@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { AppStore } from './apps.js';
 import { CaddyService } from './caddy.js';
-import { DockerService, type CreateContainerInput, type SearchContainerImagesInput } from './docker.js';
+import { DockerService, type CreateContainerInput, type DeploymentProgress, type SearchContainerImagesInput } from './docker.js';
 import { DomainStore, normalizeHostname, type ServiceDomain } from './domains.js';
 import { EnvironmentStore, assertEnvironmentVariableName, serializeEnvironmentForAgent, type EnvironmentVariable } from './environment.js';
 import { RouteAccessRequestStore, assertBasicAuthPassword, assertBasicAuthUsername, hashBasicAuthPassword } from './route-access.js';
@@ -55,7 +55,7 @@ export class ApplicationService {
     return (await this.listApps(includeStats)).find((candidate) => candidate.id === app.id)!;
   }
 
-  async createApp(input: { name: string; services: Array<Omit<CreateContainerInput, 'appId' | 'serviceId' | 'serviceName' | 'publicName' | 'name'> & { name: string }> }) {
+  async createApp(input: { name: string; services: Array<Omit<CreateContainerInput, 'appId' | 'serviceId' | 'serviceName' | 'publicName' | 'name'> & { name: string }> }, onProgress?: (progress: DeploymentProgress) => void) {
     if (!input.services.length) throw new Error('An App requires at least one Service');
     const names = input.services.map((service) => this.serviceName(service.name));
     if (new Set(names).size !== names.length) throw new Error('Service names must be unique within an App');
@@ -63,9 +63,10 @@ export class ApplicationService {
     const created: string[] = [];
     try {
       for (const [index, service] of input.services.entries()) {
-        const result = await this.createServiceRecord(app.id, { ...service, name: names[index]! });
+        const result = await this.createServiceRecord(app.id, { ...service, name: names[index]! }, onProgress);
         created.push(result.id);
       }
+      onProgress?.({ phase: 'activity', label: `Verifying ${app.name}` });
       return this.getApp(app.id);
     } catch (error) {
       for (const id of created.reverse()) await this.docker.deleteContainer(id).catch(() => undefined);
@@ -76,12 +77,13 @@ export class ApplicationService {
     }
   }
 
-  async addService(appIdOrName: string, input: Omit<CreateContainerInput, 'appId' | 'serviceId' | 'serviceName' | 'publicName' | 'name'> & { name: string }) {
+  async addService(appIdOrName: string, input: Omit<CreateContainerInput, 'appId' | 'serviceId' | 'serviceName' | 'publicName' | 'name'> & { name: string }, onProgress?: (progress: DeploymentProgress) => void) {
     const app = await this.apps.get(appIdOrName);
     const name = this.serviceName(input.name);
     const existing = (await this.getApp(app.id, false)).services;
     if (existing.some((service) => service.name === name)) throw new Error(`Service ${name} already exists in ${app.name}`);
-    await this.createServiceRecord(app.id, { ...input, name });
+    await this.createServiceRecord(app.id, { ...input, name }, onProgress);
+    onProgress?.({ phase: 'activity', label: `Verifying ${name}` });
     return this.getApp(app.id);
   }
 
@@ -248,14 +250,15 @@ export class ApplicationService {
     return { ...(await this.docker.inspectContainer(id)), environment: (await this.listEnvironmentForAgent(id)).variables };
   }
 
-  async createContainer(input: CreateContainerInput) {
+  async createContainer(input: CreateContainerInput, onProgress?: (progress: DeploymentProgress) => void) {
     const hasPublicTcpPort = Object.values(input.ports).some((target) => !target.includes('/') || target.endsWith('/tcp'));
     if (input.hostname && !hasPublicTcpPort) throw new Error('A hostname requires a published TCP port');
     const managedHostname = hasPublicTcpPort ? this.defaultHostname(input.publicName) : undefined;
     const customHostname = input.hostname ? normalizeHostname(input.hostname) : undefined;
     if (customHostname) await this.assertHostnameAvailable(customHostname);
-    const result = await this.docker.createContainer({ ...input, hostname: managedHostname });
+    const result = await this.docker.createContainer({ ...input, hostname: managedHostname }, onProgress);
     try {
+      onProgress?.({ phase: 'activity', label: 'Configuring application access' });
       await this.environment.initialize(input.serviceId, input.environment ?? {}, false);
       const serviceDomains = managedHostname ? await this.domains.initialize(input.serviceId, managedHostname, customHostname) : [];
       await this.syncRoutes();
@@ -458,14 +461,14 @@ export class ApplicationService {
     return `${name.toLowerCase()}.${domain}`;
   }
 
-  private async createServiceRecord(appId: string, input: Omit<CreateContainerInput, 'appId' | 'serviceId' | 'serviceName' | 'publicName' | 'name'> & { name: string }) {
+  private async createServiceRecord(appId: string, input: Omit<CreateContainerInput, 'appId' | 'serviceId' | 'serviceName' | 'publicName' | 'name'> & { name: string }, onProgress?: (progress: DeploymentProgress) => void) {
     const serviceId = `service_${randomUUID()}`;
     const runtimeName = `hc_${appId.slice(4, 12)}_${serviceId.slice(8, 16)}`;
     const app = await this.apps.get(appId);
     const existingServices = (await this.listContainers(false)).filter((service) => service.appId === appId);
     const appSlug = app.name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || app.id.slice(4, 12);
     const publicName = existingServices.length ? `${appSlug}-${input.name}`.slice(0, 63).replace(/-$/, '') : appSlug.slice(0, 63);
-    return this.createContainer({ ...input, appId, serviceId, serviceName: input.name, publicName, name: runtimeName });
+    return this.createContainer({ ...input, appId, serviceId, serviceName: input.name, publicName, name: runtimeName }, onProgress);
   }
 
   private serviceName(value: string) {

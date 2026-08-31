@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue';
 import { useChat } from '@ai-sdk/vue';
-import { DefaultChatTransport, lastAssistantMessageIsCompleteWithApprovalResponses } from 'ai';
+import { DefaultChatTransport, lastAssistantMessageIsCompleteWithApprovalResponses, type UIMessage } from 'ai';
 import MarkdownIt from 'markdown-it';
 import { api, type AppInfo, type ContainerInfo, type EnvironmentVariable, type LlmProvider, type LlmSettingsResponse, type ModelInfo, type ProviderMetadata, type PublicSettings, type ServerStats, type ServiceDomain } from './api';
 
@@ -51,8 +51,16 @@ const prompt = ref('');
 const transcript = ref<HTMLElement>();
 const composerInput = ref<HTMLTextAreaElement>();
 const respondingApprovalId = ref('');
+const continuedRequestIds = reactive(new Set<string>());
+type AgentStatus = { phase: 'pulling-image'; image: string } | { phase: 'activity'; label: string } | { phase: 'working' };
+type AgentErrorDetails = { requestId: string; provider: string; model: string; details: string };
+type HalfCloudMessage = UIMessage<unknown, { agentStatus: AgentStatus; agentError: AgentErrorDetails }>;
+const agentStatus = ref<AgentStatus | null>(null);
+const agentErrorDetails = ref<AgentErrorDetails | null>(null);
+const activityElapsedSeconds = ref(0);
 const mobileTab = ref<'operator' | 'apps' | 'server'>('operator');
 let refreshTimer: number | undefined;
+let activityTimer: number | undefined;
 
 const authenticatedFetch: typeof fetch = async (input, init) => {
   const response = await fetch(input, init);
@@ -60,12 +68,34 @@ const authenticatedFetch: typeof fetch = async (input, init) => {
   return response;
 };
 
-const { messages, sendMessage, status, error: chatError, stop, clearError, addToolApprovalResponse } = useChat({
+const { messages, sendMessage, status, error: chatError, stop, clearError, addToolApprovalResponse } = useChat<HalfCloudMessage>({
   transport: new DefaultChatTransport({ api: '/api/chat', fetch: authenticatedFetch }),
   sendAutomaticallyWhen: lastAssistantMessageIsCompleteWithApprovalResponses,
+  onData(part) {
+    if (part.type === 'data-agentStatus') agentStatus.value = part.data.phase === 'working' ? null : part.data;
+    if (part.type === 'data-agentError') agentErrorDetails.value = part.data;
+  },
 });
 
 const chatBusy = computed(() => status.value === 'submitted' || status.value === 'streaming');
+const agentActivityLabel = computed(() => {
+  if (!chatBusy.value) return '';
+  if (agentStatus.value?.phase === 'pulling-image') return `Pulling ${agentStatus.value.image}`;
+  if (agentStatus.value?.phase === 'activity') return agentStatus.value.label;
+  if (status.value === 'submitted') return 'Contacting AI provider';
+
+  const latestMessage = messages.value.at(-1);
+  if (latestMessage?.role === 'assistant') {
+    for (let index = latestMessage.parts.length - 1; index >= 0; index -= 1) {
+      const part = latestMessage.parts[index];
+      if (textPart(part) && part.text) return 'Writing response';
+      const currentTool = toolPart(part);
+      if (!currentTool) continue;
+      return toolState(currentTool) === 'working' ? toolLabel(currentTool) : 'Reviewing results';
+    }
+  }
+  return 'Planning next step';
+});
 const environmentChanges = computed(() => environmentSnapshot.value !== environmentSignature(environmentDialog.variables));
 const visibleLogs = computed(() => {
   if (!logs.value?.content) return 'No recent logs.';
@@ -126,7 +156,12 @@ function toolName(part: Record<string, unknown>) {
 
 function toolLabel(part: Record<string, unknown>) {
   const name = toolName(part);
+  if ((name === 'createApp' || name === 'addService') && toolState(part) === 'working') {
+    if (agentStatus.value?.phase === 'pulling-image') return `Pulling ${agentStatus.value.image}`;
+    if (agentStatus.value?.phase === 'activity') return agentStatus.value.label;
+  }
   const labels: Record<string, string> = {
+    searchContainerImages: 'Finding the right software',
     listApps: 'Inspecting Apps', createApp: 'Creating App', addService: 'Adding Service', renameApp: 'Renaming App',
     startApp: 'Starting App', stopApp: 'Stopping App', restartApp: 'Restarting App', recreateApp: 'Recreating App', startService: 'Starting Service', stopService: 'Stopping Service', restartService: 'Restarting Service', recreateService: 'Recreating Service', removeService: 'Removing Service', deleteApp: 'Deleting App',
     getAppLogs: 'Reading App logs', getServiceLogs: 'Reading Service logs', getApp: 'Inspecting App', getHostStatus: 'Inspecting host',
@@ -295,6 +330,16 @@ async function submitEnvironmentRequest(part: Record<string, unknown>) {
   }
 }
 
+async function continueAfterInput(requestId: string) {
+  if (chatBusy.value || continuedRequestIds.has(requestId)) return;
+  continuedRequestIds.add(requestId);
+  try {
+    await sendMessage({ text: 'Continue with the task now that I provided the requested information.' });
+  } catch {
+    continuedRequestIds.delete(requestId);
+  }
+}
+
 function approvalRequest(part: Record<string, unknown>) {
   if (part.state !== 'approval-requested') return undefined;
   const approval = recordValue(part.approval);
@@ -364,6 +409,8 @@ function clearSession() {
   closeEnvironmentDialog();
   prompt.value = '';
   messages.value = [];
+  continuedRequestIds.clear();
+  agentErrorDetails.value = null;
   if (refreshTimer) window.clearInterval(refreshTimer);
 }
 
@@ -542,6 +589,8 @@ async function saveSettings() {
 async function submitPrompt() {
   const text = prompt.value.trim();
   if (!text || chatBusy.value || !settings.value?.configured) return;
+  agentStatus.value = null;
+  agentErrorDetails.value = null;
   prompt.value = '';
   await sendMessage({ text });
 }
@@ -551,6 +600,9 @@ async function newConversation() {
   messages.value = [];
   prompt.value = '';
   clearError();
+  agentStatus.value = null;
+  agentErrorDetails.value = null;
+  continuedRequestIds.clear();
 }
 
 async function runAction(container: ContainerInfo, action: 'start' | 'stop' | 'restart' | 'delete') {
@@ -670,15 +722,26 @@ async function setPrimaryDomain(container: ContainerInfo, domain: ServiceDomain)
 
 watch(status, (current, previous) => {
   if (current === 'ready' && previous !== 'ready') {
+    agentStatus.value = null;
     void refreshDashboard();
     void nextTick(() => composerInput.value?.focus());
   }
 });
+watch(agentActivityLabel, (current, previous) => {
+  if (current !== previous) activityElapsedSeconds.value = 0;
+  if (current && !activityTimer) {
+    activityTimer = window.setInterval(() => { activityElapsedSeconds.value += 1; }, 1000);
+  } else if (!current && activityTimer) {
+    window.clearInterval(activityTimer);
+    activityTimer = undefined;
+  }
+}, { immediate: true });
 watch(messages, () => nextTick(() => transcript.value?.scrollTo({ top: transcript.value.scrollHeight, behavior: 'smooth' })), { deep: true });
 onMounted(bootstrap);
 onMounted(() => window.addEventListener('halfcloud:unauthorized', clearSession));
 onBeforeUnmount(() => {
   if (refreshTimer) window.clearInterval(refreshTimer);
+  if (activityTimer) window.clearInterval(activityTimer);
   window.removeEventListener('halfcloud:unauthorized', clearSession);
 });
 </script>
@@ -773,6 +836,13 @@ onBeforeUnmount(() => {
                     <template v-if="environmentRequest(toolPart(part)!)!.status === 'completed'">
                       <strong>{{ environmentRequest(toolPart(part)!)!.name }}</strong>
                       <p>Configured directly in HalfCloud. The value was not added to this conversation.</p>
+                      <button
+                        v-if="!continuedRequestIds.has(environmentRequest(toolPart(part)!)!.requestId)"
+                        class="button primary"
+                        type="button"
+                        :disabled="chatBusy"
+                        @click="continueAfterInput(environmentRequest(toolPart(part)!)!.requestId)"
+                      >Continue</button>
                     </template>
                     <form v-else @submit.prevent="submitEnvironmentRequest(toolPart(part)!)">
                       <strong>Environment variable required</strong>
@@ -805,6 +875,13 @@ onBeforeUnmount(() => {
                     <template v-if="basicAuthRequest(toolPart(part)!)!.status === 'completed'">
                       <strong>Password protection enabled</strong>
                       <p>Credentials were configured directly in HalfCloud and were not added to this conversation.</p>
+                      <button
+                        v-if="!continuedRequestIds.has(basicAuthRequest(toolPart(part)!)!.requestId)"
+                        class="button primary"
+                        type="button"
+                        :disabled="chatBusy"
+                        @click="continueAfterInput(basicAuthRequest(toolPart(part)!)!.requestId)"
+                      >Continue</button>
                     </template>
                     <form v-else @submit.prevent="submitBasicAuthRequest(toolPart(part)!)">
                       <strong>{{ basicAuthRequest(toolPart(part)!)!.changing ? 'Change route credentials' : 'Protect with password' }}</strong>
@@ -848,7 +925,13 @@ onBeforeUnmount(() => {
               </div>
             </template>
           </article>
-          <pre v-if="chatError" class="form-error chat-error">{{ chatError.message }}</pre>
+          <div v-if="chatError" class="form-error chat-error" role="alert">
+            <span>{{ chatError.message }}</span>
+            <button v-if="agentErrorDetails" class="error-info" type="button" aria-label="Provider error details">
+              i
+              <span class="error-tooltip" role="tooltip"><b>Provider</b> {{ agentErrorDetails.provider }}<br><b>Model</b> {{ agentErrorDetails.model }}<br><b>Request ID</b> {{ agentErrorDetails.requestId }}<br><b>Error</b> {{ agentErrorDetails.details }}</span>
+            </button>
+          </div>
         </div>
         <div class="conversation-footer">
           <form class="composer" @submit.prevent="submitPrompt">
@@ -857,7 +940,7 @@ onBeforeUnmount(() => {
             <button v-else class="send-button" type="submit" :disabled="!prompt.trim() || !settings?.llmReady" title="Send">↑</button>
           </form>
           <div class="conversation-loader" :class="{ active: chatBusy }" role="status" aria-live="polite">
-            <span>{{ chatBusy ? 'Working' : '' }}</span>
+            <span>{{ agentActivityLabel }}<template v-if="agentActivityLabel && activityElapsedSeconds"> · {{ activityElapsedSeconds }}s</template></span>
             <i aria-hidden="true"><b></b></i>
           </div>
         </div>

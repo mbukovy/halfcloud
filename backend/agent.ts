@@ -1,9 +1,10 @@
-import { ToolLoopAgent, createAgentUIStreamResponse, tool, type UIMessage } from 'ai';
+import { ToolLoopAgent, createAgentUIStream, createUIMessageStream, createUIMessageStreamResponse, tool, type UIMessage, type UIMessageStreamWriter } from 'ai';
 import { z } from 'zod';
 import type { AiSettings } from './config.js';
 import type { ApplicationService } from './applications.js';
 import { getServerStats } from './metrics.js';
 import { createLanguageModel, redactProviderError } from './llm/index.js';
+import type { DeploymentProgress } from './docker.js';
 export { legacyAzureProviderOptions as azureProviderOptions } from './llm/index.js';
 
 export function sanitizeAgentMessages(messages: UIMessage[]): UIMessage[] {
@@ -58,7 +59,11 @@ export function sanitizeAgentMessages(messages: UIMessage[]): UIMessage[] {
 const SYSTEM_PROMPT = `You are HalfCloud, the operator of a real VPS. Docker tool calls affect the real machine.
 
 Rules:
-- Assume the user may have little experience with Docker, VPS administration, application deployment, networking, or domains. Use plain language, explain important choices and failures without jargon, and do not assume they know which settings an application needs.
+- Always treat the user as a non-technical beginner unless they explicitly ask for technical detail. Use plain language and focus on outcomes, not Docker, package, module, process, protocol, or image internals.
+- Operate the App for the user. Diagnose logs, choose safe fixes, apply them, and retry without asking the user to interpret errors or propose technical solutions.
+- Do not report transient technical failures that you can resolve yourself. If you cannot proceed, explain only what the user needs to know, what you already tried, and the exact action or decision you need from them. Include raw errors or implementation details only when the user explicitly asks.
+- Keep the user informed before each meaningful or potentially slow operation with one short, plain-language sentence. Do not narrate routine internal reasoning, but never leave a long-running task without saying what outcome you are working toward.
+- Ask the user only for information that cannot be discovered, safely inferred, or fixed with the available tools, such as a secret value, an external account choice, or approval for a destructive action.
 - Treat Apps as the primary organizational and operational unit. Every Service belongs to one App; containers are an internal runtime detail.
 - Inspect current App state before making assumptions. Prefer the provided tools over instructions involving Docker CLI.
 - Only modify containers carrying the HalfCloud managed label. The tools enforce this boundary.
@@ -92,7 +97,7 @@ Rules:
 - Use setEnvironmentVariable only for non-sensitive configuration that may remain visible to AI, such as NODE_ENV, LOG_LEVEL, PORT, or a public APP_URL. Never use it for credentials.
 - After every App creation or Service addition, inspect relevant logs and list Apps again to verify that every Service remains running. If Docker reports health for an image, verify that status too. A successful start alone is not success.
 - If post-creation checks reveal a problem, diagnose and fix it when the correction is safe and consistent with the requested deployment. Prefer fixes that preserve the intended architecture, persistence, security, and private service exposure; do not call a deployment successful if the fix risks data loss after recreation or unnecessarily exposes a service.
-- Explain important failures plainly. Never expose API keys or claim success unless the tool result confirms it.
+- Explain unresolved failures plainly in terms of their user-visible effect and next action. Never expose API keys or claim success unless the tool result confirms it.
 - Keep responses concise and operational. After creating a public App, state its name and public HTTPS URL. For a private Service, state its Service name and internal port instead.`;
 
 export async function createChatResponse(
@@ -102,6 +107,21 @@ export async function createChatResponse(
   abortSignal?: AbortSignal,
   requestId = 'unknown',
 ) {
+  type AgentMessage = UIMessage<unknown, {
+    agentStatus: DeploymentProgress;
+    agentError: { requestId: string; provider: string; model: string; details: string };
+  }>;
+  let progressWriter: UIMessageStreamWriter<AgentMessage> | undefined;
+  const reportProgress = (progress: DeploymentProgress) => {
+    progressWriter?.write({ type: 'data-agentStatus', data: progress, transient: true });
+  };
+  const withProgress = async <T>(operation: () => Promise<T>) => {
+    try {
+      return await operation();
+    } finally {
+      reportProgress({ phase: 'working' });
+    }
+  };
   const serviceId = z.string().min(1).describe('Service ID');
   const appId = z.string().min(1).describe('App ID or exact App display name');
   const serviceSchema = z.object({
@@ -133,12 +153,12 @@ export async function createChatResponse(
     createApp: tool({
       description: 'Create one App containing one or more Services on its own isolated private network. Use one call for systems such as WordPress plus MySQL.',
       inputSchema: z.object({ name: z.string().min(1), services: z.array(serviceSchema).min(1) }),
-      execute: (input) => docker.createApp(input),
+      execute: (input) => withProgress(() => docker.createApp(input, reportProgress)),
     }),
     addService: tool({
       description: 'Add a supporting Service to an existing App and its isolated network.',
       inputSchema: z.object({ appId, service: serviceSchema }),
-      execute: ({ appId, service }) => docker.addService(appId, service),
+      execute: ({ appId, service }) => withProgress(() => docker.addService(appId, service, reportProgress)),
     }),
     renameApp: tool({
       description: 'Change only an App display name without recreating or renaming runtime resources.',
@@ -265,14 +285,29 @@ export async function createChatResponse(
     tools,
     toolApproval: { deleteApp: 'user-approval', removeService: 'user-approval', deleteManagedVolume: 'user-approval', repairStorageOwnership: 'user-approval', removeRouteProtection: 'user-approval' },
   });
-  return createAgentUIStreamResponse({
-    agent,
-    uiMessages: sanitizeAgentMessages(messages),
-    abortSignal,
-    onError: (error) => {
-      const details = redactProviderError(error, settings.apiKey);
-      console.error(`[chat:${requestId}] LLM stream failed (${settings.provider}/${settings.model})\n${details}`);
-      return `AI provider request failed (request ID: ${requestId}). Please check the AI Provider settings and try again.`;
+  const onError = (error: unknown) => {
+    const details = redactProviderError(error, settings.apiKey);
+    console.error(`[chat:${requestId}] LLM stream failed (${settings.provider}/${settings.model})\n${details}`);
+    progressWriter?.write({
+      type: 'data-agentError',
+      data: { requestId, provider: settings.provider, model: settings.model, details },
+      transient: true,
+    });
+    return `AI provider request failed (request ID: ${requestId}). Please check the AI Provider settings and try again.`;
+  };
+  const stream = createUIMessageStream<AgentMessage>({
+    onError,
+    execute: async ({ writer }) => {
+      progressWriter = writer;
+      const agentStream = await createAgentUIStream({
+        agent,
+        uiMessages: sanitizeAgentMessages(messages),
+        abortSignal,
+        onError,
+      });
+      // The agent stream has no custom data parts, so it is safe to merge into our richer message stream.
+      writer.merge(agentStream as unknown as Parameters<typeof writer.merge>[0]);
     },
   });
+  return createUIMessageStreamResponse({ stream });
 }

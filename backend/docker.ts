@@ -34,6 +34,11 @@ export interface ContainerImageSearchResult {
   source: 'Docker Hub';
 }
 
+export type DeploymentProgress =
+  | { phase: 'pulling-image'; image: string }
+  | { phase: 'activity'; label: string }
+  | { phase: 'working' };
+
 interface ImageSearchClient {
   searchImages(options: { term: string; limit: number; filters?: Record<string, string[]> }): Promise<unknown>;
 }
@@ -255,9 +260,10 @@ export class DockerService {
     }));
   }
 
-  async createContainer(input: CreateContainerInput) {
+  async createContainer(input: CreateContainerInput, onProgress?: (progress: DeploymentProgress) => void) {
     const name = input.name.trim();
     const image = input.image.trim();
+    onProgress?.({ phase: 'activity', label: `Checking ${input.serviceName}` });
     if (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$/.test(name)) throw new Error('Invalid container name');
     if (!image || image.length > 255) throw new Error('Invalid image name');
     if (input.hostname && !/^(?=.{1,253}$)(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$/.test(input.hostname)) {
@@ -265,6 +271,7 @@ export class DockerService {
     }
 
     const networkName = appNetworkName(input.appId);
+    onProgress?.({ phase: 'activity', label: 'Preparing private network' });
     await this.ensureAppNetwork(input.appId);
 
     const existing = await this.docker.listContainers({ all: true, filters: { name: [`^/${name}$`] } });
@@ -303,6 +310,7 @@ export class DockerService {
       if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) throw new Error(`Invalid environment variable name ${key}`);
     }
 
+    onProgress?.({ phase: 'activity', label: `Preparing storage for ${input.serviceName}` });
     await mkdir(this.appsDir, { recursive: true, mode: 0o700 });
     const appsRoot = await realpath(this.appsDir);
     const appDir = path.join(appsRoot, input.appId);
@@ -338,15 +346,21 @@ export class DockerService {
 
     let pulled = false;
     let imageInspection: Docker.ImageInspectInfo;
+    onProgress?.({ phase: 'activity', label: `Checking ${image}` });
     try {
       imageInspection = await this.docker.getImage(image).inspect();
     } catch {
-      const stream = await this.docker.pull(image);
-      await new Promise<void>((resolve, reject) => {
-        this.docker.modem.followProgress(stream, (error) => error ? reject(error) : resolve());
-      });
-      pulled = true;
-      imageInspection = await this.docker.getImage(image).inspect();
+      onProgress?.({ phase: 'pulling-image', image });
+      try {
+        const stream = await this.docker.pull(image);
+        await new Promise<void>((resolve, reject) => {
+          this.docker.modem.followProgress(stream, (error) => error ? reject(error) : resolve());
+        });
+        pulled = true;
+        imageInspection = await this.docker.getImage(image).inspect();
+      } finally {
+        onProgress?.({ phase: 'working' });
+      }
     }
 
     if (newBindSources.length) {
@@ -386,6 +400,7 @@ export class DockerService {
       NetworkingConfig: { EndpointsConfig: { [networkName]: { Aliases: [input.serviceName] } } },
     });
     try {
+      onProgress?.({ phase: 'activity', label: `Starting ${input.serviceName}` });
       await container.start();
       const inspection = await container.inspect();
       return {
