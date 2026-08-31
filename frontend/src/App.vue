@@ -271,15 +271,17 @@ function toolDetails(part: Record<string, unknown>) {
     if (typeof output?.url === 'string' && /^https?:\/\//.test(output.url)) details.push({ text: output.url, href: output.url });
   }
   const appTarget = input?.appId;
+  let targetedApp: AppInfo | undefined;
   if (typeof appTarget === 'string') {
-    const app = apps.value.find((candidate) => candidate.id === appTarget || candidate.id.startsWith(appTarget) || candidate.name === appTarget);
-    const appName = typeof output?.appName === 'string' ? output.appName : app?.name;
+    targetedApp = apps.value.find((candidate) => candidate.id === appTarget || candidate.id.startsWith(appTarget) || candidate.name === appTarget);
+    const appName = typeof output?.appName === 'string' ? output.appName : targetedApp?.name;
     details.push({ text: `App: ${appName ?? appTarget}` });
   }
   const serviceTarget = input?.containerId ?? input?.serviceId;
   if (typeof serviceTarget === 'string') {
-    const service = apps.value.flatMap((app) => app.services).find((candidate) => candidate.id === serviceTarget || candidate.id.startsWith(serviceTarget) || candidate.serviceId === serviceTarget || candidate.name === serviceTarget);
-    details.push({ text: `Service: ${service?.name ?? serviceTarget}` });
+    const candidates = (targetedApp ? [targetedApp] : apps.value).flatMap((app) => app.services.map((service) => ({ app, service })));
+    const match = candidates.find(({ service }) => service.id === serviceTarget || service.id.startsWith(serviceTarget) || service.serviceId === serviceTarget || service.name === serviceTarget);
+    details.push({ text: `Service: ${match ? `${match.app.name} / ${match.service.name}` : serviceTarget}` });
   }
   if (name === 'getApplicationLogs' && typeof input?.tail === 'number') details.push({ text: `Recent lines: ${input.tail}` });
   if (name === 'setEnvironmentVariable' && typeof input?.name === 'string') details.push({ text: `Environment key: ${input.name}` });
