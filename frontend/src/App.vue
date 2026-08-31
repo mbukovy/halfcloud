@@ -154,6 +154,39 @@ function toolName(part: Record<string, unknown>) {
   return type === 'dynamic-tool' ? String(part.toolName ?? 'tool') : type.slice(5);
 }
 
+type MessagePartGroup =
+  | { kind: 'text'; key: string; part: { type: 'text'; text: string } }
+  | { kind: 'tools'; key: string; parts: Record<string, unknown>[] };
+
+function groupMessageParts(parts: readonly unknown[]): MessagePartGroup[] {
+  const groups: MessagePartGroup[] = [];
+  for (let index = 0; index < parts.length; index += 1) {
+    const part = parts[index];
+    if (textPart(part)) {
+      groups.push({ kind: 'text', key: `text-${index}`, part });
+      continue;
+    }
+
+    const currentTool = toolPart(part);
+    if (!currentTool) continue;
+    const previous = groups.at(-1);
+    if (previous?.kind === 'tools' && toolName(previous.parts[0]!) === toolName(currentTool)) {
+      previous.parts.push(currentTool);
+    } else {
+      groups.push({ kind: 'tools', key: `tools-${index}`, parts: [currentTool] });
+    }
+  }
+  return groups;
+}
+
+function latestTool(parts: Record<string, unknown>[]) {
+  return parts[parts.length - 1]!;
+}
+
+function toolGroupDetails(parts: Record<string, unknown>[]) {
+  return parts.flatMap((part) => toolDetails(part));
+}
+
 function toolLabel(part: Record<string, unknown>) {
   const name = toolName(part);
   if ((name === 'createApp' || name === 'addService') && toolState(part) === 'working') {
@@ -843,78 +876,79 @@ onBeforeUnmount(() => {
           </div>
           <article v-for="message in messages" :key="message.id" class="message" :class="message.role">
             <span class="message-author">{{ message.role === 'user' ? 'YOU' : 'HALFCLOUD' }}</span>
-            <template v-for="(part, index) in message.parts" :key="index">
-              <div v-if="textPart(part)" class="message-text" v-html="renderMarkdown(part.text)"></div>
-              <div v-else-if="toolPart(part)" class="tool-event" :class="toolState(toolPart(part)!)">
-                <span class="tool-icon">{{ toolState(toolPart(part)!) === 'complete' ? '✓' : toolState(toolPart(part)!) === 'failed' ? '!' : '·' }}</span>
+            <template v-for="group in groupMessageParts(message.parts)" :key="group.key">
+              <div v-if="group.kind === 'text'" class="message-text" v-html="renderMarkdown(group.part.text)"></div>
+              <div v-else class="tool-event" :class="toolState(latestTool(group.parts))">
+                <span class="tool-icon">{{ toolState(latestTool(group.parts)) === 'complete' ? '✓' : toolState(latestTool(group.parts)) === 'failed' ? '!' : '·' }}</span>
                 <div class="tool-content">
-                  <span>{{ toolLabel(toolPart(part)!) }}</span>
-                  <ul v-if="toolDetails(toolPart(part)!).length">
-                    <li v-for="(detail, detailIndex) in toolDetails(toolPart(part)!)" :key="detailIndex"><a v-if="detail.href" :href="detail.href" target="_blank" rel="noopener noreferrer">{{ detail.text }}</a><template v-else>{{ detail.text }}</template></li>
+                  <span>{{ toolLabel(latestTool(group.parts)) }}</span>
+                  <ul v-if="toolGroupDetails(group.parts).length">
+                    <li v-for="(detail, detailIndex) in toolGroupDetails(group.parts)" :key="detailIndex"><a v-if="detail.href" :href="detail.href" target="_blank" rel="noopener noreferrer">{{ detail.text }}</a><template v-else>{{ detail.text }}</template></li>
                   </ul>
-                  <div v-if="environmentRequest(toolPart(part)!)" class="environment-request-widget">
-                    <template v-if="environmentRequest(toolPart(part)!)!.status === 'completed'">
-                      <strong>{{ environmentRequest(toolPart(part)!)!.targets.length === 1 ? environmentRequest(toolPart(part)!)!.name : `Configured for ${environmentRequest(toolPart(part)!)!.targets.length} variables` }}</strong>
-                      <code v-for="target in environmentRequest(toolPart(part)!)!.targets" :key="`${target.serviceId}:${target.name}`">{{ environmentTargetLabel(target) }}</code>
+                  <template v-for="(part, partIndex) in group.parts" :key="partIndex">
+                  <div v-if="environmentRequest(part)" class="environment-request-widget">
+                    <template v-if="environmentRequest(part)!.status === 'completed'">
+                      <strong>{{ environmentRequest(part)!.targets.length === 1 ? environmentRequest(part)!.name : `Configured for ${environmentRequest(part)!.targets.length} variables` }}</strong>
+                      <code v-for="target in environmentRequest(part)!.targets" :key="`${target.serviceId}:${target.name}`">{{ environmentTargetLabel(target) }}</code>
                       <p>Configured directly in HalfCloud. The value was not added to this conversation.</p>
                       <button
-                        v-if="!continuedRequestIds.has(environmentRequest(toolPart(part)!)!.requestId)"
+                        v-if="!continuedRequestIds.has(environmentRequest(part)!.requestId)"
                         class="button primary"
                         type="button"
                         :disabled="chatBusy"
-                        @click="continueAfterInput(environmentRequest(toolPart(part)!)!.requestId)"
+                        @click="continueAfterInput(environmentRequest(part)!.requestId)"
                       >Continue</button>
                     </template>
-                    <form v-else @submit.prevent="submitEnvironmentRequest(toolPart(part)!)">
+                    <form v-else @submit.prevent="submitEnvironmentRequest(part)">
                       <strong>Environment variable required</strong>
-                      <code v-for="target in environmentRequest(toolPart(part)!)!.targets" :key="`${target.serviceId}:${target.name}`">{{ environmentTargetLabel(target) }}</code>
-                      <p v-if="environmentRequest(toolPart(part)!)!.description">{{ environmentRequest(toolPart(part)!)!.description }}</p>
+                      <code v-for="target in environmentRequest(part)!.targets" :key="`${target.serviceId}:${target.name}`">{{ environmentTargetLabel(target) }}</code>
+                      <p v-if="environmentRequest(part)!.description">{{ environmentRequest(part)!.description }}</p>
                       <label>Value</label>
                       <input
                         type="password"
                         autocomplete="off"
                         required
-                        :value="environmentRequest(toolPart(part)!)!.form.value"
-                        @input="environmentRequest(toolPart(part)!)!.form.value = ($event.target as HTMLInputElement).value"
+                        :value="environmentRequest(part)!.form.value"
+                        @input="environmentRequest(part)!.form.value = ($event.target as HTMLInputElement).value"
                       >
                       <label class="protection-toggle">
                         <input
                           type="checkbox"
-                          :checked="environmentRequest(toolPart(part)!)!.form.protectedFromAI"
-                          @change="environmentRequest(toolPart(part)!)!.form.protectedFromAI = ($event.target as HTMLInputElement).checked"
+                          :checked="environmentRequest(part)!.form.protectedFromAI"
+                          @change="environmentRequest(part)!.form.protectedFromAI = ($event.target as HTMLInputElement).checked"
                         >
                         <span>Protect this value from AI</span>
                       </label>
                       <p>This value is submitted directly to HalfCloud and is not included in the AI conversation.</p>
-                      <p v-if="environmentRequest(toolPart(part)!)!.form.error" class="form-error">{{ environmentRequest(toolPart(part)!)!.form.error }}</p>
-                      <button class="button primary" type="submit" :disabled="environmentRequest(toolPart(part)!)!.form.saving">
-                        {{ environmentRequest(toolPart(part)!)!.form.saving ? 'Saving…' : 'Save' }}
+                      <p v-if="environmentRequest(part)!.form.error" class="form-error">{{ environmentRequest(part)!.form.error }}</p>
+                      <button class="button primary" type="submit" :disabled="environmentRequest(part)!.form.saving">
+                        {{ environmentRequest(part)!.form.saving ? 'Saving…' : 'Save' }}
                       </button>
                     </form>
                   </div>
-                  <div v-if="basicAuthRequest(toolPart(part)!)" class="environment-request-widget basic-auth-widget">
-                    <template v-if="basicAuthRequest(toolPart(part)!)!.status === 'completed'">
+                  <div v-if="basicAuthRequest(part)" class="environment-request-widget basic-auth-widget">
+                    <template v-if="basicAuthRequest(part)!.status === 'completed'">
                       <strong>Password protection enabled</strong>
                       <p>Credentials were configured directly in HalfCloud and were not added to this conversation.</p>
                       <button
-                        v-if="!continuedRequestIds.has(basicAuthRequest(toolPart(part)!)!.requestId)"
+                        v-if="!continuedRequestIds.has(basicAuthRequest(part)!.requestId)"
                         class="button primary"
                         type="button"
                         :disabled="chatBusy"
-                        @click="continueAfterInput(basicAuthRequest(toolPart(part)!)!.requestId)"
+                        @click="continueAfterInput(basicAuthRequest(part)!.requestId)"
                       >Continue</button>
                     </template>
-                    <form v-else @submit.prevent="submitBasicAuthRequest(toolPart(part)!)">
-                      <strong>{{ basicAuthRequest(toolPart(part)!)!.changing ? 'Change route credentials' : 'Protect with password' }}</strong>
-                      <p>{{ basicAuthRequest(toolPart(part)!)!.hostname }}</p>
+                    <form v-else @submit.prevent="submitBasicAuthRequest(part)">
+                      <strong>{{ basicAuthRequest(part)!.changing ? 'Change route credentials' : 'Protect with password' }}</strong>
+                      <p>{{ basicAuthRequest(part)!.hostname }}</p>
                       <label>Username</label>
                       <input
-                        :value="basicAuthRequest(toolPart(part)!)!.form.username"
+                        :value="basicAuthRequest(part)!.form.username"
                         autocomplete="username"
                         maxlength="128"
                         pattern="[A-Za-z0-9][A-Za-z0-9._@-]*"
                         required
-                        @input="basicAuthRequest(toolPart(part)!)!.form.username = ($event.target as HTMLInputElement).value"
+                        @input="basicAuthRequest(part)!.form.username = ($event.target as HTMLInputElement).value"
                       >
                       <label>Password</label>
                       <input
@@ -923,26 +957,27 @@ onBeforeUnmount(() => {
                         minlength="8"
                         maxlength="1024"
                         required
-                        :value="basicAuthRequest(toolPart(part)!)!.form.password"
-                        @input="basicAuthRequest(toolPart(part)!)!.form.password = ($event.target as HTMLInputElement).value"
+                        :value="basicAuthRequest(part)!.form.password"
+                        @input="basicAuthRequest(part)!.form.password = ($event.target as HTMLInputElement).value"
                       >
                       <p>At least 8 characters. The password goes directly to HalfCloud, is immediately hashed, and is never sent to AI.</p>
-                      <p v-if="basicAuthRequest(toolPart(part)!)!.form.error" class="form-error">{{ basicAuthRequest(toolPart(part)!)!.form.error }}</p>
-                      <button class="button primary" type="submit" :disabled="basicAuthRequest(toolPart(part)!)!.form.saving">
-                        {{ basicAuthRequest(toolPart(part)!)!.form.saving ? 'Applying…' : basicAuthRequest(toolPart(part)!)!.changing ? 'Change credentials' : 'Enable protection' }}
+                      <p v-if="basicAuthRequest(part)!.form.error" class="form-error">{{ basicAuthRequest(part)!.form.error }}</p>
+                      <button class="button primary" type="submit" :disabled="basicAuthRequest(part)!.form.saving">
+                        {{ basicAuthRequest(part)!.form.saving ? 'Applying…' : basicAuthRequest(part)!.changing ? 'Change credentials' : 'Enable protection' }}
                       </button>
                     </form>
                   </div>
-                  <div v-if="approvalRequest(toolPart(part)!)" class="approval-widget">
-                    <strong>{{ approvalCopy(toolPart(part)!).title }}</strong>
-                    <p>{{ approvalCopy(toolPart(part)!).detail }}</p>
+                  <div v-if="approvalRequest(part)" class="approval-widget">
+                    <strong>{{ approvalCopy(part).title }}</strong>
+                    <p>{{ approvalCopy(part).detail }}</p>
                     <div>
-                      <button class="confirm" type="button" :disabled="Boolean(respondingApprovalId)" @click="respondToApproval(toolPart(part)!, true)">Continue</button>
-                      <button type="button" :disabled="Boolean(respondingApprovalId)" @click="respondToApproval(toolPart(part)!, false)">Dismiss</button>
+                      <button class="confirm" type="button" :disabled="Boolean(respondingApprovalId)" @click="respondToApproval(part, true)">Continue</button>
+                      <button type="button" :disabled="Boolean(respondingApprovalId)" @click="respondToApproval(part, false)">Dismiss</button>
                     </div>
                   </div>
+                  </template>
                 </div>
-                <small>{{ toolStateLabel(toolPart(part)!) }}</small>
+                <small>{{ toolStateLabel(latestTool(group.parts)) }}</small>
               </div>
             </template>
           </article>
