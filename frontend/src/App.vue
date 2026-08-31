@@ -34,6 +34,7 @@ const actionId = ref('');
 const domainAction = ref('');
 const editingAppId = ref('');
 const appNameDraft = ref('');
+const expandedAppIds = reactive(new Set<string>());
 const environmentDialog = reactive<{
   container: ContainerInfo | null;
   variables: EnvironmentVariable[];
@@ -104,6 +105,11 @@ function privateAddresses(container: ContainerInfo) {
   return container.internalPorts
     .filter((port) => port.protocol === 'tcp')
     .map((port) => `${container.name}:${port.port}`);
+}
+
+function toggleApp(appId: string) {
+  if (expandedAppIds.has(appId)) expandedAppIds.delete(appId);
+  else expandedAppIds.add(appId);
 }
 
 function toolPart(part: unknown) {
@@ -204,7 +210,6 @@ function toolDetails(part: Record<string, unknown>) {
   const name = toolName(part);
   const input = recordValue(part.input);
   const output = recordValue(part.output);
-  const target = input?.appId ?? input?.containerId ?? input?.serviceId;
 
   if (name === 'listApps') details.push({ text: 'Reading Apps, Services, status, CPU and memory' });
   if (name === 'getHostStatus') details.push({ text: 'Reading host CPU, memory, disk and uptime' });
@@ -230,7 +235,17 @@ function toolDetails(part: Record<string, unknown>) {
     }
     if (typeof output?.url === 'string' && /^https?:\/\//.test(output.url)) details.push({ text: output.url, href: output.url });
   }
-  if (typeof target === 'string') details.push({ text: `Application: ${target}` });
+  const appTarget = input?.appId;
+  if (typeof appTarget === 'string') {
+    const app = apps.value.find((candidate) => candidate.id === appTarget || candidate.id.startsWith(appTarget) || candidate.name === appTarget);
+    const appName = typeof output?.appName === 'string' ? output.appName : app?.name;
+    details.push({ text: `App: ${appName ?? appTarget}` });
+  }
+  const serviceTarget = input?.containerId ?? input?.serviceId;
+  if (typeof serviceTarget === 'string') {
+    const service = apps.value.flatMap((app) => app.services).find((candidate) => candidate.id === serviceTarget || candidate.id.startsWith(serviceTarget) || candidate.serviceId === serviceTarget || candidate.name === serviceTarget);
+    details.push({ text: `Service: ${service?.name ?? serviceTarget}` });
+  }
   if (name === 'getApplicationLogs' && typeof input?.tail === 'number') details.push({ text: `Recent lines: ${input.tail}` });
   if (name === 'setEnvironmentVariable' && typeof input?.name === 'string') details.push({ text: `Environment key: ${input.name}` });
   if (typeof input?.volumeName === 'string') details.push({ text: `Volume: ${input.volumeName}` });
@@ -856,8 +871,24 @@ onBeforeUnmount(() => {
         <div v-if="apps.length === 0" class="empty-containers">
           <span>00</span><p>No Apps yet.</p><small>Ask HalfCloud to deploy one.</small>
         </div>
-        <article v-for="app in apps" :key="app.id" class="container-card app-card" :class="{ 'multi-service': app.services.length > 1 }">
-          <div class="container-title app-title">
+        <article v-for="app in apps" :key="app.id" class="container-card app-card" :class="{ 'multi-service': app.services.length > 1, expanded: expandedAppIds.has(app.id) }">
+          <button
+            class="app-card-summary"
+            type="button"
+            :aria-expanded="expandedAppIds.has(app.id)"
+            :aria-controls="`app-details-${app.id}`"
+            @click="toggleApp(app.id)"
+          >
+            <strong>{{ app.name }}</strong>
+            <span class="app-card-domains">
+              <template v-for="service in app.services" :key="service.serviceId">
+                <span v-for="domain in service.domains" :key="domain.hostname">{{ domain.hostname }}</span>
+              </template>
+            </span>
+            <svg aria-hidden="true" viewBox="0 0 12 12"><path d="m3 4.5 3 3 3-3"></path></svg>
+          </button>
+          <div v-show="expandedAppIds.has(app.id)" :id="`app-details-${app.id}`" class="app-card-expanded">
+            <div class="container-title app-title">
             <span class="status-dot" :class="app.status === 'running' ? 'running' : 'exited'"></span>
             <div class="app-name-block">
               <div class="app-name-row">
@@ -880,13 +911,13 @@ onBeforeUnmount(() => {
               <p>{{ app.services.length }} service{{ app.services.length === 1 ? '' : 's' }}</p>
             </div>
             <span class="state-label">{{ app.status.replace('_', ' ') }}</span>
-          </div>
-          <div class="container-data">
+            </div>
+            <div class="container-data">
             <div><span>SERVICES</span><strong>{{ app.runningServices }}/{{ app.services.length }} running</strong></div>
             <div><span>CPU</span><strong>{{ app.cpuPercent.toFixed(2) }}%</strong></div>
             <div><span>RAM</span><strong>{{ formatBytes(app.memoryUsed) }}</strong></div>
-          </div>
-          <div class="app-services" :class="{ single: app.services.length === 1 }">
+            </div>
+            <div class="app-services" :class="{ single: app.services.length === 1 }">
             <section v-for="service in app.services" :key="service.serviceId" class="service-card">
               <div v-if="app.services.length > 1" class="container-title service-title">
                 <span class="status-dot" :class="service.state"></span>
@@ -912,8 +943,8 @@ onBeforeUnmount(() => {
                 <button v-if="app.services.length > 1" :disabled="actionId === service.id" @click="runAction(service, 'restart')">Restart</button>
               </div>
             </section>
-          </div>
-          <div class="container-actions app-actions">
+            </div>
+            <div class="container-actions app-actions">
             <button class="logs-button" :disabled="actionId === app.id" @click="showAppLogs(app)">Logs</button>
             <details class="actions-menu">
               <summary>App actions <svg aria-hidden="true" viewBox="0 0 12 12"><path d="m3 4.5 3 3 3-3"></path></svg></summary>
@@ -925,6 +956,7 @@ onBeforeUnmount(() => {
                 <button class="danger" :disabled="actionId === app.id" @click="runAppAction(app, 'delete')">Delete App</button>
               </div>
             </details>
+            </div>
           </div>
         </article>
       </section>

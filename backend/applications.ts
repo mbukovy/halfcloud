@@ -109,7 +109,7 @@ export class ApplicationService {
     }
     await this.apps.deleteApp(app.id);
     await this.syncRoutes();
-    return { appId: app.id, deleted: true, persistentDataDeleted: deleteData };
+    return { appId: app.id, appName: app.name, deleted: true, persistentDataDeleted: deleteData };
   }
 
   async getAppLogs(idOrName: string, tail = 200) {
