@@ -48,6 +48,85 @@ test('environment requests persist lifecycle status without a value field', asyn
   assert.equal('value' in completed, false);
 });
 
+test('environment requests preserve and deduplicate the complete target set', async (t) => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'halfcloud-environment-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const store = new EnvironmentStore(directory);
+  const additionalTargets = [{ serviceId: 'service_web', name: 'database__connection__password' }];
+
+  const first = await store.createRequest('service_mysql', 'MYSQL_PASSWORD', 'Shared password', additionalTargets, 'app_ghost');
+  const duplicate = await store.createRequest('service_mysql', 'MYSQL_PASSWORD', 'Another description', additionalTargets, 'app_ghost');
+  const different = await store.createRequest('service_mysql', 'MYSQL_PASSWORD', undefined, [], 'app_ghost');
+
+  assert.equal(duplicate.id, first.id);
+  assert.notEqual(different.id, first.id);
+  assert.deepEqual(first.targets, [
+    { serviceId: 'service_mysql', name: 'MYSQL_PASSWORD' },
+    { serviceId: 'service_web', name: 'database__connection__password' },
+  ]);
+  assert.equal('value' in first, false);
+});
+
+test('one protected request applies the same value to multiple Services', async (t) => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'halfcloud-environment-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const store = new EnvironmentStore(directory);
+  const environments = new Map([
+    ['service_mysql', { MYSQL_DATABASE: 'ghost' }],
+    ['service_web', { database__connection__host: 'mysql' }],
+  ]);
+  const services = [
+    { id: 'container_mysql', serviceId: 'service_mysql', appId: 'app_ghost', runtimeName: 'mysql-runtime', name: 'mysql', ports: [] },
+    { id: 'container_web', serviceId: 'service_web', appId: 'app_ghost', runtimeName: 'web-runtime', name: 'web', ports: [] },
+  ];
+  const replacements = [];
+  const docker = {
+    listContainers: async () => services,
+    getContainerEnvironment: async (id) => ({ containerId: id, name: id, environment: environments.get(id) ?? {} }),
+    replaceContainerEnvironment: async (id, environment) => {
+      replacements.push({ id, environment });
+      environments.set(id, environment);
+      return { containerId: id };
+    },
+  };
+  const applications = new ApplicationService(docker, { sync: async () => undefined }, { get: async () => [] }, store);
+
+  const request = await applications.requestEnvironmentVariable(
+    'service_mysql',
+    'MYSQL_PASSWORD',
+    'Shared database password',
+    [{ serviceId: 'service_web', name: 'database__connection__password' }],
+  );
+  const completed = await applications.completeEnvironmentRequest('service_mysql', request.requestId, 'same-secret');
+
+  assert.equal(replacements.length, 2);
+  assert.equal(environments.get('service_mysql').MYSQL_PASSWORD, 'same-secret');
+  assert.equal(environments.get('service_web').database__connection__password, 'same-secret');
+  assert.equal((await store.list('service_mysql')).find((variable) => variable.name === 'MYSQL_PASSWORD').protectedFromAI, true);
+  assert.equal((await store.list('service_web')).find((variable) => variable.name === 'database__connection__password').protectedFromAI, true);
+  assert.deepEqual(completed.targets, [
+    { serviceId: 'service_mysql', name: 'MYSQL_PASSWORD', configured: true },
+    { serviceId: 'service_web', name: 'database__connection__password', configured: true },
+  ]);
+  assert.equal(JSON.stringify(completed).includes('same-secret'), false);
+});
+
+test('shared environment requests reject targets outside the App', async (t) => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'halfcloud-environment-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const store = new EnvironmentStore(directory);
+  const services = [
+    { id: 'container_mysql', serviceId: 'service_mysql', appId: 'app_ghost', runtimeName: 'mysql-runtime', name: 'mysql', ports: [] },
+    { id: 'container_other', serviceId: 'service_other', appId: 'app_other', runtimeName: 'other-runtime', name: 'other', ports: [] },
+  ];
+  const applications = new ApplicationService({ listContainers: async () => services }, {}, {}, store);
+
+  await assert.rejects(
+    applications.requestEnvironmentVariable('service_mysql', 'MYSQL_PASSWORD', undefined, [{ serviceId: 'service_other', name: 'PASSWORD' }]),
+    /same App/,
+  );
+});
+
 test('the agent cannot overwrite a protected environment variable', async (t) => {
   const directory = await mkdtemp(path.join(tmpdir(), 'halfcloud-environment-'));
   t.after(() => rm(directory, { recursive: true, force: true }));
@@ -132,4 +211,38 @@ test('provider-bound history strips credentials from Basic Auth widget records',
   assert.equal(serialized.includes('$argon2id$secret'), false);
   assert.deepEqual(sanitized[0].parts[0].input, { routeId: 'route_one' });
   assert.equal(sanitized[0].parts[0].output.username, 'michal');
+});
+
+test('provider-bound history strips injected values from environment request records', () => {
+  const messages = [{
+    id: 'message',
+    role: 'assistant',
+    parts: [{
+      type: 'tool-requestEnvironmentVariable',
+      input: {
+        serviceId: 'service_mysql',
+        name: 'MYSQL_PASSWORD',
+        value: 'never-send-this',
+        additionalTargets: [{ serviceId: 'service_web', name: 'database__connection__password', value: 'never-send-this' }],
+      },
+      output: {
+        requestId: 'envreq_one',
+        serviceId: 'service_mysql',
+        name: 'MYSQL_PASSWORD',
+        targets: [{ serviceId: 'service_mysql', name: 'MYSQL_PASSWORD', value: 'never-send-this' }],
+        status: 'completed',
+        value: 'never-send-this',
+      },
+    }],
+  }];
+
+  const sanitized = sanitizeAgentMessages(messages);
+  const serialized = JSON.stringify(sanitized);
+  assert.equal(serialized.includes('never-send-this'), false);
+  assert.deepEqual(sanitized[0].parts[0].input.additionalTargets, [
+    { serviceId: 'service_web', name: 'database__connection__password' },
+  ]);
+  assert.deepEqual(sanitized[0].parts[0].output.targets, [
+    { serviceId: 'service_mysql', name: 'MYSQL_PASSWORD' },
+  ]);
 });

@@ -172,7 +172,7 @@ app.put('/api/containers/:id/environment-requests/:requestId', async (request, r
   response.json(await docker.completeEnvironmentRequest(
     request.params.id,
     request.params.requestId,
-    z.string().parse(request.body?.value),
+    z.string().min(1).max(65536).parse(request.body?.value),
     z.boolean().optional().parse(request.body?.protectedFromAI) ?? true,
   ));
 });

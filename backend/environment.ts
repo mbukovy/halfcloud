@@ -16,8 +16,15 @@ export interface EnvironmentRequest {
   id: string;
   serviceId: string;
   name: string;
+  appId?: string;
+  targets?: EnvironmentTarget[];
   description?: string;
   status: 'pending' | 'completed' | 'cancelled';
+}
+
+export interface EnvironmentTarget {
+  serviceId: string;
+  name: string;
 }
 
 export type AgentEnvironmentVariable =
@@ -41,6 +48,10 @@ export function serializeEnvironmentForAgent(variables: EnvironmentVariable[]): 
   return variables.map((variable) => variable.protectedFromAI
     ? { name: variable.name, configured: true, protectedFromAI: true }
     : { name: variable.name, value: variable.value, protectedFromAI: false });
+}
+
+export function environmentRequestTargets(request: EnvironmentRequest): EnvironmentTarget[] {
+  return request.targets?.length ? request.targets : [{ serviceId: request.serviceId, name: request.name }];
 }
 
 export class EnvironmentStore {
@@ -87,15 +98,25 @@ export class EnvironmentStore {
     return document.variables;
   }
 
-  async createRequest(serviceId: string, name: string, description?: string) {
-    assertEnvironmentVariableName(name);
+  async createRequest(serviceId: string, name: string, description?: string, additionalTargets: EnvironmentTarget[] = [], appId?: string) {
+    const targets = [{ serviceId, name }, ...additionalTargets];
+    for (const target of targets) {
+      if (!serviceNamePattern.test(target.serviceId)) throw new Error('Invalid Service ID');
+      assertEnvironmentVariableName(target.name);
+    }
+    if (new Set(targets.map((target) => `${target.serviceId}\0${target.name}`)).size !== targets.length) {
+      throw new Error('Environment request targets must be unique');
+    }
     const document = await this.read(serviceId);
-    const existing = document.requests.find((request) => request.name === name && request.status === 'pending');
+    const targetKey = JSON.stringify(targets);
+    const existing = document.requests.find((request) => request.status === 'pending' && JSON.stringify(environmentRequestTargets(request)) === targetKey);
     if (existing) return existing;
     const request: EnvironmentRequest = {
       id: `envreq_${randomUUID()}`,
       serviceId,
       name,
+      ...(appId ? { appId } : {}),
+      targets,
       ...(description?.trim() ? { description: description.trim() } : {}),
       status: 'pending',
     };

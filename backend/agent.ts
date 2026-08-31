@@ -18,6 +18,38 @@ export function sanitizeAgentMessages(messages: UIMessage[]): UIMessage[] {
 
       // Tool history is browser-controlled context. Never replay an environment mutation value to the provider.
       if (name === 'setEnvironmentVariable') return [];
+      if (name === 'requestEnvironmentVariable') {
+        const input = record.input as Record<string, unknown> | undefined;
+        const output = record.output as Record<string, unknown> | undefined;
+        const safeTargets = (value: unknown) => Array.isArray(value)
+          ? value.flatMap((target) => {
+            if (typeof target !== 'object' || target === null) return [];
+            const candidate = target as Record<string, unknown>;
+            return typeof candidate.serviceId === 'string' && typeof candidate.name === 'string'
+              ? [{ serviceId: candidate.serviceId, name: candidate.name }]
+              : [];
+          })
+          : undefined;
+        return [{
+          ...record,
+          input: {
+            ...(typeof input?.serviceId === 'string' ? { serviceId: input.serviceId } : {}),
+            ...(typeof input?.name === 'string' ? { name: input.name } : {}),
+            ...(safeTargets(input?.additionalTargets) ? { additionalTargets: safeTargets(input?.additionalTargets) } : {}),
+            ...(typeof input?.description === 'string' ? { description: input.description } : {}),
+          },
+          ...(output ? { output: {
+            ...(typeof output.requestId === 'string' ? { requestId: output.requestId } : {}),
+            ...(typeof output.appId === 'string' ? { appId: output.appId } : {}),
+            ...(typeof output.serviceId === 'string' ? { serviceId: output.serviceId } : {}),
+            ...(typeof output.name === 'string' ? { name: output.name } : {}),
+            ...(safeTargets(output.targets) ? { targets: safeTargets(output.targets) } : {}),
+            ...(typeof output.description === 'string' ? { description: output.description } : {}),
+            ...(typeof output.status === 'string' ? { status: output.status } : {}),
+            ...(typeof output.protectedFromAI === 'boolean' ? { protectedFromAI: output.protectedFromAI } : {}),
+          } } : {}),
+        } as typeof part];
+      }
       if (name === 'requestBasicAuthSetup' || name === 'requestBasicAuthPasswordChange') {
         const input = record.input as Record<string, unknown> | undefined;
         const output = record.output as Record<string, unknown> | undefined;
@@ -94,7 +126,8 @@ Rules:
 - Never ask for a Basic Auth username or password in chat and never pass credentials as tool arguments. Use requestBasicAuthSetup or requestBasicAuthPasswordChange so the trusted HalfCloud widget collects credentials outside AI context.
 - Removing route protection makes that hostname publicly accessible. Clearly state this consequence before calling removeRouteProtection; the interface requires explicit user approval.
 - Environment variables may be protected from AI. For protected variables, you can see their name and configuration status but never their value.
-- Never ask the user to paste API keys, passwords, tokens, credentials, or other sensitive values into chat. Use requestEnvironmentVariable so the user can submit the value directly to HalfCloud with AI protection enabled by default.
+- Never ask the user to paste API keys, passwords, tokens, credentials, or other sensitive values into chat. Use requestEnvironmentVariable so the user can submit the value directly to HalfCloud with AI protection enabled by default. When the same credential is required by multiple Services in one App, request it once and use additionalTargets to apply that exact value everywhere.
+- Configure all non-sensitive database initialization variables before requesting a shared database credential. Database image password variables commonly apply only on first initialization, so do not repeatedly change one side or delete persistent data when authentication fails; inspect logs and configuration first.
 - Use setEnvironmentVariable only for non-sensitive configuration that may remain visible to AI, such as NODE_ENV, LOG_LEVEL, PORT, or a public APP_URL. Never use it for credentials.
 - After every App creation or Service addition, inspect relevant logs and list Apps again to verify that every Service remains running. If Docker reports health for an image, verify that status too. A successful start alone is not success.
 - If post-creation checks reveal a problem, diagnose and fix it when the correction is safe and consistent with the requested deployment. Prefer fixes that preserve the intended architecture, persistence, security, and private service exposure; do not call a deployment successful if the fix risks data loss after recreation or unnecessarily exposes a service.
@@ -199,13 +232,14 @@ export async function createChatResponse(
       execute: ({ serviceId, name, value }) => docker.setEnvironmentVariableForAgent(serviceId, name, value),
     }),
     requestEnvironmentVariable: tool({
-      description: 'Request a sensitive environment value through a dedicated direct-to-HalfCloud input. This tool intentionally has no value argument.',
+      description: 'Request one sensitive value through a dedicated direct-to-HalfCloud input and apply it to one or more environment variables in the same App. Use additionalTargets whenever Services must share an exact credential. This tool intentionally has no value argument.',
       inputSchema: z.object({
         serviceId,
         name: z.string().min(1),
+        additionalTargets: z.array(z.object({ serviceId, name: z.string().min(1) })).max(19).optional(),
         description: z.string().max(500).optional(),
       }),
-      execute: ({ serviceId, name, description }) => docker.requestEnvironmentVariable(serviceId, name, description),
+      execute: ({ serviceId, name, description, additionalTargets }) => docker.requestEnvironmentVariable(serviceId, name, description, additionalTargets),
     }),
     listServiceDomains: tool({
       description: 'List all routing domains for a public HalfCloud application, including primary, managed, DNS, and HTTPS state.',

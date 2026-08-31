@@ -3,7 +3,7 @@ import { AppStore } from './apps.js';
 import { CaddyService } from './caddy.js';
 import { DockerService, type CreateContainerInput, type DeploymentProgress, type SearchContainerImagesInput } from './docker.js';
 import { DomainStore, normalizeHostname, type ServiceDomain } from './domains.js';
-import { EnvironmentStore, assertEnvironmentVariableName, serializeEnvironmentForAgent, type EnvironmentVariable } from './environment.js';
+import { EnvironmentStore, assertEnvironmentVariableName, environmentRequestTargets, serializeEnvironmentForAgent, type EnvironmentTarget, type EnvironmentVariable } from './environment.js';
 import { RouteAccessRequestStore, assertBasicAuthPassword, assertBasicAuthUsername, hashBasicAuthPassword } from './route-access.js';
 
 export class ApplicationService {
@@ -228,10 +228,26 @@ export class ApplicationService {
     return { serviceId: variable.serviceId, name: variable.name, configured: true, protectedFromAI: false };
   }
 
-  async requestEnvironmentVariable(id: string, name: string, description?: string) {
+  async requestEnvironmentVariable(id: string, name: string, description?: string, additionalTargets: EnvironmentTarget[] = []) {
+    if (additionalTargets.length > 19) throw new Error('An environment request supports at most 20 targets');
     const application = await this.application(id);
-    const request = await this.environment.createRequest(application.serviceId ?? application.name, name, description);
-    return { requestId: request.id, serviceId: request.serviceId, name: request.name, description: request.description, status: request.status };
+    const serviceId = application.serviceId ?? application.name;
+    const targets: EnvironmentTarget[] = [];
+    for (const target of additionalTargets) {
+      const targetApplication = await this.application(target.serviceId);
+      if (targetApplication.appId !== application.appId) throw new Error('Shared environment values can only target Services in the same App');
+      targets.push({ serviceId: targetApplication.serviceId ?? targetApplication.name, name: target.name });
+    }
+    const request = await this.environment.createRequest(serviceId, name, description, targets, application.appId);
+    return {
+      requestId: request.id,
+      appId: request.appId,
+      serviceId: request.serviceId,
+      name: request.name,
+      targets: environmentRequestTargets(request),
+      description: request.description,
+      status: request.status,
+    };
   }
 
   async completeEnvironmentRequest(id: string, requestId: string, value: string, protectedFromAI = true) {
@@ -239,11 +255,59 @@ export class ApplicationService {
     const serviceKey = application.serviceId ?? application.name;
     const request = await this.environment.getRequest(serviceKey, requestId);
     if (request.status !== 'pending') throw new Error(`Environment request ${requestId} is ${request.status}`);
-    const variables = await this.listEnvironment(id);
-    const existing = variables.find((variable) => variable.name === request.name);
-    await this.saveEnvironmentVariable(id, { variableId: existing?.id, name: request.name, value, protectedFromAI });
+    if (request.appId && request.appId !== application.appId) throw new Error('Environment request does not belong to this App');
+
+    const grouped = new Map<string, { names: string[] }>();
+    for (const target of environmentRequestTargets(request)) {
+      assertEnvironmentVariableName(target.name);
+      const targetApplication = await this.application(target.serviceId);
+      if (targetApplication.appId !== application.appId) throw new Error('Shared environment values can only target Services in the same App');
+      const targetServiceId = targetApplication.serviceId ?? targetApplication.name;
+      const group = grouped.get(targetServiceId) ?? { names: [] };
+      if (!group.names.includes(target.name)) group.names.push(target.name);
+      grouped.set(targetServiceId, group);
+    }
+
+    const changes: Array<{ serviceId: string; previous: EnvironmentVariable[]; updated: EnvironmentVariable[] }> = [];
+    const now = new Date().toISOString();
+    for (const [targetServiceId, group] of grouped) {
+      const runtime = await this.docker.getContainerEnvironment(targetServiceId);
+      const previous = await this.environment.list(runtime.name, runtime.environment);
+      const byName = new Map(previous.map((variable) => [variable.name, variable]));
+      const updated = [...previous];
+      for (const name of group.names) {
+        const existing = byName.get(name);
+        const variable: EnvironmentVariable = existing
+          ? { ...existing, value, protectedFromAI, updatedAt: now }
+          : { id: `env_${randomUUID()}`, serviceId: runtime.name, name, value, protectedFromAI, createdAt: now, updatedAt: now };
+        if (existing) updated[updated.findIndex((candidate) => candidate.id === existing.id)] = variable;
+        else updated.push(variable);
+      }
+      changes.push({ serviceId: targetServiceId, previous, updated });
+    }
+
+    const applied: typeof changes = [];
+    try {
+      for (const change of changes) {
+        await this.applyEnvironment(change.serviceId, change.serviceId, change.previous, change.updated);
+        applied.push(change);
+      }
+    } catch (error) {
+      for (const change of applied.reverse()) {
+        await this.applyEnvironment(change.serviceId, change.serviceId, change.updated, change.previous).catch(() => undefined);
+      }
+      throw error;
+    }
+
     const completed = await this.environment.setRequestStatus(serviceKey, requestId, 'completed');
-    return { requestId: completed.id, serviceId: completed.serviceId, name: completed.name, status: completed.status, protectedFromAI };
+    return {
+      requestId: completed.id,
+      serviceId: completed.serviceId,
+      name: completed.name,
+      targets: environmentRequestTargets(completed).map((target) => ({ ...target, configured: true })),
+      status: completed.status,
+      protectedFromAI,
+    };
   }
 
   async inspectContainerForAgent(id: string) {

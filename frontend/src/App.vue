@@ -301,15 +301,33 @@ function environmentRequest(part: Record<string, unknown>) {
   const serviceId = output?.serviceId ?? input?.serviceId;
   const name = output?.name ?? input?.name;
   if (typeof requestId !== 'string' || typeof serviceId !== 'string' || typeof name !== 'string') return undefined;
+  const rawTargets = Array.isArray(output?.targets)
+    ? output.targets
+    : [{ serviceId, name }, ...(Array.isArray(input?.additionalTargets) ? input.additionalTargets : [])];
+  const targets = rawTargets.flatMap((target) => {
+    const candidate = recordValue(target);
+    return typeof candidate?.serviceId === 'string' && typeof candidate?.name === 'string'
+      ? [{ serviceId: candidate.serviceId, name: candidate.name }]
+      : [];
+  });
   if (!environmentRequestForms[requestId]) environmentRequestForms[requestId] = { value: '', protectedFromAI: true, saving: false, error: '' };
   return {
     requestId,
     serviceId,
     name,
+    targets: targets.length ? targets : [{ serviceId, name }],
     description: typeof output?.description === 'string' ? output.description : typeof input?.description === 'string' ? input.description : '',
     status: output?.status === 'completed' ? 'completed' : 'pending',
     form: environmentRequestForms[requestId]!,
   };
+}
+
+function environmentTargetLabel(target: { serviceId: string; name: string }) {
+  for (const app of apps.value) {
+    const service = app.services.find((candidate) => candidate.serviceId === target.serviceId || candidate.id === target.serviceId || candidate.name === target.serviceId);
+    if (service) return `${app.name} / ${service.name}: ${target.name}`;
+  }
+  return target.name;
 }
 
 async function submitEnvironmentRequest(part: Record<string, unknown>) {
@@ -836,7 +854,8 @@ onBeforeUnmount(() => {
                   </ul>
                   <div v-if="environmentRequest(toolPart(part)!)" class="environment-request-widget">
                     <template v-if="environmentRequest(toolPart(part)!)!.status === 'completed'">
-                      <strong>{{ environmentRequest(toolPart(part)!)!.name }}</strong>
+                      <strong>{{ environmentRequest(toolPart(part)!)!.targets.length === 1 ? environmentRequest(toolPart(part)!)!.name : `Configured for ${environmentRequest(toolPart(part)!)!.targets.length} variables` }}</strong>
+                      <code v-for="target in environmentRequest(toolPart(part)!)!.targets" :key="`${target.serviceId}:${target.name}`">{{ environmentTargetLabel(target) }}</code>
                       <p>Configured directly in HalfCloud. The value was not added to this conversation.</p>
                       <button
                         v-if="!continuedRequestIds.has(environmentRequest(toolPart(part)!)!.requestId)"
@@ -848,7 +867,7 @@ onBeforeUnmount(() => {
                     </template>
                     <form v-else @submit.prevent="submitEnvironmentRequest(toolPart(part)!)">
                       <strong>Environment variable required</strong>
-                      <code>{{ environmentRequest(toolPart(part)!)!.name }}</code>
+                      <code v-for="target in environmentRequest(toolPart(part)!)!.targets" :key="`${target.serviceId}:${target.name}`">{{ environmentTargetLabel(target) }}</code>
                       <p v-if="environmentRequest(toolPart(part)!)!.description">{{ environmentRequest(toolPart(part)!)!.description }}</p>
                       <label>Value</label>
                       <input
