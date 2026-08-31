@@ -200,8 +200,8 @@ function toolLabel(part: Record<string, unknown>) {
     getAppLogs: 'Reading App logs', getServiceLogs: 'Reading Service logs', getApp: 'Inspecting App', getHostStatus: 'Inspecting host',
     setEnvironmentVariable: 'Updating application environment', listEnvironment: 'Inspecting application environment',
     inspectContainer: 'Inspecting application', requestEnvironmentVariable: 'Requesting an environment variable',
-    listManagedVolumes: 'Inspecting managed storage', inspectManagedVolume: 'Inspecting managed volume',
-    reconcileManagedVolume: 'Reconciling managed volume', deleteManagedVolume: 'Deleting managed volume',
+    listManagedVolumes: 'Inspecting managed storage', listDockerVolumes: 'Inspecting all storage', inspectManagedVolume: 'Inspecting managed volume',
+    reconcileManagedVolume: 'Reconciling managed volume', deleteManagedVolume: 'Deleting managed volume', deleteUnusedVolume: 'Deleting unused volume',
     repairStorageOwnership: 'Repairing storage ownership',
     listServiceDomains: 'Inspecting service domains', addServiceDomain: 'Adding service domain',
     removeServiceDomain: 'Removing service domain', setPrimaryServiceDomain: 'Changing primary domain',
@@ -402,6 +402,7 @@ function approvalRequest(part: Record<string, unknown>) {
 function approvalCopy(part: Record<string, unknown>) {
   const name = toolName(part);
   if (name === 'deleteManagedVolume') return { title: 'Delete this volume permanently?', detail: 'All data in this managed volume will be permanently removed.' };
+  if (name === 'deleteUnusedVolume') return { title: 'Delete this unused volume permanently?', detail: 'All data in this volume will be permanently removed. Unlabeled volumes may not have been created by HalfCloud.' };
   if (name === 'removeService') return { title: 'Remove this Service?', detail: 'The Service will be removed from its App. Managed persistent data will remain.' };
   if (name === 'repairStorageOwnership') return { title: 'Repair this storage ownership?', detail: 'The application may be briefly stopped while ownership is changed recursively.' };
   if (name === 'removeRouteProtection') return { title: 'Make this route public?', detail: 'Anyone who knows the URL will be able to access it without a password.' };

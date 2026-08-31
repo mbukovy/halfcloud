@@ -151,8 +151,10 @@ export class ApplicationService {
   getContainerLogs(id: string, tail?: number) { return this.docker.getContainerLogs(id, tail); }
   getContainerStats(id: string) { return this.docker.getContainerStats(id); }
   listManagedVolumes(filter?: ManagedVolumeFilter) { return this.docker.listManagedVolumes(filter); }
+  listDockerVolumes(unusedOnly?: boolean) { return this.docker.listDockerVolumes(unusedOnly); }
   inspectManagedVolume(volumeName: string) { return this.docker.inspectManagedVolume(volumeName); }
   deleteManagedVolume(volumeName: string) { return this.docker.deleteManagedVolume(volumeName); }
+  deleteUnusedVolume(volumeName: string) { return this.docker.deleteUnusedVolume(volumeName); }
   reconcileManagedVolume(application: string, localName: string) { return this.docker.reconcileManagedVolume(application, localName); }
   repairStorageOwnership(id: string, mountTarget: string) { return this.docker.repairStorageOwnership(id, mountTarget); }
 

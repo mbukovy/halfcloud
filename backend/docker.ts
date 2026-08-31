@@ -506,6 +506,31 @@ export class DockerService {
     return filter.orphaned === undefined ? results : results.filter((volume) => volume.orphaned === filter.orphaned);
   }
 
+  async listDockerVolumes(unusedOnly = false) {
+    const { Volumes: volumes = [] } = await this.docker.listVolumes(unusedOnly ? { filters: { dangling: ['true'] } } : {});
+    const containers = await this.docker.listContainers({ all: true });
+    const attached = new Map<string, string[]>();
+    for (const container of containers) {
+      for (const mount of container.Mounts ?? []) {
+        if (mount.Type !== 'volume' || !mount.Name) continue;
+        const names = attached.get(mount.Name) ?? [];
+        names.push(container.Names?.[0]?.replace(/^\//, '') ?? container.Id.slice(0, 12));
+        attached.set(mount.Name, names);
+      }
+    }
+    return volumes.map((volume) => ({
+      name: volume.Name,
+      driver: volume.Driver,
+      managedByHalfCloud: volume.Labels?.['halfcloud.managed'] === 'true',
+      legacyHalfCloudName: volume.Name.startsWith('halfcloud-'),
+      appId: volume.Labels?.['halfcloud.app.id'],
+      serviceId: volume.Labels?.['halfcloud.service.id'],
+      localName: volume.Labels?.['halfcloud.volume'],
+      attachedTo: attached.get(volume.Name) ?? [],
+      unused: !(attached.get(volume.Name)?.length),
+    }));
+  }
+
   async inspectManagedVolume(volumeName: string) {
     const volume = await this.managedVolume(volumeName);
     const containers = await this.docker.listContainers({ all: true });
@@ -529,6 +554,14 @@ export class DockerService {
     const volume = await this.managedVolume(volumeName);
     await this.docker.getVolume(volume.Name).remove();
     return { volumeName: volume.Name, deleted: true };
+  }
+
+  async deleteUnusedVolume(volumeName: string) {
+    if (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,254}$/.test(volumeName)) throw new Error('Invalid Docker volume name');
+    const { Volumes: volumes = [] } = await this.docker.listVolumes({ filters: { dangling: ['true'] } });
+    if (!volumes.some((volume) => volume.Name === volumeName)) throw new Error(`Docker volume ${volumeName} is not unused and was not deleted`);
+    await this.docker.getVolume(volumeName).remove();
+    return { volumeName, deleted: true };
   }
 
   async reconcileManagedVolume(application: string, localName: string) {

@@ -116,7 +116,7 @@ Rules:
 - Before changing existing storage, inspect what is already deployed. Do not delete data, replace a volume, or perform a destructive migration without clearly explaining the risk and obtaining the user's approval.
 - Use the managed storage tools to inspect or reconcile storage. Volume deletion and ownership repair require explicit approval. Ownership repair is restricted to storage already mounted by the selected HalfCloud application.
 - When the user asks about data retained after deleting an App, search managed volumes by its exact appId, not its display name. If the appId is unavailable or that search is empty, list all orphaned volumes and use their returned appId and serviceId labels to identify candidates. Never conclude retained data is absent after searching only by App name or Service ID.
-- When the user wants to reclaim storage space, list orphaned managed volumes first. Explain that deleting a volume permanently removes its data, then call deleteManagedVolume for each volume the user wants removed so the interface can collect approval.
+- When the user asks for all volumes, dangling volumes, unused volumes, or wants to reclaim storage space, use listDockerVolumes. Managed-volume listing intentionally excludes anonymous and legacy unlabeled volumes. Explain that unidentified volumes may not have been created by HalfCloud. Before deleting, explain that the data will be permanently removed, then call deleteUnusedVolume for each unused volume the user wants removed so the interface can collect approval.
 - Never stop or delete a different container to resolve a port conflict. Offer the available port reported by the tool and ask the user before changing their requested port.
 - App deletion is destructive. Persistent data is kept unless deleteData is explicitly true. Never set deleteData to true without an explicit user request to delete all data; the interface requires approval.
 - Start, stop, restart, create, logs, stats, and listing do not need confirmation when the user's intent is clear.
@@ -293,6 +293,11 @@ export async function createChatResponse(
       }),
       execute: (filter) => docker.listManagedVolumes(filter),
     }),
+    listDockerVolumes: tool({
+      description: 'List every named and anonymous volume in the HalfCloud Docker runtime, including legacy and unlabeled volumes. Use this instead of listManagedVolumes when the user asks for all, dangling, or unused volumes.',
+      inputSchema: z.object({ unusedOnly: z.boolean().default(false).describe('True returns only volumes that no existing container references') }),
+      execute: ({ unusedOnly }) => docker.listDockerVolumes(unusedOnly),
+    }),
     inspectManagedVolume: tool({
       description: 'Inspect one HalfCloud-managed named volume without exposing unmanaged Docker storage.',
       inputSchema: z.object({ volumeName: z.string().min(1) }),
@@ -307,6 +312,11 @@ export async function createChatResponse(
       description: 'Permanently delete one HalfCloud-managed named volume. Fails if it is in use and requires explicit user approval.',
       inputSchema: z.object({ volumeName: z.string().min(1) }),
       execute: ({ volumeName }) => docker.deleteManagedVolume(volumeName),
+    }),
+    deleteUnusedVolume: tool({
+      description: 'Permanently delete any volume in the HalfCloud Docker runtime, including an anonymous or legacy volume, but only if Docker still reports it as unused. Requires explicit user approval.',
+      inputSchema: z.object({ volumeName: z.string().min(1) }),
+      execute: ({ volumeName }) => docker.deleteUnusedVolume(volumeName),
     }),
     repairStorageOwnership: tool({
       description: 'Recursively repair ownership of one mounted managed storage path to match the application image user. Requires explicit user approval.',
@@ -325,7 +335,7 @@ export async function createChatResponse(
     model: createLanguageModel(settings),
     instructions: SYSTEM_PROMPT,
     tools,
-    toolApproval: { deleteApp: 'user-approval', removeService: 'user-approval', deleteManagedVolume: 'user-approval', repairStorageOwnership: 'user-approval', removeRouteProtection: 'user-approval' },
+    toolApproval: { deleteApp: 'user-approval', removeService: 'user-approval', deleteManagedVolume: 'user-approval', deleteUnusedVolume: 'user-approval', repairStorageOwnership: 'user-approval', removeRouteProtection: 'user-approval' },
   });
   const onError = (error: unknown) => {
     const details = redactProviderError(error, settings.apiKey);

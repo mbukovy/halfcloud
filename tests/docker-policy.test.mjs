@@ -148,6 +148,42 @@ test('finds orphaned managed volumes by their retained App ID', async () => {
   assert.equal(volumes[0].orphaned, true);
 });
 
+test('lists dangling volumes even when they have no HalfCloud labels', async () => {
+  let listOptions;
+  const service = Object.create(DockerService.prototype);
+  service.docker = {
+    async listVolumes(options) {
+      listOptions = options;
+      return { Volumes: [
+        { Name: '2aef48b00b0d1367', Labels: {}, Driver: 'local' },
+        { Name: 'halfcloud-mariadb-data', Labels: {}, Driver: 'local' },
+      ] };
+    },
+    async listContainers() { return []; },
+  };
+
+  const volumes = await service.listDockerVolumes(true);
+
+  assert.deepEqual(listOptions, { filters: { dangling: ['true'] } });
+  assert.deepEqual(volumes.map((volume) => ({ name: volume.name, managed: volume.managedByHalfCloud, legacy: volume.legacyHalfCloudName, unused: volume.unused })), [
+    { name: '2aef48b00b0d1367', managed: false, legacy: false, unused: true },
+    { name: 'halfcloud-mariadb-data', managed: false, legacy: true, unused: true },
+  ]);
+});
+
+test('deletes only a volume that Docker still reports as dangling', async () => {
+  const removed = [];
+  const service = Object.create(DockerService.prototype);
+  service.docker = {
+    async listVolumes() { return { Volumes: [{ Name: 'unused-volume' }] }; },
+    getVolume(name) { return { async remove() { removed.push(name); } }; },
+  };
+
+  await service.deleteUnusedVolume('unused-volume');
+  await assert.rejects(service.deleteUnusedVolume('attached-volume'), /not unused/);
+  assert.deepEqual(removed, ['unused-volume']);
+});
+
 test('creates an isolated managed bridge network for an App', async () => {
   let createOptions;
   let exists = false;
