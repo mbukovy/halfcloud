@@ -189,17 +189,17 @@ function toolGroupDetails(parts: Record<string, unknown>[]) {
 
 function toolLabel(part: Record<string, unknown>) {
   const name = toolName(part);
-  if ((name === 'createApp' || name === 'addService') && toolState(part) === 'working') {
+  if ((name === 'createApp' || name === 'addService' || name === 'createGitApp' || name === 'buildRepositoryImage') && toolState(part) === 'working') {
     if (agentStatus.value?.phase === 'pulling-image') return `Pulling ${agentStatus.value.image}`;
     if (agentStatus.value?.phase === 'activity') return agentStatus.value.label;
   }
   const labels: Record<string, string> = {
     searchContainerImages: 'Finding the right software',
-    listApps: 'Inspecting Apps', createApp: 'Creating App', addService: 'Adding Service', renameApp: 'Renaming App',
+    listApps: 'Inspecting Apps', createApp: 'Creating App', createGitApp: 'Cloning repository', inspectRepository: 'Inspecting repository', listRepositoryDirectory: 'Browsing repository', readRepositoryFile: 'Reading project file', writeRepositoryDeploymentFile: 'Preparing Docker configuration', buildRepositoryImage: 'Building application', addService: 'Adding Service', renameApp: 'Renaming App',
     startApp: 'Starting App', stopApp: 'Stopping App', restartApp: 'Restarting App', recreateApp: 'Recreating App', startService: 'Starting Service', stopService: 'Stopping Service', restartService: 'Restarting Service', recreateService: 'Recreating Service', removeService: 'Removing Service', deleteApp: 'Deleting App',
-    getAppLogs: 'Reading App logs', getServiceLogs: 'Reading Service logs', getApp: 'Inspecting App', getHostStatus: 'Inspecting host',
+    getAppLogs: 'Reading App logs', getServiceLogs: 'Reading Service logs', runDeploymentCommand: 'Initializing application', verifyGitDeployment: 'Verifying application', getApp: 'Inspecting App', getHostStatus: 'Inspecting host',
     setEnvironmentVariable: 'Updating application environment', listEnvironment: 'Inspecting application environment',
-    inspectContainer: 'Inspecting application', requestEnvironmentVariable: 'Requesting an environment variable',
+    inspectContainer: 'Inspecting application', requestEnvironmentVariable: 'Requesting an environment variable', generateEnvironmentSecret: 'Generating application secret',
     listManagedVolumes: 'Inspecting managed storage', listDockerVolumes: 'Inspecting all storage', inspectManagedVolume: 'Inspecting managed volume',
     reconcileManagedVolume: 'Reconciling managed volume', deleteManagedVolume: 'Deleting managed volume', deleteUnusedVolume: 'Deleting unused volume',
     listUnusedImages: 'Finding removable software', pruneUnusedImages: 'Removing unused software',
@@ -282,6 +282,20 @@ function toolDetails(part: Record<string, unknown>) {
 
   if (name === 'listApps') details.push({ text: 'Reading Apps, Services, status, CPU and memory' });
   if (name === 'getHostStatus') details.push({ text: 'Reading host CPU, memory, disk and uptime' });
+  if (name === 'createGitApp') {
+    if (typeof input?.name === 'string') details.push({ text: `Name: ${input.name}` });
+    if (typeof input?.repositoryUrl === 'string') details.push({ text: `Repository: ${input.repositoryUrl}` });
+    if (typeof output?.source === 'object') {
+      const source = recordValue(output.source);
+      if (typeof source?.branch === 'string') details.push({ text: `Branch: ${source.branch}` });
+      if (typeof source?.resolvedCommit === 'string') details.push({ text: `Commit: ${source.resolvedCommit.slice(0, 12)}` });
+    }
+  }
+  if (name === 'readRepositoryFile' || name === 'writeRepositoryDeploymentFile') {
+    if (typeof input?.path === 'string') details.push({ text: `File: ${input.path}` });
+  }
+  if (name === 'buildRepositoryImage' && typeof output?.image === 'string') details.push({ text: `Built: ${output.image}` });
+  if (name === 'verifyGitDeployment' && typeof output?.publicUrl === 'string') details.push({ text: output.publicUrl, href: output.publicUrl });
   if (name === 'createApp') {
     if (typeof input?.name === 'string') details.push({ text: `Name: ${input.name}` });
     if (Array.isArray(input?.services)) {
@@ -876,7 +890,7 @@ onBeforeUnmount(() => {
     <div class="workspace">
       <section id="operator-panel" class="chat-panel" :class="{ 'mobile-panel-active': mobileTab === 'operator' }" role="tabpanel">
         <div class="section-heading">
-           <div><p class="eyebrow">AI OPERATOR</p><h1>Ask HalfCloud</h1></div>
+           <div><p class="eyebrow">AI OPERATOR</p></div>
            <div class="chat-heading-actions">
              <button class="new-conversation-button" type="button" @click="newConversation">New conversation</button>
            </div>
@@ -1080,7 +1094,7 @@ onBeforeUnmount(() => {
                   <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M4 20h4l11-11a2.8 2.8 0 0 0-4-4L4 16v4Z"></path><path d="m13.5 6.5 4 4"></path></svg>
                 </button>
               </div>
-              <p>{{ app.services.length }} service{{ app.services.length === 1 ? '' : 's' }}</p>
+              <p>{{ app.services.length }} service{{ app.services.length === 1 ? '' : 's' }}<template v-if="app.source"> · {{ app.source.branch || 'resolving branch' }}<template v-if="app.source.currentCommit"> @ {{ app.source.currentCommit.slice(0, 8) }}</template></template></p>
             </div>
             <span class="state-label">{{ app.status.replace('_', ' ') }}</span>
             </div>
@@ -1089,6 +1103,7 @@ onBeforeUnmount(() => {
             <div><span>CPU</span><strong>{{ app.cpuPercent.toFixed(2) }}%</strong></div>
             <div><span>RAM</span><strong>{{ formatBytes(app.memoryUsed) }}</strong></div>
             </div>
+            <p v-if="app.source" class="single-service-image">{{ app.deployment?.message || 'Git repository deployment' }} · {{ app.source.url }}</p>
             <div class="app-services" :class="{ single: app.services.length === 1 }">
             <section v-for="service in app.services" :key="service.serviceId" class="service-card">
               <div v-if="app.services.length > 1" class="container-title service-title">
@@ -1116,7 +1131,7 @@ onBeforeUnmount(() => {
               </div>
             </section>
             </div>
-            <div class="container-actions app-actions">
+            <div v-if="app.services.length" class="container-actions app-actions">
             <button class="logs-button" :disabled="actionId === app.id" @click="showAppLogs(app)">Logs</button>
             <details class="actions-menu">
               <summary>App actions <svg aria-hidden="true" viewBox="0 0 12 12"><path d="m3 4.5 3 3 3-3"></path></svg></summary>

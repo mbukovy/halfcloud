@@ -26,7 +26,7 @@ Rootless Docker runs the daemon and containers without host root privileges and 
 
 ## The AI has tools, not a terminal
 
-The model can call only operations defined by HalfCloud. There is no shell, arbitrary Docker API proxy, file browser, or SSH tool.
+The model can call only operations defined by HalfCloud. There is no host shell, arbitrary Docker API proxy, general file browser, or SSH tool. For Git-backed Apps, repository tools are read-only except for Dockerfile variants and `.dockerignore`; all paths are confined to that App's persistent checkout and file contents are bounded.
 
 The deployment API rejects:
 
@@ -82,13 +82,13 @@ Protect the access code as an administrator credential. Restrict network access 
 
 ## Runtime controls
 
-Created Services use `no-new-privileges`, a process limit of 512, rootless networking, localhost-only publication, and bounded log rotation. Images cannot request extra privileges through HalfCloud.
+Created Services use `no-new-privileges`, a process limit of 512, rootless networking, localhost-only publication, and bounded log rotation. Images cannot request extra privileges through HalfCloud. Public repositories are cloned without credentials, hooks, or submodules, and their code runs only in rootless Docker builds or managed containers rather than directly on the host.
 
-HalfCloud does not currently enforce CPU, memory, or disk quotas. A buggy or malicious image may exhaust server resources, attack other Services in the same App network, send outbound traffic, or exploit a kernel or runtime vulnerability. Per-App networks reduce accidental cross-App access but are not a substitute for trusting images, patching the host, or enforcing resource controls.
+HalfCloud does not currently enforce CPU, memory, or disk quotas. A buggy or malicious image or repository build may exhaust server resources, attack other Services in the same App network, send outbound traffic, or exploit a kernel or runtime vulnerability. Per-App networks reduce accidental cross-App access but are not a substitute for trusting images and source repositories, patching the host, or enforcing resource controls.
 
 ## AI and prompt-injection risk
 
-The model sees user messages, tool results, and potentially application logs. Untrusted text in logs or application output may attempt to manipulate the model. The fixed tool boundary limits what such manipulation can achieve, while approval gates protect selected high-impact actions, but prompt injection is not solved in general.
+The model sees user messages, selected repository files, tool results, build output, and potentially application logs. All repository and runtime content is treated as untrusted data and may attempt to manipulate the model. The fixed tool boundary limits what such manipulation can achieve, while approval gates protect selected high-impact actions, but prompt injection is not solved in general.
 
 Review proposed operations, especially changes involving secrets, storage, or deletion. Chat content is sent to the configured Azure endpoint, so do not submit information that provider should not process.
 

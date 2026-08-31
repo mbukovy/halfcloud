@@ -35,6 +35,13 @@ export interface ContainerImageSearchResult {
   source: 'Docker Hub';
 }
 
+export interface BuildImageInput {
+  context: string;
+  dockerfile: string;
+  entries: string[];
+  image: string;
+}
+
 export type DeploymentProgress =
   | { phase: 'pulling-image'; image: string }
   | { phase: 'activity'; label: string }
@@ -225,6 +232,53 @@ export class DockerService {
   async ensureAppNetwork(appId: string) {
     const network = await createOrReuseAppNetwork(this.docker, appId);
     return { name: network.Name, driver: network.Driver };
+  }
+
+  async buildImage(input: BuildImageInput) {
+    if (!/^halfcloud\/[a-z0-9._-]+:[a-z0-9._-]+$/.test(input.image)) throw new Error('Invalid managed build image name');
+    if (!input.entries.length || input.entries.length > 20_000) throw new Error('Invalid Docker build context');
+    const timeoutMs = Math.min(Math.max(Number(process.env.HALFCLOUD_BUILD_TIMEOUT_MS ?? 600_000), 30_000), 1_800_000);
+    const abortController = new AbortController();
+    const timer = setTimeout(() => abortController.abort(), timeoutMs);
+    const messages: string[] = [];
+    try {
+      const stream = await this.docker.buildImage(
+        { context: input.context, src: input.entries },
+        {
+          dockerfile: input.dockerfile,
+          t: input.image,
+          pull: true,
+          rm: true,
+          forcerm: true,
+          labels: { 'halfcloud.managed': 'true', 'halfcloud.source': 'git' },
+          version: '2',
+          abortSignal: abortController.signal,
+        },
+      );
+      const collectMessage = (event: unknown) => {
+        if (typeof event !== 'object' || event === null) return;
+        const value = event as { stream?: unknown; status?: unknown; error?: unknown; errorDetail?: { message?: unknown } };
+        const message = typeof value.errorDetail?.message === 'string' ? value.errorDetail.message
+          : typeof value.error === 'string' ? value.error
+            : typeof value.stream === 'string' ? value.stream
+              : typeof value.status === 'string' ? value.status
+                : '';
+        if (message) messages.push(message.trimEnd());
+      };
+      await new Promise<void>((resolve, reject) => {
+        const buildProgress = this.docker as unknown as { followProgress: (stream: NodeJS.ReadableStream, complete: (error?: Error) => void, progress: (event: unknown) => void) => void };
+        buildProgress.followProgress(stream, (error) => error ? reject(error) : resolve(), collectMessage);
+      });
+      const inspection = await this.docker.getImage(input.image).inspect();
+      return { image: input.image, imageId: inspection.Id, logs: messages.join('\n').slice(-32 * 1024) };
+    } catch (error) {
+      if (abortController.signal.aborted) throw new Error(`Application build timed out after ${Math.round(timeoutMs / 1000)} seconds`);
+      const detail = error instanceof Error ? error.message : 'Docker build failed';
+      const logs = messages.join('\n').slice(-32 * 1024);
+      throw new Error(logs ? `${detail}\n${logs}`.slice(-32 * 1024) : detail);
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   async listContainers(includeStats = true) {
@@ -450,6 +504,35 @@ export class DockerService {
     const container = await this.managedContainer(id);
     await container.restart({ t: 10 });
     return { containerId: container.id, state: 'running' };
+  }
+
+  async runContainerCommand(id: string, command: string[]) {
+    if (!command.length || command.length > 32 || command.some((part) => !part || part.length > 4096 || part.includes('\0'))) throw new Error('Deployment command must contain 1-32 bounded arguments');
+    const container = await this.managedContainer(id);
+    const containerInspection = await container.inspect();
+    if (!containerInspection.State.Running) throw new Error('Deployment commands require a running Service');
+    const execution = await container.exec({ Cmd: command, AttachStdout: true, AttachStderr: true });
+    const abortController = new AbortController();
+    const timer = setTimeout(() => abortController.abort(), 300_000);
+    try {
+      const output = await execution.start({ hijack: true, stdin: false, abortSignal: abortController.signal });
+      await new Promise<void>((resolve, reject) => {
+        output.on('data', () => undefined);
+        output.once('end', resolve);
+        output.once('error', reject);
+      });
+    } catch (error) {
+      if (abortController.signal.aborted) {
+        const stopped = await container.stop({ t: 5 }).then(() => true, () => false);
+        throw new Error(stopped ? 'Deployment command timed out after 300 seconds and the Service was stopped' : 'Deployment command timed out after 300 seconds; HalfCloud could not confirm that the Service stopped');
+      }
+      throw error;
+    } finally {
+      clearTimeout(timer);
+    }
+    const inspection = await execution.inspect();
+    if (inspection.ExitCode !== 0) throw new Error(`Deployment command failed with exit code ${inspection.ExitCode}`);
+    return { containerId: container.id, exitCode: inspection.ExitCode, completed: true };
   }
 
   async recreateContainer(id: string) {

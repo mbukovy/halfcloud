@@ -24,7 +24,7 @@ HalfCloud 0.1:
 
 - supports Ubuntu 22.04 or newer on amd64 and arm64;
 - is intended for a fresh, dedicated VPS;
-- deploys existing container images, not source repositories;
+- deploys existing container images and public HTTPS Git repositories;
 - groups one or more Services into each App and isolates Apps on separate private networks;
 - manages public HTTPS routes, custom domains, and optional per-domain password protection;
 - uses Azure OpenAI or an Azure AI Foundry-compatible endpoint;

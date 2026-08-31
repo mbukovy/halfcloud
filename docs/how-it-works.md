@@ -95,6 +95,7 @@ Each public Service's domain state stores stable route IDs, hostnames, primary s
 | `/home/halfcloudrunner/.halfcloud/data/apps.json` | Immutable App IDs, display names, and App timestamps |
 | `/home/halfcloudrunner/.halfcloud/apps/<app-id>` | App-owned managed bind data and runtime environment file |
 | `/home/halfcloudrunner/.halfcloud/apps/<service-id>` | Service environment metadata, domain state, and trusted-input request metadata |
+| `/home/halfcloudrunner/.halfcloud/repositories/<app-id>/repository` | Persistent deployment-source checkout for a Git-backed App |
 | `/home/halfcloudrunner/.local/share/docker` | Rootless Docker images, containers, named volumes, and metadata |
 | `/etc/systemd/system/halfcloud.service` | Host systemd service definition |
 | `/etc/caddy/Caddyfile` | Initial Caddy configuration; runtime configuration is loaded through the local admin API |

@@ -84,7 +84,7 @@ When installation finishes, it prints:
 
 Open the address, enter the code, connect your Azure OpenAI account, and tell HalfCloud what you want to run.
 
-HalfCloud currently needs an existing app packaged as a container image. Support for deploying directly from source code is not available yet.
+HalfCloud can deploy an existing container image or a public HTTPS Git repository. For example, ask it to `Deploy https://github.com/owner/repository`; it keeps a persistent checkout, inspects the project, builds it with Docker, and deploys the resulting Services as one App.
 
 Before using a server that contains anything important, read [Install, uninstall, and update](docs/install-uninstall-update.md). The current uninstaller permanently removes HalfCloud, its applications, and its server data.
 

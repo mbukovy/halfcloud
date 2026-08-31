@@ -1,10 +1,11 @@
-import { randomUUID } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { AppStore } from './apps.js';
 import { CaddyService } from './caddy.js';
 import { DockerService, type CreateContainerInput, type DeploymentProgress, type ManagedVolumeFilter, type SearchContainerImagesInput } from './docker.js';
 import { DomainStore, normalizeHostname, type ServiceDomain } from './domains.js';
 import { EnvironmentStore, assertEnvironmentVariableName, environmentRequestTargets, serializeEnvironmentForAgent, type EnvironmentTarget, type EnvironmentVariable } from './environment.js';
 import { RouteAccessRequestStore, assertBasicAuthPassword, assertBasicAuthUsername, hashBasicAuthPassword } from './route-access.js';
+import { RepositoryService, validatePublicGitUrl } from './repositories.js';
 
 export class ApplicationService {
   constructor(
@@ -15,6 +16,7 @@ export class ApplicationService {
     private readonly accessRequests = new RouteAccessRequestStore(),
     private readonly hashPassword: (password: string) => Promise<string> = hashBasicAuthPassword,
     private readonly apps = new AppStore(),
+    private readonly repositories = new RepositoryService(apps),
   ) {}
 
   ping() { return this.docker.ping(); }
@@ -38,7 +40,9 @@ export class ApplicationService {
       const appServices = services.filter((service) => service.appId === app.id);
       const running = appServices.filter((service) => service.state === 'running').length;
       const failed = appServices.some((service) => ['dead', 'restarting'].includes(service.state));
-      const status = !appServices.length ? 'failed' : running === appServices.length ? 'running' : running === 0 ? 'stopped' : failed ? 'degraded' : 'partially_running';
+      const status = !appServices.length
+        ? app.deployment?.status === 'in_progress' ? 'deploying' : 'failed'
+        : running === appServices.length ? 'running' : running === 0 ? 'stopped' : failed ? 'degraded' : 'partially_running';
       return {
         ...app,
         status,
@@ -77,21 +81,88 @@ export class ApplicationService {
     }
   }
 
+  async createGitApp(input: { name: string; repositoryUrl: string; branch?: string }, onProgress?: (progress: DeploymentProgress) => void) {
+    const repositoryUrl = validatePublicGitUrl(input.repositoryUrl);
+    const now = new Date().toISOString();
+    const app = await this.apps.create(input.name, {
+      source: { type: 'git', url: repositoryUrl, ...(input.branch ? { branch: input.branch } : {}) },
+      deployment: { status: 'in_progress', stage: 'cloning', message: 'Cloning repository', buildAttempts: 0, updatedAt: now },
+    });
+    onProgress?.({ phase: 'activity', label: 'Cloning repository' });
+    let result;
+    try {
+      result = await this.repositories.clone(app.id, repositoryUrl, input.branch);
+    } catch (error) {
+      await this.repositories.fail(app.id, 'cloning', error).catch(() => undefined);
+      throw error;
+    }
+    onProgress?.({ phase: 'activity', label: 'Inspecting repository' });
+    try {
+      const inspection = await this.repositories.inspect(app.id);
+      return { ...result, inspection };
+    } catch (error) {
+      await this.repositories.fail(app.id, 'inspecting', error).catch(() => undefined);
+      throw error;
+    }
+  }
+
+  async inspectRepository(appIdOrName: string) {
+    try {
+      return await this.repositories.inspect(appIdOrName);
+    } catch (error) {
+      await this.repositories.fail(appIdOrName, 'inspecting', error).catch(() => undefined);
+      throw error;
+    }
+  }
+  listRepositoryDirectory(appIdOrName: string, repositoryPath?: string) { return this.repositories.listDirectory(appIdOrName, repositoryPath); }
+  readRepositoryFile(appIdOrName: string, repositoryPath: string) { return this.repositories.readFile(appIdOrName, repositoryPath); }
+  writeRepositoryDeploymentFile(appIdOrName: string, repositoryPath: string, content: string) { return this.repositories.writeDeploymentFile(appIdOrName, repositoryPath, content); }
+
+  async buildRepositoryImage(appIdOrName: string, contextPath = '.', dockerfilePath = 'Dockerfile', onProgress?: (progress: DeploymentProgress) => void) {
+    try {
+      const build = await this.repositories.buildContext(appIdOrName, contextPath, dockerfilePath);
+      onProgress?.({ phase: 'activity', label: 'Building application' });
+      const result = await this.docker.buildImage(build);
+      await this.repositories.buildSucceeded(appIdOrName, result.image);
+      return { appId: (await this.apps.get(appIdOrName)).id, commit: build.commit, ...result };
+    } catch (error) {
+      await this.repositories.fail(appIdOrName, 'building', error);
+      throw error;
+    }
+  }
+
   async addService(appIdOrName: string, input: Omit<CreateContainerInput, 'appId' | 'serviceId' | 'serviceName' | 'publicName' | 'name' | 'start'> & { name: string }, onProgress?: (progress: DeploymentProgress) => void) {
     const app = await this.apps.get(appIdOrName);
-    const name = this.serviceName(input.name);
-    const existing = (await this.getApp(app.id, false)).services;
-    if (existing.some((service) => service.name === name)) throw new Error(`Service ${name} already exists in ${app.name}`);
-    await this.createServiceRecord(app.id, { ...input, name }, onProgress);
-    onProgress?.({ phase: 'activity', label: `Verifying ${name}` });
-    return this.getApp(app.id);
+    const sourceDeployment = app.source?.type === 'git' && app.source.resolvedCommit !== app.source.currentCommit;
+    if (sourceDeployment) await this.repositories.setStage(app.id, 'deploying', `Preparing ${input.name}`);
+    try {
+      const name = this.serviceName(input.name);
+      const existing = (await this.getApp(app.id, false)).services;
+      if (existing.some((service) => service.name === name)) throw new Error(`Service ${name} already exists in ${app.name}`);
+      await this.createServiceRecord(app.id, { ...input, name }, onProgress);
+      onProgress?.({ phase: 'activity', label: `Verifying ${name}` });
+      return this.getApp(app.id);
+    } catch (error) {
+      if (sourceDeployment) await this.repositories.fail(app.id, 'deploying', error);
+      throw error;
+    }
   }
 
   async renameApp(appIdOrName: string, name: string) {
     return this.apps.renameApp(appIdOrName, name);
   }
 
-  async startApp(idOrName: string) { return this.appAction(idOrName, (id) => this.startContainer(id), (state) => state !== 'running'); }
+  async startApp(idOrName: string) {
+    const app = await this.apps.get(idOrName);
+    const sourceDeployment = app.source?.type === 'git' && app.source.resolvedCommit !== app.source.currentCommit;
+    if (sourceDeployment) await this.repositories.setStage(app.id, 'deploying', 'Starting application');
+    try {
+      return await this.appAction(app.id, (id) => this.startContainer(id), (state) => state !== 'running');
+    } catch (error) {
+      if (sourceDeployment) await this.repositories.fail(app.id, 'deploying', error);
+      throw error;
+    }
+  }
   async stopApp(idOrName: string) { return this.appAction(idOrName, (id) => this.stopContainer(id), (state) => state === 'running'); }
   async restartApp(idOrName: string) { return this.appAction(idOrName, (id) => this.restartContainer(id)); }
   async recreateApp(idOrName: string) {
@@ -110,6 +181,7 @@ export class ApplicationService {
       }
     }
     await this.apps.deleteApp(app.id);
+    await this.repositories.delete(app.id);
     await this.syncRoutes();
     return { appId: app.id, appName: app.name, deleted: true, persistentDataDeleted: deleteData };
   }
@@ -133,7 +205,17 @@ export class ApplicationService {
     return matches[0]!;
   }
 
-  async startService(appIdOrName: string, serviceIdOrName: string) { return this.startContainer((await this.service(appIdOrName, serviceIdOrName)).id); }
+  async startService(appIdOrName: string, serviceIdOrName: string) {
+    const app = await this.apps.get(appIdOrName);
+    const sourceDeployment = app.source?.type === 'git' && app.source.resolvedCommit !== app.source.currentCommit;
+    if (sourceDeployment) await this.repositories.setStage(app.id, 'deploying', `Starting ${serviceIdOrName}`);
+    try {
+      return await this.startContainer((await this.service(app.id, serviceIdOrName)).id);
+    } catch (error) {
+      if (sourceDeployment) await this.repositories.fail(app.id, 'deploying', error);
+      throw error;
+    }
+  }
   async stopService(appIdOrName: string, serviceIdOrName: string) { return this.stopContainer((await this.service(appIdOrName, serviceIdOrName)).id); }
   async restartService(appIdOrName: string, serviceIdOrName: string) { return this.restartContainer((await this.service(appIdOrName, serviceIdOrName)).id); }
   async recreateService(appIdOrName: string, serviceIdOrName: string) {
@@ -150,6 +232,55 @@ export class ApplicationService {
   }
   getContainerLogs(id: string, tail?: number) { return this.docker.getContainerLogs(id, tail); }
   getContainerStats(id: string) { return this.docker.getContainerStats(id); }
+  async runDeploymentCommand(appIdOrName: string, serviceIdOrName: string, command: string[]) {
+    const app = await this.apps.get(appIdOrName);
+    if (app.source?.type !== 'git') throw new Error('Deployment commands are available only for Git-backed Apps');
+    if (!app.source.resolvedCommit || app.source.resolvedCommit === app.source.currentCommit) throw new Error('Deployment commands require a pending Git deployment');
+    const attempts = (app.deployment?.initializationAttempts ?? 0) + 1;
+    if (attempts > 3) throw new Error('Initialization command retry limit reached');
+    const service = await this.service(app.id, serviceIdOrName);
+    await this.repositories.setStage(app.id, 'initializing', `Initializing ${service.name} (attempt ${attempts} of 3)`, { initializationAttempts: attempts });
+    try {
+      return await this.docker.runContainerCommand(service.id, command);
+    } catch (error) {
+      await this.repositories.fail(app.id, 'initializing', error);
+      throw error;
+    }
+  }
+
+  async verifyGitDeployment(appIdOrName: string, serviceIdOrName?: string, healthPath = '/') {
+    const appRecord = await this.apps.get(appIdOrName);
+    if (appRecord.source?.type !== 'git') throw new Error('Only Git-backed Apps have a source deployment to verify');
+    if (!healthPath.startsWith('/') || healthPath.includes('\0') || healthPath.length > 500) throw new Error('Health path must be a bounded absolute URL path');
+    await this.repositories.setStage(appRecord.id, 'verifying', 'Verifying application');
+    try {
+      const app = await this.getApp(appRecord.id, false);
+      if (!app.services.length) throw new Error('Deployment has no Services');
+      if (app.services.some((service) => service.state !== 'running')) throw new Error('Every Service must be running before deployment can complete');
+      const builtImage = appRecord.deployment?.image;
+      if (!builtImage) throw new Error('Deployment does not have a successfully built repository image');
+      const builtServices = app.services.filter((service) => service.image === builtImage);
+      if (!builtServices.length) throw new Error('No deployed Service uses the image built from this repository commit');
+      const target = serviceIdOrName ? await this.service(app.id, serviceIdOrName) : builtServices.find((service) => service.ports.some((port) => port.protocol === 'tcp'));
+      let publicUrl: string | undefined;
+      if (target) {
+        if (target.image !== builtImage) throw new Error('The verified web Service does not use the image built from this repository commit');
+        const port = target.ports.find((candidate) => candidate.protocol === 'tcp');
+        if (!port) throw new Error(`${target.name} does not publish an HTTP port`);
+        await this.checkTcpPort(port.host);
+        const domain = target.domains.find((candidate) => candidate.managed) ?? target.domains.find((candidate) => candidate.primary) ?? target.domains[0];
+        if (!domain) throw new Error(`${target.name} does not have a public domain`);
+        publicUrl = `https://${domain.hostname}${healthPath}`;
+        const response = await fetch(publicUrl, { redirect: 'manual', signal: AbortSignal.timeout(10_000) });
+        if (response.status >= 500) throw new Error(`Application health check returned HTTP ${response.status}`);
+      }
+      const updated = await this.repositories.markDeployed(app.id);
+      return { appId: app.id, commit: updated.source?.currentCommit, verified: true, ...(publicUrl ? { publicUrl } : {}) };
+    } catch (error) {
+      await this.repositories.fail(appRecord.id, 'verifying', error);
+      throw error;
+    }
+  }
   listManagedVolumes(filter?: ManagedVolumeFilter) { return this.docker.listManagedVolumes(filter); }
   listDockerVolumes(unusedOnly?: boolean) { return this.docker.listDockerVolumes(unusedOnly); }
   inspectManagedVolume(volumeName: string) { return this.docker.inspectManagedVolume(volumeName); }
@@ -252,6 +383,12 @@ export class ApplicationService {
       description: request.description,
       status: request.status,
     };
+  }
+
+  async generateEnvironmentSecret(id: string, name: string, additionalTargets: EnvironmentTarget[] = [], bytes = 32) {
+    if (!Number.isInteger(bytes) || bytes < 16 || bytes > 128) throw new Error('Generated secret size must be between 16 and 128 bytes');
+    const request = await this.requestEnvironmentVariable(id, name, 'Generated securely by HalfCloud', additionalTargets);
+    return this.completeEnvironmentRequest(id, request.requestId, randomBytes(bytes).toString('base64url'), true);
   }
 
   async completeEnvironmentRequest(id: string, requestId: string, value: string, protectedFromAI = true) {
@@ -550,5 +687,15 @@ export class ApplicationService {
     const results = [];
     for (const service of app.services) if (applies(service.state)) results.push(await action(service.id));
     return { appId: app.id, services: results };
+  }
+
+  private async checkTcpPort(port: number) {
+    const net = await import('node:net');
+    await new Promise<void>((resolve, reject) => {
+      const socket = net.createConnection({ host: '127.0.0.1', port });
+      const timer = setTimeout(() => socket.destroy(new Error('Application port did not become reachable')), 5_000);
+      socket.once('connect', () => { clearTimeout(timer); socket.destroy(); resolve(); });
+      socket.once('error', (error) => { clearTimeout(timer); reject(error); });
+    });
   }
 }

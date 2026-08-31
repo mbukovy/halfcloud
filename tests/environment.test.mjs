@@ -111,6 +111,28 @@ test('one protected request applies the same value to multiple Services', async 
   assert.equal(JSON.stringify(completed).includes('same-secret'), false);
 });
 
+test('generated environment secrets are protected and never returned to the agent', async (t) => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'halfcloud-environment-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const store = new EnvironmentStore(directory);
+  const environments = new Map([['service_web', {}]]);
+  const services = [{ id: 'container_web', serviceId: 'service_web', appId: 'app_web', runtimeName: 'web-runtime', name: 'web', ports: [] }];
+  const docker = {
+    listContainers: async () => services,
+    getContainerEnvironment: async (id) => ({ containerId: id, name: id, environment: environments.get(id) ?? {} }),
+    replaceContainerEnvironment: async (id, environment) => { environments.set(id, environment); return { containerId: id }; },
+  };
+  const applications = new ApplicationService(docker, { sync: async () => undefined }, { get: async () => [] }, store);
+
+  const result = await applications.generateEnvironmentSecret('service_web', 'APP_SECRET', [], 32);
+  const generated = environments.get('service_web').APP_SECRET;
+
+  assert.equal(typeof generated, 'string');
+  assert.ok(generated.length >= 40);
+  assert.equal((await store.list('service_web')).find((variable) => variable.name === 'APP_SECRET').protectedFromAI, true);
+  assert.equal(JSON.stringify(result).includes(generated), false);
+});
+
 test('shared environment requests reject targets outside the App', async (t) => {
   const directory = await mkdtemp(path.join(tmpdir(), 'halfcloud-environment-'));
   t.after(() => rm(directory, { recursive: true, force: true }));

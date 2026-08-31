@@ -9,6 +9,7 @@ An **App** is the primary unit in HalfCloud. It contains one or more **Services*
 ### Deploy Apps and Services
 
 - Create a single-service App from an existing container image.
+- Clone, inspect, build, and deploy a public HTTPS Git repository.
 - Create a multi-service App, such as WordPress with MySQL.
 - Add a database, cache, queue, worker, or other Service to an existing App.
 - Give every App an immutable internal ID and a separately editable display name.
@@ -75,7 +76,7 @@ See [Why is it safe?](why-is-it-safe.md) for the complete security model and its
 
 HalfCloud 0.1 is intended for Apps on one dedicated server. It does not currently:
 
-- deploy from a Git repository or build source code;
+- authenticate to private Git repositories or automatically deploy new commits;
 - move a Service between Apps;
 - connect Services across Apps through private networking;
 - provide shared databases across Apps;

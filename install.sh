@@ -87,7 +87,7 @@ run_user npm --prefix "${INSTALL_DIR}" ci
 run_user npm --prefix "${INSTALL_DIR}" run build
 run_user npm --prefix "${INSTALL_DIR}" prune --omit=dev
 install -d -o "${HALFCLOUD_USER}" -g "${HALFCLOUD_USER}" -m 700 \
-  "${DATA_DIR}/config" "${DATA_DIR}/data" "${DATA_DIR}/apps" "${DATA_DIR}/logs" "${DATA_DIR}/secrets"
+  "${DATA_DIR}/config" "${DATA_DIR}/data" "${DATA_DIR}/apps" "${DATA_DIR}/repositories" "${DATA_DIR}/logs" "${DATA_DIR}/secrets"
 
 public_ip="$(curl --ipv4 -fsS --max-time 10 https://api.ipify.org || curl --ipv4 -fsS --max-time 10 https://ifconfig.me/ip || true)"
 public_ip="${public_ip//$'\n'/}"
@@ -106,6 +106,7 @@ PORT=9000
 HOME=${HALFCLOUD_HOME}
 HALFCLOUD_DATA_DIR=${DATA_DIR}/data
 HALFCLOUD_APPS_DIR=${DATA_DIR}/apps
+HALFCLOUD_REPOSITORIES_DIR=${DATA_DIR}/repositories
 HALFCLOUD_ACCESS_CODE_FILE=${DATA_DIR}/secrets/access-code
 HALFCLOUD_SESSION_SECRET=${session_secret}
 HALFCLOUD_HOSTNAME=${hostname}

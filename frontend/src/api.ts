@@ -38,13 +38,30 @@ export interface ContainerInfo {
 export interface AppInfo {
   id: string;
   name: string;
-  status: 'running' | 'partially_running' | 'stopped' | 'degraded' | 'failed';
+  status: 'running' | 'partially_running' | 'stopped' | 'degraded' | 'failed' | 'deploying';
   services: ContainerInfo[];
   cpuPercent: number;
   memoryUsed: number;
   runningServices: number;
   createdAt: string;
   updatedAt: string;
+  source?: {
+    type: 'git';
+    url: string;
+    branch?: string;
+    resolvedCommit?: string;
+    currentCommit?: string;
+  };
+  deployment?: {
+    status: 'in_progress' | 'running' | 'failed';
+    stage: 'cloning' | 'inspecting' | 'planning' | 'preparing' | 'building' | 'deploying' | 'initializing' | 'verifying' | 'running' | 'failed';
+    message?: string;
+    errorCode?: 'invalid_url' | 'not_found' | 'not_public' | 'dns_failure' | 'network_failure' | 'clone_failed' | 'inspection_failed' | 'build_failed' | 'deployment_failed' | 'initialization_failed' | 'verification_failed';
+    buildAttempts?: number;
+    initializationAttempts?: number;
+    image?: string;
+    updatedAt: string;
+  };
 }
 
 export interface ServiceDomain {
