@@ -170,14 +170,17 @@ input:focus, textarea:focus { border-color: var(--ink); box-shadow: 0 0 0 3px #1
 .empty-containers small { font-size: 11px; }
 .container-card { margin: 0 18px 14px; background: var(--panel); border: 1px solid var(--line); border-radius: 4px; padding: 18px; }
 .app-card { padding: 0; overflow: hidden; }
-.app-card-summary { display: grid; width: 100%; grid-template-columns: minmax(90px, 2fr) minmax(0, 3fr) 14px; align-items: center; gap: 12px; padding: 10px 12px; border: 0; background: transparent; color: var(--ink); text-align: left; cursor: pointer; }
+.app-card-summary { position: relative; display: grid; width: 100%; grid-template-columns: minmax(90px, 2fr) minmax(0, 3fr) 14px; align-items: center; gap: 12px; padding: 10px 12px; color: var(--ink); text-align: left; }
 .app-card-summary:hover { background: #faf9f5; }
-.app-card-summary:focus-visible { position: relative; z-index: 1; outline: 2px solid var(--ink); outline-offset: -2px; }
-.app-card-summary > strong { min-width: 0; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.app-card-summary > svg { width: 12px; height: 12px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; color: var(--muted); transition: transform .15s ease; }
+.app-card-summary:focus-within { z-index: 1; }
+.app-card-summary:has(.app-card-toggle:focus-visible) { outline: 2px solid var(--ink); outline-offset: -2px; }
+.app-card-toggle { position: absolute; inset: 0; width: 100%; border: 0; background: transparent; cursor: pointer; }
+.app-card-summary > strong { position: relative; min-width: 0; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; pointer-events: none; }
+.app-card-summary > svg { position: relative; width: 12px; height: 12px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; color: var(--muted); transition: transform .15s ease; pointer-events: none; }
 .app-card.expanded .app-card-summary > svg { transform: rotate(180deg); }
-.app-card-domains { display: flex; min-width: 0; flex-wrap: wrap; justify-content: flex-end; gap: 3px 8px; color: #50615a; font: 9px 'DM Mono', monospace; }
-.app-card-domains > span { overflow-wrap: anywhere; }
+.app-card-domains { position: relative; z-index: 1; display: flex; min-width: 0; flex-wrap: wrap; justify-content: flex-end; gap: 3px 8px; font: 9px 'DM Mono', monospace; }
+.app-card-domains > a { color: #50615a; overflow-wrap: anywhere; text-decoration-color: #50615a66; text-underline-offset: 2px; }
+.app-card-domains > a:hover { color: var(--accent); text-decoration-color: currentColor; }
 .app-card-expanded { padding: 18px; border-top: 1px solid var(--line); }
 .app-card.multi-service .app-card-expanded { padding-bottom: 14px; }
 .app-title h3 { font-size: 17px; }

@@ -872,21 +872,23 @@ onBeforeUnmount(() => {
           <span>00</span><p>No Apps yet.</p><small>Ask HalfCloud to deploy one.</small>
         </div>
         <article v-for="app in apps" :key="app.id" class="container-card app-card" :class="{ 'multi-service': app.services.length > 1, expanded: expandedAppIds.has(app.id) }">
-          <button
-            class="app-card-summary"
-            type="button"
-            :aria-expanded="expandedAppIds.has(app.id)"
-            :aria-controls="`app-details-${app.id}`"
-            @click="toggleApp(app.id)"
-          >
+          <div class="app-card-summary">
+            <button
+              class="app-card-toggle"
+              type="button"
+              :aria-label="`${expandedAppIds.has(app.id) ? 'Collapse' : 'Expand'} ${app.name}`"
+              :aria-expanded="expandedAppIds.has(app.id)"
+              :aria-controls="`app-details-${app.id}`"
+              @click="toggleApp(app.id)"
+            ></button>
             <strong>{{ app.name }}</strong>
             <span class="app-card-domains">
               <template v-for="service in app.services" :key="service.serviceId">
-                <span v-for="domain in service.domains" :key="domain.hostname">{{ domain.hostname }}</span>
+                <a v-for="domain in service.domains" :key="domain.hostname" :href="`https://${domain.hostname}`" target="_blank" rel="noopener noreferrer">{{ domain.hostname }}</a>
               </template>
             </span>
             <svg aria-hidden="true" viewBox="0 0 12 12"><path d="m3 4.5 3 3 3-3"></path></svg>
-          </button>
+          </div>
           <div v-show="expandedAppIds.has(app.id)" :id="`app-details-${app.id}`" class="app-card-expanded">
             <div class="container-title app-title">
             <span class="status-dot" :class="app.status === 'running' ? 'running' : 'exited'"></span>
