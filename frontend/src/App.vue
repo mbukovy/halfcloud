@@ -688,6 +688,8 @@ async function newConversation() {
   agentStatus.value = null;
   agentErrorDetails.value = null;
   continuedRequestIds.clear();
+  await nextTick();
+  composerInput.value?.focus();
 }
 
 async function runAction(container: ContainerInfo, action: 'start' | 'stop' | 'restart' | 'delete') {
