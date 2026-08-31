@@ -918,7 +918,7 @@ onBeforeUnmount(() => {
                     <strong>{{ approvalCopy(toolPart(part)!).title }}</strong>
                     <p>{{ approvalCopy(toolPart(part)!).detail }}</p>
                     <div>
-                      <button class="confirm" type="button" :disabled="Boolean(respondingApprovalId)" @click="respondToApproval(toolPart(part)!, true)">Confirm</button>
+                      <button class="confirm" type="button" :disabled="Boolean(respondingApprovalId)" @click="respondToApproval(toolPart(part)!, true)">Continue</button>
                       <button type="button" :disabled="Boolean(respondingApprovalId)" @click="respondToApproval(toolPart(part)!, false)">Dismiss</button>
                     </div>
                   </div>
