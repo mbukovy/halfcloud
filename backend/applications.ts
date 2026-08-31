@@ -155,6 +155,8 @@ export class ApplicationService {
   inspectManagedVolume(volumeName: string) { return this.docker.inspectManagedVolume(volumeName); }
   deleteManagedVolume(volumeName: string) { return this.docker.deleteManagedVolume(volumeName); }
   deleteUnusedVolume(volumeName: string) { return this.docker.deleteUnusedVolume(volumeName); }
+  listUnusedImages() { return this.docker.listUnusedImages(); }
+  pruneUnusedImages() { return this.docker.pruneUnusedImages(); }
   reconcileManagedVolume(application: string, localName: string) { return this.docker.reconcileManagedVolume(application, localName); }
   repairStorageOwnership(id: string, mountTarget: string) { return this.docker.repairStorageOwnership(id, mountTarget); }
 

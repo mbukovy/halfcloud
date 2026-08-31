@@ -117,6 +117,7 @@ Rules:
 - Use the managed storage tools to inspect or reconcile storage. Volume deletion and ownership repair require explicit approval. Ownership repair is restricted to storage already mounted by the selected HalfCloud application.
 - When the user asks about data retained after deleting an App, search managed volumes by its exact appId, not its display name. If the appId is unavailable or that search is empty, list all orphaned volumes and use their returned appId and serviceId labels to identify candidates. Never conclude retained data is absent after searching only by App name or Service ID.
 - When the user asks for all volumes, dangling volumes, unused volumes, or wants to reclaim storage space, use listDockerVolumes. Managed-volume listing intentionally excludes anonymous and legacy unlabeled volumes. Explain that unidentified volumes may not have been created by HalfCloud. Before deleting, explain that the data will be permanently removed, then call deleteUnusedVolume for each unused volume the user wants removed so the interface can collect approval.
+- When the user asks to free disk space without naming a technical resource, inspect host status, unused volumes, and unused software images before recommending cleanup. Explain that unused software can be downloaded again, while unused storage may contain irreplaceable App data. Present both categories separately and never treat a general cleanup request as permission to delete retained storage.
 - Never stop or delete a different container to resolve a port conflict. Offer the available port reported by the tool and ask the user before changing their requested port.
 - App deletion is destructive. Persistent data is kept unless deleteData is explicitly true. Never set deleteData to true without an explicit user request to delete all data; the interface requires approval.
 - Start, stop, restart, create, logs, stats, and listing do not need confirmation when the user's intent is clear.
@@ -318,6 +319,16 @@ export async function createChatResponse(
       inputSchema: z.object({ volumeName: z.string().min(1) }),
       execute: ({ volumeName }) => docker.deleteUnusedVolume(volumeName),
     }),
+    listUnusedImages: tool({
+      description: 'List software images that are not referenced by any existing container, including stopped containers, and report their total listed size. Use this with unused-volume and host inspection for general disk cleanup requests.',
+      inputSchema: z.object({}),
+      execute: () => docker.listUnusedImages(),
+    }),
+    pruneUnusedImages: tool({
+      description: 'Delete all software images not referenced by any existing container. Running and stopped Apps remain protected. Removed software may need to be downloaded again. Requires explicit user approval.',
+      inputSchema: z.object({}),
+      execute: () => docker.pruneUnusedImages(),
+    }),
     repairStorageOwnership: tool({
       description: 'Recursively repair ownership of one mounted managed storage path to match the application image user. Requires explicit user approval.',
       inputSchema: z.object({ containerId: serviceId, mountTarget: z.string().startsWith('/') }),
@@ -335,7 +346,7 @@ export async function createChatResponse(
     model: createLanguageModel(settings),
     instructions: SYSTEM_PROMPT,
     tools,
-    toolApproval: { deleteApp: 'user-approval', removeService: 'user-approval', deleteManagedVolume: 'user-approval', deleteUnusedVolume: 'user-approval', repairStorageOwnership: 'user-approval', removeRouteProtection: 'user-approval' },
+    toolApproval: { deleteApp: 'user-approval', removeService: 'user-approval', deleteManagedVolume: 'user-approval', deleteUnusedVolume: 'user-approval', pruneUnusedImages: 'user-approval', repairStorageOwnership: 'user-approval', removeRouteProtection: 'user-approval' },
   });
   const onError = (error: unknown) => {
     const details = redactProviderError(error, settings.apiKey);

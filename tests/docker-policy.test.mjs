@@ -184,6 +184,42 @@ test('deletes only a volume that Docker still reports as dangling', async () => 
   assert.deepEqual(removed, ['unused-volume']);
 });
 
+test('lists only images unused by running or stopped containers', async () => {
+  const service = Object.create(DockerService.prototype);
+  service.docker = {
+    async listImages() {
+      return [
+        { Id: 'sha256:used', RepoTags: ['nextcloud:latest'], Size: 100, Created: 10 },
+        { Id: 'sha256:unused', RepoTags: ['old-app:latest'], Size: 250, Created: 20 },
+        { Id: 'sha256:dangling', RepoTags: ['<none>:<none>'], Size: 50, Created: 30 },
+      ];
+    },
+    async listContainers() { return [{ ImageID: 'sha256:used' }]; },
+  };
+
+  const result = await service.listUnusedImages();
+
+  assert.deepEqual(result.images.map((image) => ({ id: image.id, names: image.names })), [
+    { id: 'sha256:unused', names: ['old-app:latest'] },
+    { id: 'sha256:dangling', names: [] },
+  ]);
+  assert.equal(result.totalSize, 300);
+});
+
+test('prunes all images not referenced by an existing container', async () => {
+  let pruneOptions;
+  const service = Object.create(DockerService.prototype);
+  service.docker = {
+    async pruneImages(options) {
+      pruneOptions = options;
+      return { ImagesDeleted: [{ Deleted: 'sha256:unused' }], SpaceReclaimed: 4096 };
+    },
+  };
+
+  assert.deepEqual(await service.pruneUnusedImages(), { deleted: 1, spaceReclaimed: 4096 });
+  assert.deepEqual(pruneOptions, { filters: { dangling: ['false'] } });
+});
+
 test('creates an isolated managed bridge network for an App', async () => {
   let createOptions;
   let exists = false;

@@ -202,6 +202,7 @@ function toolLabel(part: Record<string, unknown>) {
     inspectContainer: 'Inspecting application', requestEnvironmentVariable: 'Requesting an environment variable',
     listManagedVolumes: 'Inspecting managed storage', listDockerVolumes: 'Inspecting all storage', inspectManagedVolume: 'Inspecting managed volume',
     reconcileManagedVolume: 'Reconciling managed volume', deleteManagedVolume: 'Deleting managed volume', deleteUnusedVolume: 'Deleting unused volume',
+    listUnusedImages: 'Finding removable software', pruneUnusedImages: 'Removing unused software',
     repairStorageOwnership: 'Repairing storage ownership',
     listServiceDomains: 'Inspecting service domains', addServiceDomain: 'Adding service domain',
     removeServiceDomain: 'Removing service domain', setPrimaryServiceDomain: 'Changing primary domain',
@@ -325,6 +326,8 @@ function toolDetails(part: Record<string, unknown>) {
     const match = apps.value.flatMap((app) => app.services.flatMap((service) => service.domains)).find((domain) => domain.id === input.routeId);
     details.push({ text: `Route: ${match?.hostname ?? input.routeId}` });
   }
+  if (name === 'pruneUnusedImages') details.push({ text: 'Software: all images unused by existing Apps' });
+  if (name === 'listUnusedImages' && Array.isArray(output?.images)) details.push({ text: `Found ${output.images.length} unused software image${output.images.length === 1 ? '' : 's'}` });
   if (name === 'listApps' && Array.isArray(part.output)) details.push({ text: `Found ${part.output.length} App${part.output.length === 1 ? '' : 's'}` });
   if (typeof part.errorText === 'string') details.push({ text: part.errorText });
   return details;
@@ -408,6 +411,7 @@ function approvalCopy(part: Record<string, unknown>) {
   const targets = toolDetails(part).map((detail) => detail.text);
   if (name === 'deleteManagedVolume') return { title: 'Delete this volume permanently?', detail: 'All data in this managed volume will be permanently removed.', targets };
   if (name === 'deleteUnusedVolume') return { title: 'Delete this unused volume permanently?', detail: 'All data in this volume will be permanently removed. Unlabeled volumes may not have been created by HalfCloud.', targets };
+  if (name === 'pruneUnusedImages') return { title: 'Remove all unused software?', detail: 'Apps and saved data will remain. Removed software will be downloaded again if it is needed later.', targets };
   if (name === 'removeService') return { title: 'Remove this Service?', detail: 'The Service will be removed from its App. Managed persistent data will remain.', targets };
   if (name === 'repairStorageOwnership') return { title: 'Repair this storage ownership?', detail: 'The application may be briefly stopped while ownership is changed recursively.', targets };
   if (name === 'removeRouteProtection') return { title: 'Make this route public?', detail: 'Anyone who knows the URL will be able to access it without a password.', targets };

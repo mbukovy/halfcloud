@@ -564,6 +564,29 @@ export class DockerService {
     return { volumeName, deleted: true };
   }
 
+  async listUnusedImages() {
+    const [images, containers] = await Promise.all([
+      this.docker.listImages({ all: true }),
+      this.docker.listContainers({ all: true }),
+    ]);
+    const usedImageIds = new Set(containers.map((container) => container.ImageID));
+    const unused = images.filter((image) => !usedImageIds.has(image.Id)).map((image) => ({
+      id: image.Id,
+      names: image.RepoTags?.filter((name) => name !== '<none>:<none>') ?? [],
+      size: image.Size,
+      createdAt: new Date(image.Created * 1000).toISOString(),
+    }));
+    return { images: unused, totalSize: unused.reduce((total, image) => total + image.size, 0) };
+  }
+
+  async pruneUnusedImages() {
+    const result = await this.docker.pruneImages({ filters: { dangling: ['false'] } });
+    return {
+      deleted: result.ImagesDeleted?.length ?? 0,
+      spaceReclaimed: result.SpaceReclaimed ?? 0,
+    };
+  }
+
   async reconcileManagedVolume(application: string, localName: string) {
     if (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$/.test(application)) throw new Error('Invalid application name');
     if (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$/.test(localName)) throw new Error('Invalid local volume name');
