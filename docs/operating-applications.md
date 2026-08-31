@@ -20,6 +20,8 @@ Deploy WordPress with MySQL.
 
 HalfCloud creates one **WordPress** App containing `wordpress` and `mysql` Services. It does not create a separate database App.
 
+New Services are staged in a stopped state. HalfCloud configures their complete first-run environment, including values entered through protected credential prompts, before starting them. This prevents databases and other initialization-sensitive images from saving incomplete credentials to persistent storage.
+
 To extend an existing App:
 
 ```text

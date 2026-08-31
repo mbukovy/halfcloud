@@ -11,10 +11,13 @@ import { RouteAccessRequestStore } from '../dist/backend/route-access.js';
 
 class FakeDocker {
   services = [];
+  created = [];
+  started = [];
   restarted = [];
   networksDeleted = [];
 
   async createContainer(input) {
+    this.created.push(input);
     const service = {
       id: `container-${this.services.length + 1}`,
       name: input.serviceName,
@@ -22,8 +25,8 @@ class FakeDocker {
       appId: input.appId,
       runtimeName: input.name,
       image: input.image,
-      state: 'running',
-      status: 'Up',
+      state: input.start === false ? 'exited' : 'running',
+      status: input.start === false ? 'Created' : 'Up',
       ports: [],
       internalPorts: [],
       cpuPercent: 0,
@@ -31,10 +34,16 @@ class FakeDocker {
       memoryLimit: 0,
     };
     this.services.push(service);
-    return { id: service.id, name: service.name, running: true, steps: [] };
+    return { id: service.id, name: service.name, running: service.state === 'running', steps: [] };
   }
 
   async listContainers() { return this.services; }
+  async startContainer(id) {
+    this.started.push(id);
+    const service = this.services.find((candidate) => candidate.id === id);
+    if (service) service.state = 'running';
+    return { containerId: id, state: 'running' };
+  }
   async restartContainer(id) { this.restarted.push(id); return { containerId: id, state: 'running' }; }
   async deleteContainer(id) { this.services = this.services.filter((service) => service.id !== id); }
   async deleteAppNetwork(id) { this.networksDeleted.push(id); return { deleted: true }; }
@@ -65,13 +74,19 @@ test('deploys WordPress and MySQL as Services in one App and adds Redis to it', 
   });
 
   assert.equal(app.name, 'WordPress');
+  assert.equal(app.status, 'stopped');
   assert.deepEqual(app.services.map((service) => service.name), ['wordpress', 'mysql']);
+  assert.equal(runtime.created.every((service) => service.start === false), true);
   assert.equal(new Set(runtime.services.map((service) => service.appId)).size, 1);
   assert.notEqual(runtime.services[0].runtimeName, runtime.services[0].name);
 
   const withRedis = await applications.addService('WordPress', { name: 'redis', image: 'redis:latest', ports: {} });
   assert.deepEqual(withRedis.services.map((service) => service.name), ['wordpress', 'mysql', 'redis']);
+  assert.equal(withRedis.services.find((service) => service.name === 'redis').state, 'exited');
   assert.equal((await applications.listApps()).length, 1);
+
+  await applications.startApp('WordPress');
+  assert.deepEqual(runtime.started, ['container-1', 'container-2', 'container-3']);
 
   const renamed = await applications.renameApp(app.id, 'Company Website');
   assert.equal(renamed.id, app.id);

@@ -17,6 +17,7 @@ export interface CreateContainerInput {
   namedVolumes?: Record<string, string>;
   volumes?: Record<string, string>;
   hostname?: string;
+  start?: boolean;
 }
 
 export interface SearchContainerImagesInput {
@@ -400,8 +401,11 @@ export class DockerService {
       NetworkingConfig: { EndpointsConfig: { [networkName]: { Aliases: [input.serviceName] } } },
     });
     try {
-      onProgress?.({ phase: 'activity', label: `Starting ${input.serviceName}` });
-      await container.start();
+      const shouldStart = input.start !== false;
+      if (shouldStart) {
+        onProgress?.({ phase: 'activity', label: `Starting ${input.serviceName}` });
+        await container.start();
+      }
       const inspection = await container.inspect();
       return {
         id: inspection.Id,
@@ -409,7 +413,14 @@ export class DockerService {
         image,
         running: inspection.State.Running,
         ports: input.ports,
-        steps: ['Validated rootless deployment policy', `Connected to ${networkName} network`, 'Checked published ports', pulled ? `Pulled ${image}` : `Found ${image} locally`, 'Created service', 'Started service'],
+        steps: [
+          'Validated rootless deployment policy',
+          `Connected to ${networkName} network`,
+          'Checked published ports',
+          pulled ? `Pulled ${image}` : `Found ${image} locally`,
+          'Created service',
+          shouldStart ? 'Started service' : 'Staged service for configuration',
+        ],
       };
     } catch (error) {
       await container.remove({ force: true }).catch(() => undefined);

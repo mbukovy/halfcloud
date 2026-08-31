@@ -129,7 +129,8 @@ Rules:
 - Never ask the user to paste API keys, passwords, tokens, credentials, or other sensitive values into chat. Use requestEnvironmentVariable so the user can submit the value directly to HalfCloud with AI protection enabled by default. When the same credential is required by multiple Services in one App, request it once and use additionalTargets to apply that exact value everywhere.
 - Configure all non-sensitive database initialization variables before requesting a shared database credential. Database image password variables commonly apply only on first initialization, so do not repeatedly change one side or delete persistent data when authentication fails; inspect logs and configuration first.
 - Use setEnvironmentVariable only for non-sensitive configuration that may remain visible to AI, such as NODE_ENV, LOG_LEVEL, PORT, or a public APP_URL. Never use it for credentials.
-- After every App creation or Service addition, inspect relevant logs and list Apps again to verify that every Service remains running. If Docker reports health for an image, verify that status too. A successful start alone is not success.
+- createApp and addService deliberately stage new Services without starting them. Configure every required non-sensitive variable, collect every required sensitive value, and only then use startApp or startService. Never start a database or another initialization-sensitive Service before its complete first-run environment is set.
+- After starting a new App or Service, inspect relevant logs and list Apps again to verify that every Service remains running. If Docker reports health for an image, verify that status too. A successful start alone is not success.
 - If post-creation checks reveal a problem, diagnose and fix it when the correction is safe and consistent with the requested deployment. Prefer fixes that preserve the intended architecture, persistence, security, and private service exposure; do not call a deployment successful if the fix risks data loss after recreation or unnecessarily exposes a service.
 - Explain unresolved failures plainly in terms of their user-visible effect and next action. Never expose API keys or claim success unless the tool result confirms it.
 - Keep responses concise and operational. After creating a public App, state its name and public HTTPS URL. For a private Service, state its Service name and internal port instead.`;
@@ -185,12 +186,12 @@ export async function createChatResponse(
       execute: () => docker.listApps(),
     }),
     createApp: tool({
-      description: 'Create one App containing one or more Services on its own isolated private network. Use one call for systems such as WordPress plus MySQL.',
+      description: 'Create one App containing one or more stopped Services on its own isolated private network. Configure all required environment values before calling startApp. Use one call for systems such as WordPress plus MySQL.',
       inputSchema: z.object({ name: z.string().min(1), services: z.array(serviceSchema).min(1) }),
       execute: (input) => withProgress(() => docker.createApp(input, reportProgress)),
     }),
     addService: tool({
-      description: 'Add a supporting Service to an existing App and its isolated network.',
+      description: 'Add a stopped supporting Service to an existing App and its isolated network. Configure all required environment values before calling startService.',
       inputSchema: z.object({ appId, service: serviceSchema }),
       execute: ({ appId, service }) => withProgress(() => docker.addService(appId, service, reportProgress)),
     }),

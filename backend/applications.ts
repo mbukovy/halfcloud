@@ -55,7 +55,7 @@ export class ApplicationService {
     return (await this.listApps(includeStats)).find((candidate) => candidate.id === app.id)!;
   }
 
-  async createApp(input: { name: string; services: Array<Omit<CreateContainerInput, 'appId' | 'serviceId' | 'serviceName' | 'publicName' | 'name'> & { name: string }> }, onProgress?: (progress: DeploymentProgress) => void) {
+  async createApp(input: { name: string; services: Array<Omit<CreateContainerInput, 'appId' | 'serviceId' | 'serviceName' | 'publicName' | 'name' | 'start'> & { name: string }> }, onProgress?: (progress: DeploymentProgress) => void) {
     if (!input.services.length) throw new Error('An App requires at least one Service');
     const names = input.services.map((service) => this.serviceName(service.name));
     if (new Set(names).size !== names.length) throw new Error('Service names must be unique within an App');
@@ -77,7 +77,7 @@ export class ApplicationService {
     }
   }
 
-  async addService(appIdOrName: string, input: Omit<CreateContainerInput, 'appId' | 'serviceId' | 'serviceName' | 'publicName' | 'name'> & { name: string }, onProgress?: (progress: DeploymentProgress) => void) {
+  async addService(appIdOrName: string, input: Omit<CreateContainerInput, 'appId' | 'serviceId' | 'serviceName' | 'publicName' | 'name' | 'start'> & { name: string }, onProgress?: (progress: DeploymentProgress) => void) {
     const app = await this.apps.get(appIdOrName);
     const name = this.serviceName(input.name);
     const existing = (await this.getApp(app.id, false)).services;
@@ -525,14 +525,14 @@ export class ApplicationService {
     return `${name.toLowerCase()}.${domain}`;
   }
 
-  private async createServiceRecord(appId: string, input: Omit<CreateContainerInput, 'appId' | 'serviceId' | 'serviceName' | 'publicName' | 'name'> & { name: string }, onProgress?: (progress: DeploymentProgress) => void) {
+  private async createServiceRecord(appId: string, input: Omit<CreateContainerInput, 'appId' | 'serviceId' | 'serviceName' | 'publicName' | 'name' | 'start'> & { name: string }, onProgress?: (progress: DeploymentProgress) => void) {
     const serviceId = `service_${randomUUID()}`;
     const runtimeName = `hc_${appId.slice(4, 12)}_${serviceId.slice(8, 16)}`;
     const app = await this.apps.get(appId);
     const existingServices = (await this.listContainers(false)).filter((service) => service.appId === appId);
     const appSlug = app.name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || app.id.slice(4, 12);
     const publicName = existingServices.length ? `${appSlug}-${input.name}`.slice(0, 63).replace(/-$/, '') : appSlug.slice(0, 63);
-    return this.createContainer({ ...input, appId, serviceId, serviceName: input.name, publicName, name: runtimeName }, onProgress);
+    return this.createContainer({ ...input, appId, serviceId, serviceName: input.name, publicName, name: runtimeName, start: false }, onProgress);
   }
 
   private serviceName(value: string) {
