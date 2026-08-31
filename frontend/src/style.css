@@ -183,8 +183,10 @@ input:focus, textarea:focus { border-color: var(--ink); box-shadow: 0 0 0 3px #1
 .app-card-summary > svg { position: relative; width: 12px; height: 12px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; color: var(--muted); transition: transform .15s ease; pointer-events: none; }
 .app-card.expanded .app-card-summary > svg { transform: rotate(180deg); }
 .app-card-domains { position: relative; z-index: 1; display: flex; min-width: 0; flex-wrap: wrap; justify-content: flex-end; gap: 3px 8px; font: 9px 'DM Mono', monospace; }
-.app-card-domains > a { color: #50615a; overflow-wrap: anywhere; text-decoration-color: #50615a66; text-underline-offset: 2px; }
+.app-card-domains > a { display: inline-flex; align-items: center; gap: 3px; color: #50615a; overflow-wrap: anywhere; text-decoration-color: #50615a66; text-underline-offset: 2px; }
 .app-card-domains > a:hover { color: var(--accent); text-decoration-color: currentColor; }
+.app-card-domains > a.protected { color: #8b4b34; }
+.app-card-domains > a > svg { flex: 0 0 10px; width: 10px; height: 10px; fill: none; stroke: currentColor; stroke-width: 1.2; stroke-linecap: round; stroke-linejoin: round; }
 .app-card-expanded { padding: 18px; border-top: 1px solid var(--line); }
 .app-card.multi-service .app-card-expanded { padding-bottom: 14px; }
 .app-title h3 { font-size: 17px; }

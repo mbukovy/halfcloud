@@ -967,7 +967,19 @@ onBeforeUnmount(() => {
             <strong>{{ app.name }}</strong>
             <span class="app-card-domains">
               <template v-for="service in app.services" :key="service.serviceId">
-                <a v-for="domain in service.domains" :key="domain.hostname" :href="`https://${domain.hostname}`" target="_blank" rel="noopener noreferrer">{{ domain.hostname }}</a>
+                <a
+                  v-for="domain in service.domains"
+                  :key="domain.hostname"
+                  :href="`https://${domain.hostname}`"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  :class="{ protected: domain.access.type === 'basic_auth' }"
+                  :aria-label="domain.access.type === 'basic_auth' ? `${domain.hostname}, password protected` : domain.hostname"
+                  :title="domain.access.type === 'basic_auth' ? 'Password protected' : undefined"
+                >
+                  <svg v-if="domain.access.type === 'basic_auth'" aria-hidden="true" viewBox="0 0 12 12"><rect x="2.5" y="5" width="7" height="5.5" rx="1"></rect><path d="M4 5V3.5a2 2 0 0 1 4 0V5"></path></svg>
+                  {{ domain.hostname }}
+                </a>
               </template>
             </span>
             <svg aria-hidden="true" viewBox="0 0 12 12"><path d="m3 4.5 3 3 3-3"></path></svg>
@@ -1014,7 +1026,7 @@ onBeforeUnmount(() => {
                 <div class="domains-heading"><span>DOMAINS{{ app.services.length > 1 ? ` · ${service.name}` : '' }}</span></div>
                 <div v-for="domain in service.domains" :key="domain.hostname" class="domain-row">
                   <span class="domain-state" :class="domain.state"></span>
-                  <div class="domain-name"><strong>{{ domain.hostname }}</strong><small><b v-if="domain.primary">Primary</b><b v-if="domain.managed">HalfCloud domain</b><span>{{ domain.httpsReady ? 'HTTPS ready' : domain.dnsConfigured ? 'HTTPS pending' : `Point DNS to ${domain.dnsTarget || 'this server'}` }}</span></small></div>
+                  <div class="domain-name"><strong>{{ domain.hostname }}</strong><small><b v-if="domain.primary">Primary</b><b v-if="domain.managed">HalfCloud domain</b><span class="access-state" :class="domain.access.type">{{ domain.access.type === 'basic_auth' ? 'Password protected' : 'Public' }}</span><span>{{ domain.httpsReady ? 'HTTPS ready' : domain.dnsConfigured ? 'HTTPS pending' : `Point DNS to ${domain.dnsTarget || 'this server'}` }}</span></small></div>
                   <div class="domain-actions"><a :href="`https://${domain.hostname}`" target="_blank" rel="noopener noreferrer">Open</a><button v-if="!domain.primary" :disabled="domainAction === `${service.id}:${domain.hostname}`" @click="setPrimaryDomain(service, domain)">Make primary</button></div>
                 </div>
               </section>
