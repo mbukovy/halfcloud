@@ -1,38 +1,50 @@
-<p align="center">
-  <img src="frontend/public/halfcloud-logo-ui.png" width="192" alt="HalfCloud logo">
-</p>
+<h1 align="center">HalfCloud
+  <p align="center">
+    <img src="frontend/public/halfcloud-logo-ui.png" width="192" alt="HalfCloud logo">
+  </p>
+</h1>
 
-# HalfCloud
+Open-source, AI-operated platform that makes deploying and running web apps on your own server as simple as using a managed cloud.
 
 > **HalfCloud is under active development. It is not ready for production apps yet.**
 
-## Your app is built. Now put it online.
+# HalfCloud
 
-Building an app has never been easier.
+**Vibe coding made building software dramatically easier. DevOps should follow the same path.**
 
-You can describe an idea, watch AI write the code, and have something working by the end of the day. Then comes the part nobody asked for:
+Today, you can describe an app in plain English and have AI help you build it in minutes. But the moment you want to run that app on your own server, the old complexity comes back: Docker, reverse proxies, TLS, environment variables, databases, logs, networking, deployments, updates.
 
-- setting up a server;
-- figuring out domains and HTTPS;
-- running databases and background jobs;
-- restarting things when they break;
-- reading logs that make no sense.
+HalfCloud brings the same AI-first experience to infrastructure.
 
-HalfCloud is built to handle that part.
+It is an open-source, AI-operated platform for deploying and running web applications and services on your own servers. Instead of learning infrastructure tooling or clicking through endless dashboards, you simply tell HalfCloud what you want:
 
-Give it a server, open the chat, and tell it what you want:
+- **“Deploy this GitHub repo”**
+- **“Run n8n”**
+- **“Deploy the best free alternative to Notion”**
+- **“Put this app behind a password”**
+- **“Connect my domain”**
 
-> Put my app online.
+HalfCloud figures out the rest.
 
-> Run n8n for me.
+You keep the flexibility and economics of your own infrastructure, without turning every project into a DevOps project.
 
-> Add a database for my app.
+## Why HalfCloud?
 
-> Why is my website down?
+|                              | ☁️ Hyperscalers         | ▲ Vercel / Render          | 🟠 HalfCloud                                                 |
+| ---------------------------- | ----------------------- | -------------------------- | ------------------------------------------------------------ |
+| **Promise**                  | Maximum power           | Maximum convenience        | **Both, without the lock-in**                                |
+| **Your infrastructure**      | ❌                       | ❌                          | ✅                                                            |
+| **Deploy experience**        | 😵 Complex              | 🙂 Easy                    | ✨ **Easy**                                                   |
+| **Run databases & services** | ✅                       | ⚠️ Limited / opinionated   | ✅ **Anything Docker can run**                                |
+| **Operational model**        | DevOps team             | Managed platform           | 🤖 **AI-operated**                                           |
+| **Control**                  | ✅ High                  | ⚠️ Limited                 | ✅ **High**                                                   |
+| **Vendor lock-in**           | 🔒 High                 | 🔒 High                    | 🔓 **Low**                                                   |
+| **Cost at scale**            | 💸 Complex              | 💸💸 Expensive             | 💰 **Just your server**                                      |
+| **Open source**              | ❌                       | ❌                          | ✅                                                            |
+| **Best for**                 | Enterprises with DevOps | Apps that fit the platform | **Anyone who wants their own cloud without becoming DevOps** |
 
-> Fix it and restart it.
 
-HalfCloud does the server work for you.
+**Your servers. Zero complexity.**
 
 ## Hosting that speaks your language
 
@@ -51,22 +63,6 @@ HalfCloud gives you one simple place to:
 
 There are no configuration files to memorize and no maze of cloud dashboards. Describe the result you want and HalfCloud works out the steps.
 
-## One small server, your own cloud
-
-HalfCloud runs on a VPS: an affordable computer you rent online. Providers such as Hetzner, DigitalOcean, Linode, Vultr, and many others can give you one in a few minutes.
-
-That single server can hold your website, API, database, automations, workers, and other tools together. Each App gets an isolated private network, while its Services can reach one another by name.
-
-You pay for the server instead of paying separately for every small piece of your app. Your apps and their data stay on infrastructure you control, without locking them into a custom hosting platform.
-
-## AI that helps without owning the server
-
-HalfCloud's AI can perform the everyday actions needed to run your apps, but it does not receive an unrestricted administrator terminal.
-
-It works through a limited set of built-in actions. Selected high-impact operations ask for confirmation, and applications are kept away from the sensitive parts of the server by default.
-
-This does not make hosting risk-free, but it is a more careful approach than giving an AI full control and hoping for the best.
-
 ## Install
 
 For HalfCloud 0.1, start with a new Ubuntu 22.04 or newer VPS that is not being used for anything else. Choose an amd64 or arm64 server with a public IPv4 address, and make sure web traffic on ports 80 and 443 is allowed.
@@ -82,11 +78,9 @@ When installation finishes, it prints:
 - a secure web address for your HalfCloud dashboard;
 - an access code used to sign in.
 
-Open the address, enter the code, connect your Azure OpenAI account, and tell HalfCloud what you want to run.
+Open the address, enter the code, connect your AI provider, and tell HalfCloud what you want to run.
 
-HalfCloud can deploy an existing container image or a public HTTPS Git repository. For example, ask it to `Deploy https://github.com/owner/repository`; it keeps a persistent checkout, inspects the project, builds it with Docker, and deploys the resulting Services as one App.
-
-Before using a server that contains anything important, read [Install, uninstall, and update](docs/install-uninstall-update.md). The current uninstaller permanently removes HalfCloud, its applications, and its server data.
+> Before using a server that contains anything important, read [Install, uninstall, and update](docs/install-uninstall-update.md). The current uninstaller permanently removes HalfCloud, its applications, and its server data.
 
 ## Learn more
 
