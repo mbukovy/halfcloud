@@ -48,15 +48,21 @@ export interface AppInfo {
   source?: {
     type: 'git';
     url: string;
+    gitUrl?: string;
+    provider?: 'github';
+    owner?: string;
+    repository?: string;
+    settingsUrl?: string;
+    authentication?: 'ssh-deploy-key';
     branch?: string;
     resolvedCommit?: string;
     currentCommit?: string;
   };
   deployment?: {
     status: 'in_progress' | 'running' | 'failed';
-    stage: 'cloning' | 'inspecting' | 'planning' | 'preparing' | 'building' | 'deploying' | 'initializing' | 'verifying' | 'running' | 'failed';
+    stage: 'cloning' | 'awaiting_deploy_key' | 'inspecting' | 'planning' | 'preparing' | 'building' | 'deploying' | 'initializing' | 'verifying' | 'running' | 'failed';
     message?: string;
-    errorCode?: 'invalid_url' | 'not_found' | 'not_public' | 'dns_failure' | 'network_failure' | 'clone_failed' | 'inspection_failed' | 'build_failed' | 'deployment_failed' | 'initialization_failed' | 'verification_failed';
+    errorCode?: 'invalid_url' | 'not_found' | 'not_public' | 'authentication_required' | 'host_verification_failed' | 'dns_failure' | 'network_failure' | 'clone_failed' | 'inspection_failed' | 'build_failed' | 'deployment_failed' | 'initialization_failed' | 'verification_failed';
     buildAttempts?: number;
     initializationAttempts?: number;
     image?: string;

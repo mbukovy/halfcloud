@@ -56,6 +56,8 @@ Environment management has separate administrator and agent representations. The
 
 Route-password setup follows a similar split. The agent requests a credential form for a stable route ID, but the browser submits the password directly to the local API. Caddy hashes it with Argon2id, and HalfCloud persists only the hash. The username and completion status may return to the conversation; the password and hash do not.
 
+Private GitHub setup also uses a deterministic service boundary. HalfCloud creates one Ed25519 deploy key per App, displays only its public half, verifies GitHub against a pinned host key, and performs Git operations with the private key outside the browser and AI context. Verification can be retried with the same key.
+
 ## App creation
 
 When creating an App, HalfCloud:
@@ -96,6 +98,8 @@ Each public Service's domain state stores stable route IDs, hostnames, primary s
 | `/home/halfcloudrunner/.halfcloud/apps/<app-id>` | App-owned managed bind data and runtime environment file |
 | `/home/halfcloudrunner/.halfcloud/apps/<service-id>` | Service environment metadata, domain state, and trusted-input request metadata |
 | `/home/halfcloudrunner/.halfcloud/repositories/<app-id>/repository` | Persistent deployment-source checkout for a Git-backed App |
+| `/home/halfcloudrunner/.halfcloud/repositories/<app-id>/id_ed25519` | App-scoped private Git deploy key, readable only by the HalfCloud runtime user |
+| `/home/halfcloudrunner/.halfcloud/repositories/<app-id>/metadata.json` | Persistent repository URL, provider, branch, and authentication metadata |
 | `/home/halfcloudrunner/.local/share/docker` | Rootless Docker images, containers, named volumes, and metadata |
 | `/etc/systemd/system/halfcloud.service` | Host systemd service definition |
 | `/etc/caddy/Caddyfile` | Initial Caddy configuration; runtime configuration is loaded through the local admin API |

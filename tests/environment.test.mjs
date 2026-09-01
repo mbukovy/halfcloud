@@ -268,3 +268,31 @@ test('provider-bound history strips injected values from environment request rec
     { serviceId: 'service_mysql', name: 'MYSQL_PASSWORD' },
   ]);
 });
+
+test('provider-bound repository setup history never includes private key fields', () => {
+  const messages = [{
+    id: 'message',
+    role: 'assistant',
+    parts: [{
+      type: 'tool-createGitApp',
+      input: { name: 'Private App', repositoryUrl: 'https://github.com/example/private-app', privateKey: 'never-send-this' },
+      output: {
+        appId: 'app_one',
+        privateKey: 'never-send-this',
+        repositorySetup: {
+          appId: 'app_one',
+          status: 'pending',
+          repository: 'example/private-app',
+          settingsUrl: 'https://github.com/example/private-app/settings/keys',
+          publicKey: 'ssh-ed25519 public',
+          privateKey: 'never-send-this',
+        },
+      },
+    }],
+  }];
+
+  const sanitized = sanitizeAgentMessages(messages);
+  const serialized = JSON.stringify(sanitized);
+  assert.equal(serialized.includes('never-send-this'), false);
+  assert.equal(sanitized[0].parts[0].output.repositorySetup.publicKey, 'ssh-ed25519 public');
+});

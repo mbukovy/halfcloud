@@ -1,11 +1,15 @@
 import assert from 'node:assert/strict';
-import { mkdir, rm, symlink, writeFile } from 'node:fs/promises';
+import { execFile } from 'node:child_process';
+import { mkdir, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
+import { promisify } from 'node:util';
 import { mkdtemp } from 'node:fs/promises';
 import { AppStore } from '../dist/backend/apps.js';
-import { RepositoryService, validatePublicGitUrl } from '../dist/backend/repositories.js';
+import { RepositoryService, normalizeRepositoryUrl, validatePublicGitUrl } from '../dist/backend/repositories.js';
+
+const exec = promisify(execFile);
 
 test('accepts public HTTPS Git URLs and rejects local or credential-bearing forms', () => {
   assert.equal(validatePublicGitUrl('https://github.com/example/project.git'), 'https://github.com/example/project.git');
@@ -13,6 +17,86 @@ test('accepts public HTTPS Git URLs and rejects local or credential-bearing form
   assert.throws(() => validatePublicGitUrl('file:///tmp/project'), /must use an HTTPS URL/);
   assert.throws(() => validatePublicGitUrl('https://user:secret@example.com/project.git'), /cannot contain credentials/);
   assert.throws(() => validatePublicGitUrl('https://localhost/project.git'), /public host/);
+});
+
+test('normalizes common GitHub repository URLs and builds provider setup metadata', () => {
+  assert.deepEqual(normalizeRepositoryUrl('https://github.com/example/private-app'), {
+    originalUrl: 'https://github.com/example/private-app',
+    gitUrl: 'git@github.com:example/private-app.git',
+    provider: 'github',
+    owner: 'example',
+    repository: 'private-app',
+    settingsUrl: 'https://github.com/example/private-app/settings/keys',
+    requiresSsh: false,
+  });
+  assert.equal(normalizeRepositoryUrl('git@github.com:example/private-app.git').requiresSsh, true);
+  assert.equal(normalizeRepositoryUrl('ssh://git@github.com/example/private-app.git').originalUrl, 'https://github.com/example/private-app.git');
+  assert.throws(() => normalizeRepositoryUrl('ssh://root@github.com/example/private-app.git'), /must use git@github.com/);
+  assert.throws(() => normalizeRepositoryUrl('https://github.com/example/private-app?token=secret'), /query parameters/);
+});
+
+test('creates one persistent restricted deploy key per App and reuses it', async (t) => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'halfcloud-deploy-key-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const data = path.join(directory, 'data');
+  const repositories = path.join(directory, 'repositories');
+  const apps = new AppStore(data);
+  const app = await apps.create('Private App', {
+    source: { type: 'git', url: 'https://github.com/example/private-app' },
+    deployment: { status: 'in_progress', stage: 'cloning', buildAttempts: 0, updatedAt: new Date().toISOString() },
+  });
+  const service = new RepositoryService(apps, repositories);
+
+  const first = await service.preparePrivateAccess(app.id);
+  const second = await service.preparePrivateAccess(app.id);
+  const root = path.join(repositories, app.id);
+  const privateKey = await readFile(path.join(root, 'id_ed25519'), 'utf8');
+  const metadata = JSON.parse(await readFile(path.join(root, 'metadata.json'), 'utf8'));
+
+  assert.equal(first.publicKey, second.publicKey);
+  assert.match(first.publicKey, /^ssh-ed25519 /);
+  assert.equal((await stat(path.join(root, 'id_ed25519'))).mode & 0o777, 0o600);
+  assert.equal((await stat(root)).mode & 0o777, 0o700);
+  assert.equal(metadata.authentication, 'ssh-deploy-key');
+  assert.equal(metadata.settingsUrl, 'https://github.com/example/private-app/settings/keys');
+  assert.equal(JSON.stringify(first).includes(privateKey), false);
+  assert.equal((await apps.get(app.id)).deployment.stage, 'awaiting_deploy_key');
+
+  await service.delete(app.id);
+  await assert.rejects(stat(root), (error) => error.code === 'ENOENT');
+});
+
+test('recovers a completed private checkout after restart before metadata was updated', async (t) => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'halfcloud-private-resume-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const data = path.join(directory, 'data');
+  const repositories = path.join(directory, 'repositories');
+  const apps = new AppStore(data);
+  const app = await apps.create('Interrupted Clone', {
+    source: { type: 'git', url: 'https://github.com/example/private-app' },
+    deployment: { status: 'in_progress', stage: 'cloning', updatedAt: new Date().toISOString() },
+  });
+  const service = new RepositoryService(apps, repositories);
+  await service.preparePrivateAccess(app.id);
+  const root = path.join(repositories, app.id);
+  const metadataPath = path.join(root, 'metadata.json');
+  const metadata = JSON.parse(await readFile(metadataPath, 'utf8'));
+  await writeFile(metadataPath, `${JSON.stringify({ ...metadata, accessVerified: true })}\n`, { mode: 0o600 });
+  const checkout = path.join(root, 'repository');
+  await mkdir(checkout);
+  await exec('git', ['init', '-b', 'develop'], { cwd: checkout });
+  await exec('git', ['config', 'user.email', 'test@example.com'], { cwd: checkout });
+  await exec('git', ['config', 'user.name', 'Test'], { cwd: checkout });
+  await writeFile(path.join(checkout, 'README.md'), '# App\n');
+  await exec('git', ['add', 'README.md'], { cwd: checkout });
+  await exec('git', ['commit', '-m', 'Initial'], { cwd: checkout });
+
+  const result = await service.clonePrivate(app.id);
+
+  assert.equal(result.existing, true);
+  assert.equal(result.source.branch, 'develop');
+  assert.match(result.source.resolvedCommit, /^[a-f0-9]{40}$/);
+  assert.equal((await apps.get(app.id)).deployment.stage, 'inspecting');
 });
 
 test('rejects Git hosts that resolve to non-public address space before cloning', async (t) => {

@@ -32,7 +32,7 @@ The new `redis` Service joins WordPress's existing private network. Service name
 
 ## Images and names
 
-HalfCloud deploys images available to the rootless Docker daemon and public HTTPS Git repositories. Git-backed Apps use a persistent HalfCloud-managed checkout, but their runtime still uses built images and the same managed Service primitives as image-based Apps.
+HalfCloud deploys images available to the rootless Docker daemon, public HTTPS Git repositories, and private GitHub repositories. For a private repository, HalfCloud generates a dedicated read-only SSH deploy key and gives you the exact GitHub settings link. The private key never leaves the server. Git-backed Apps use a persistent HalfCloud-managed checkout, but their runtime still uses built images and the same managed Service primitives as image-based Apps.
 
 Prefer explicit version tags for important Services:
 

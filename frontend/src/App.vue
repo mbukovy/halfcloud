@@ -30,6 +30,7 @@ const settingsError = ref('');
 const apps = ref<AppInfo[]>([]);
 const server = ref<ServerStats | null>(null);
 const dashboardError = ref('');
+const dashboardNotice = ref<{ message: string; href?: string } | null>(null);
 const actionId = ref('');
 const domainAction = ref('');
 const editingAppId = ref('');
@@ -46,6 +47,7 @@ const environmentSnapshot = ref('[]');
 const revealedEnvironmentValues = reactive(new Set<string>());
 const environmentRequestForms = reactive<Record<string, { value: string; protectedFromAI: boolean; saving: boolean; error: string }>>({});
 const basicAuthRequestForms = reactive<Record<string, { username: string; password: string; saving: boolean; error: string }>>({});
+const repositorySetupForms = reactive<Record<string, { verifying: boolean; copied: boolean; error: string }>>({});
 const logs = ref<{ id: string; name: string; content: string; tail: number; search: string; reverse: boolean; loading: boolean; error: string } | null>(null);
 const prompt = ref('');
 const transcript = ref<HTMLElement>();
@@ -250,6 +252,54 @@ function basicAuthRequest(part: Record<string, unknown>) {
     status: output.status === 'completed' ? 'completed' : 'pending',
     form: basicAuthRequestForms[requestId]!,
   };
+}
+
+function repositorySetup(part: Record<string, unknown>) {
+  const name = toolName(part);
+  if (name !== 'createGitApp' && name !== 'getRepositoryDeployKey') return undefined;
+  const output = recordValue(part.output);
+  const setup = recordValue(output?.repositorySetup) ?? output;
+  const appId = setup?.appId ?? output?.appId;
+  if (!setup || typeof appId !== 'string' || (setup.status !== 'pending' && setup.status !== 'verified')) return undefined;
+  if (!repositorySetupForms[appId]) repositorySetupForms[appId] = { verifying: false, copied: false, error: '' };
+  return {
+    appId,
+    status: setup.status as 'pending' | 'verified',
+    repository: typeof setup.repository === 'string' ? setup.repository : 'this repository',
+    settingsUrl: typeof setup.settingsUrl === 'string' ? setup.settingsUrl : '',
+    publicKey: typeof setup.publicKey === 'string' ? setup.publicKey : '',
+    title: typeof setup.title === 'string' ? setup.title : 'HalfCloud',
+    form: repositorySetupForms[appId]!,
+  };
+}
+
+async function copyRepositoryPublicKey(part: Record<string, unknown>) {
+  const setup = repositorySetup(part);
+  if (!setup?.publicKey) return;
+  try {
+    await navigator.clipboard.writeText(setup.publicKey);
+    setup.form.copied = true;
+  } catch {
+    setup.form.error = 'Could not copy automatically. Select the public key and copy it manually.';
+  }
+}
+
+async function verifyRepositorySetup(part: Record<string, unknown>) {
+  const setup = repositorySetup(part);
+  if (!setup || setup.status === 'verified') return;
+  setup.form.verifying = true;
+  setup.form.error = '';
+  try {
+    part.output = await api<Record<string, unknown>>(`/api/apps/${encodeURIComponent(setup.appId)}/repository/verify`, {
+      method: 'POST',
+      body: JSON.stringify({}),
+    });
+    await refreshDashboard();
+  } catch (error) {
+    setup.form.error = error instanceof Error ? error.message : 'HalfCloud still cannot access this repository using the deploy key.';
+  } finally {
+    setup.form.verifying = false;
+  }
 }
 
 async function submitBasicAuthRequest(part: Record<string, unknown>) {
@@ -742,8 +792,12 @@ async function runAppAction(app: AppInfo, action: 'start' | 'stop' | 'restart' |
     body = { confirmed: true, deleteData: false };
   }
   actionId.value = app.id;
+  dashboardNotice.value = null;
   try {
-    await api(`/api/apps/${encodeURIComponent(app.id)}/${action}`, { method: 'POST', body: JSON.stringify(body) });
+    const result = await api<{ deployKeyRemovalUrl?: string }>(`/api/apps/${encodeURIComponent(app.id)}/${action}`, { method: 'POST', body: JSON.stringify(body) });
+    if (action === 'delete' && result.deployKeyRemovalUrl) {
+      dashboardNotice.value = { message: 'The local repository and credential were removed. The deploy key may still exist on GitHub.', href: result.deployKeyRemovalUrl };
+    }
     await refreshDashboard();
   } catch (error) {
     dashboardError.value = error instanceof Error ? error.message : `${action} failed`;
@@ -909,6 +963,7 @@ onBeforeUnmount(() => {
     </section>
 
     <p v-if="dashboardError" class="global-error">{{ dashboardError }}</p>
+    <p v-if="dashboardNotice" class="global-notice">{{ dashboardNotice.message }} <a v-if="dashboardNotice.href" :href="dashboardNotice.href" target="_blank" rel="noopener noreferrer">Open Deploy Keys settings</a></p>
 
     <div class="workspace">
       <section id="operator-panel" class="chat-panel" :class="{ 'mobile-panel-active': mobileTab === 'operator' }" role="tabpanel">
@@ -954,8 +1009,41 @@ onBeforeUnmount(() => {
                   <ul v-if="toolGroupDetails(group.parts).length">
                     <li v-for="(detail, detailIndex) in toolGroupDetails(group.parts)" :key="detailIndex"><a v-if="detail.href" :href="detail.href" target="_blank" rel="noopener noreferrer">{{ detail.text }}</a><template v-else>{{ detail.text }}</template></li>
                   </ul>
-                  <template v-for="(part, partIndex) in group.parts" :key="partIndex">
-                  <div v-if="environmentRequest(part)" class="environment-request-widget">
+                   <template v-for="(part, partIndex) in group.parts" :key="partIndex">
+                   <div v-if="repositorySetup(part)" class="environment-request-widget repository-setup-widget">
+                     <template v-if="repositorySetup(part)!.status === 'verified'">
+                       <strong>Repository access confirmed</strong>
+                       <p>HalfCloud can now clone {{ repositorySetup(part)!.repository }} using the stored deploy key.</p>
+                       <button
+                         v-if="!continuedRequestIds.has(repositorySetup(part)!.appId)"
+                         class="button primary"
+                         type="button"
+                         :disabled="chatBusy"
+                         @click="continueAfterInput(repositorySetup(part)!.appId)"
+                       >Continue deployment</button>
+                     </template>
+                     <template v-else>
+                       <strong>This repository appears to be private</strong>
+                       <p>Add this read-only deploy key in GitHub under Repository Settings → Deploy keys → Add deploy key.</p>
+                       <dl>
+                         <div><dt>Title</dt><dd>{{ repositorySetup(part)!.title }}</dd></div>
+                         <div><dt>Repository</dt><dd>{{ repositorySetup(part)!.repository }}</dd></div>
+                         <div><dt>Allow write access</dt><dd>Disabled</dd></div>
+                       </dl>
+                       <label>Public key</label>
+                       <textarea readonly rows="4" :value="repositorySetup(part)!.publicKey" @focus="($event.target as HTMLTextAreaElement).select()"></textarea>
+                       <div class="repository-setup-actions">
+                         <button class="button" type="button" @click="copyRepositoryPublicKey(part)">{{ repositorySetup(part)!.form.copied ? 'Copied' : 'Copy public key' }}</button>
+                         <a v-if="repositorySetup(part)!.settingsUrl" class="button" :href="repositorySetup(part)!.settingsUrl" target="_blank" rel="noopener noreferrer">Open GitHub Deploy Keys</a>
+                         <button class="button primary" type="button" :disabled="repositorySetup(part)!.form.verifying" @click="verifyRepositorySetup(part)">
+                           {{ repositorySetup(part)!.form.verifying ? 'Checking…' : "I've added the key" }}
+                         </button>
+                       </div>
+                       <p>The private key stays on this HalfCloud server and is never sent to AI.</p>
+                       <p v-if="repositorySetup(part)!.form.error" class="form-error">{{ repositorySetup(part)!.form.error }}</p>
+                     </template>
+                   </div>
+                   <div v-if="environmentRequest(part)" class="environment-request-widget">
                     <template v-if="environmentRequest(part)!.status === 'completed'">
                       <strong>{{ environmentRequest(part)!.targets.length === 1 ? environmentRequest(part)!.name : `Configured for ${environmentRequest(part)!.targets.length} variables` }}</strong>
                       <code v-for="target in environmentRequest(part)!.targets" :key="`${target.serviceId}:${target.name}`">{{ environmentTargetLabel(target) }}</code>
@@ -1168,15 +1256,15 @@ onBeforeUnmount(() => {
               </div>
             </section>
             </div>
-            <div v-if="app.services.length" class="container-actions app-actions">
-            <button class="logs-button" :disabled="actionId === app.id" @click="showAppLogs(app)">Logs</button>
-            <details class="actions-menu">
-              <summary>App actions <svg aria-hidden="true" viewBox="0 0 12 12"><path d="m3 4.5 3 3 3-3"></path></svg></summary>
-              <div class="actions-menu-list">
-                <button v-if="app.status === 'stopped'" :disabled="actionId === app.id" @click="runAppAction(app, 'start')">Start all</button>
-                <button v-else :disabled="actionId === app.id" @click="runAppAction(app, 'stop')">Stop all</button>
-                <button :disabled="actionId === app.id" @click="runAppAction(app, 'restart')">Restart all</button>
-                <button :disabled="actionId === app.id" @click="runAppAction(app, 'recreate')">Recreate all</button>
+             <div class="container-actions app-actions">
+             <button v-if="app.services.length" class="logs-button" :disabled="actionId === app.id" @click="showAppLogs(app)">Logs</button>
+             <details class="actions-menu">
+               <summary>App actions <svg aria-hidden="true" viewBox="0 0 12 12"><path d="m3 4.5 3 3 3-3"></path></svg></summary>
+               <div class="actions-menu-list">
+                 <button v-if="app.services.length && app.status === 'stopped'" :disabled="actionId === app.id" @click="runAppAction(app, 'start')">Start all</button>
+                 <button v-else-if="app.services.length" :disabled="actionId === app.id" @click="runAppAction(app, 'stop')">Stop all</button>
+                 <button v-if="app.services.length" :disabled="actionId === app.id" @click="runAppAction(app, 'restart')">Restart all</button>
+                 <button v-if="app.services.length" :disabled="actionId === app.id" @click="runAppAction(app, 'recreate')">Recreate all</button>
                 <button class="danger" :disabled="actionId === app.id" @click="runAppAction(app, 'delete')">Delete App</button>
               </div>
             </details>

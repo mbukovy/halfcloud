@@ -157,7 +157,17 @@ input:focus, textarea:focus { border-color: var(--ink); box-shadow: 0 0 0 3px #1
 .environment-request-widget label { margin-top: 15px; }
 .environment-request-widget .button { margin-top: 8px; padding: 9px 18px; }
 .basic-auth-widget input + label { margin-top: 12px; }
+.repository-setup-widget { max-width: 500px; }
+.repository-setup-widget dl { margin: 10px 0; font: 10px/1.6 'DM Mono', monospace; }
+.repository-setup-widget dl div { display: grid; grid-template-columns: 125px 1fr; gap: 10px; }
+.repository-setup-widget dt { color: var(--muted); }
+.repository-setup-widget dd { margin: 0; overflow-wrap: anywhere; }
+.repository-setup-widget textarea { width: 100%; margin-top: 6px; resize: vertical; font: 10px/1.45 'DM Mono', monospace; }
+.repository-setup-actions { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 8px; }
+.repository-setup-actions .button { display: inline-flex; align-items: center; margin-top: 0; text-decoration: none; }
 .chat-error { display: flex; align-items: center; gap: 8px; padding: 10px; background: #fff0eb; white-space: pre-wrap; overflow-wrap: anywhere; }
+.global-notice { margin: 8px 18px; padding: 10px 12px; border: 1px solid #b8cec2; background: #f4f8f5; color: #3f5148; font-size: 11px; }
+.global-notice a { color: #b74321; }
 .error-info { position: relative; flex: 0 0 20px; width: 20px; height: 20px; border: 1px solid currentColor; border-radius: 50%; background: transparent; color: inherit; font: 600 11px/18px 'DM Mono', monospace; cursor: help; }
 .error-tooltip { position: absolute; z-index: 20; right: 0; bottom: calc(100% + 8px); display: none; width: min(440px, calc(100vw - 64px)); padding: 11px 13px; border: 1px solid #dba99a; border-radius: 3px; background: #241d1a; box-shadow: 0 8px 24px #19231f33; color: #fff8f4; font: 10px/1.6 'DM Mono', monospace; text-align: left; text-transform: none; white-space: normal; overflow-wrap: anywhere; }
 .error-info:hover .error-tooltip, .error-info:focus-visible .error-tooltip { display: block; }

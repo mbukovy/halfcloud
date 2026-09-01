@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { lookup } from 'node:dns/promises';
-import { lstat, mkdir, open, readdir, realpath, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { chmod, lstat, mkdir, open, readFile, readdir, realpath, rename, rm, stat, writeFile } from 'node:fs/promises';
 import net from 'node:net';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
@@ -66,7 +66,31 @@ export interface RepositoryBuildContext {
   commit: string;
 }
 
-export type GitRepositoryErrorCode = 'invalid_url' | 'not_found' | 'not_public' | 'dns_failure' | 'network_failure' | 'clone_failed';
+const githubEd25519HostKey = 'github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl';
+
+export type GitRepositoryErrorCode = 'invalid_url' | 'not_found' | 'not_public' | 'authentication_required' | 'host_verification_failed' | 'dns_failure' | 'network_failure' | 'clone_failed';
+
+export interface RepositoryLocation {
+  originalUrl: string;
+  gitUrl: string;
+  provider?: 'github';
+  owner?: string;
+  repository?: string;
+  settingsUrl?: string;
+  requiresSsh: boolean;
+}
+
+interface RepositoryMetadata {
+  originalUrl: string;
+  gitUrl: string;
+  provider?: 'github';
+  owner?: string;
+  repository?: string;
+  settingsUrl?: string;
+  branch?: string;
+  authentication: 'none' | 'ssh-deploy-key';
+  accessVerified?: boolean;
+}
 
 export class GitRepositoryError extends Error {
   constructor(readonly code: GitRepositoryErrorCode, message: string) {
@@ -89,6 +113,54 @@ export function validatePublicGitUrl(value: string) {
   if (!url.hostname || url.hostname.toLowerCase() === 'localhost') throw new GitRepositoryError('not_public', 'Git repository URL must use a public host');
   if (url.hash) throw new GitRepositoryError('invalid_url', 'Git repository URLs cannot contain fragments');
   return url.toString();
+}
+
+export function normalizeRepositoryUrl(value: string): RepositoryLocation {
+  const trimmed = value.trim();
+  if (!trimmed || trimmed.length > 2048) throw new GitRepositoryError('invalid_url', 'Git repository URL must contain 1-2048 characters');
+  const scpMatch = /^git@github\.com:([^/\s]+)\/([^/\s]+?)\/?$/.exec(trimmed);
+  let url: URL;
+  let requiresSsh = false;
+  if (scpMatch) {
+    requiresSsh = true;
+    url = new URL(`https://github.com/${scpMatch[1]}/${scpMatch[2]}`);
+  } else {
+    try {
+      url = new URL(trimmed);
+    } catch {
+      throw new GitRepositoryError('invalid_url', 'Invalid Git repository URL');
+    }
+    if (url.protocol === 'ssh:') {
+      if (url.hostname.toLowerCase() !== 'github.com' || url.username !== 'git' || url.password || url.port) {
+        throw new GitRepositoryError('invalid_url', 'SSH repository URLs must use git@github.com');
+      }
+      requiresSsh = true;
+      url = new URL(`https://github.com${url.pathname}`);
+    } else {
+      validatePublicGitUrl(trimmed);
+    }
+  }
+  if (url.search) throw new GitRepositoryError('invalid_url', 'Git repository URLs cannot contain query parameters');
+  if (url.hostname.toLowerCase() !== 'github.com') {
+    return { originalUrl: url.toString(), gitUrl: url.toString(), requiresSsh };
+  }
+  const segments = url.pathname.split('/').filter(Boolean);
+  if (segments.length !== 2) throw new GitRepositoryError('invalid_url', 'GitHub repository URLs must include an owner and repository name');
+  const owner = segments[0]!;
+  const repository = segments[1]!.replace(/\.git$/i, '');
+  if (!/^[A-Za-z0-9_.-]{1,100}$/.test(owner) || !/^[A-Za-z0-9_.-]{1,100}$/.test(repository)) {
+    throw new GitRepositoryError('invalid_url', 'Invalid GitHub repository owner or name');
+  }
+  const originalUrl = `https://github.com/${owner}/${repository}${url.pathname.toLowerCase().endsWith('.git') ? '.git' : ''}`;
+  return {
+    originalUrl,
+    gitUrl: `git@github.com:${owner}/${repository}.git`,
+    provider: 'github',
+    owner,
+    repository,
+    settingsUrl: `https://github.com/${owner}/${repository}/settings/keys`,
+    requiresSsh,
+  };
 }
 
 function validateBranch(value: string | undefined) {
@@ -127,6 +199,7 @@ function gitFailure(stderr: string) {
   const detail = stderr.trim().split('\n').slice(-3).join(' ').replace(/https:\/\/[^\s/@]+:[^\s/@]+@/g, 'https://[credentials]@');
   if (/repository .* not found|not found/i.test(detail)) return new GitRepositoryError('not_found', 'Git repository was not found');
   if (/authentication failed|could not read username|permission denied|access denied/i.test(detail)) return new GitRepositoryError('not_public', 'Git repository is not publicly accessible');
+  if (/host key verification failed|remote host identification has changed/i.test(detail)) return new GitRepositoryError('host_verification_failed', 'The Git host identity could not be verified');
   if (/could not resolve host|name or service not known/i.test(detail)) return new GitRepositoryError('dns_failure', 'Could not resolve the Git repository host');
   if (/could not connect|connection timed out|failed to connect|network is unreachable/i.test(detail)) return new GitRepositoryError('network_failure', 'Could not connect to the Git repository host');
   return new GitRepositoryError('clone_failed', detail ? `Git clone failed: ${detail.slice(0, 500)}` : 'Git clone failed');
@@ -157,7 +230,7 @@ async function directoryUsage(directory: string): Promise<{ bytes: number; files
   return { bytes, files };
 }
 
-async function runGit(args: string[], cwd: string, timeoutMs = 120_000, limitedCheckout?: string) {
+async function runGit(args: string[], cwd: string, timeoutMs = 120_000, limitedCheckout?: string, environment: NodeJS.ProcessEnv = {}) {
   return new Promise<{ stdout: string; stderr: string }>((resolve, reject) => {
     const child = spawn('git', args, {
       cwd,
@@ -168,6 +241,7 @@ async function runGit(args: string[], cwd: string, timeoutMs = 120_000, limitedC
         GIT_TERMINAL_PROMPT: '0',
         GIT_CONFIG_GLOBAL: '/dev/null',
         GIT_CONFIG_NOSYSTEM: '1',
+        ...environment,
       },
     });
     let stdout = '';
@@ -216,6 +290,16 @@ async function runGit(args: string[], cwd: string, timeoutMs = 120_000, limitedC
       else if (code !== 0) reject(gitFailure(stderr));
       else resolve({ stdout, stderr });
     });
+  });
+}
+
+async function runProcess(command: string, args: string[], cwd: string) {
+  return new Promise<void>((resolve, reject) => {
+    const child = spawn(command, args, { cwd, stdio: ['ignore', 'ignore', 'pipe'], env: { PATH: process.env.PATH } });
+    let stderr = '';
+    child.stderr.on('data', (chunk: Buffer) => { stderr = `${stderr}${chunk.toString('utf8')}`.slice(-4096); });
+    child.once('error', reject);
+    child.once('close', (code) => code === 0 ? resolve() : reject(new Error(`${command} failed: ${stderr.trim().slice(0, 500)}`)));
   });
 }
 
@@ -281,6 +365,133 @@ export class RepositoryService {
         source: { type: 'git', url, branch: resolvedBranch, resolvedCommit },
         deployment: { status: 'in_progress', stage: 'inspecting', message: 'Inspecting repository', buildAttempts: 0, updatedAt: new Date().toISOString() },
       });
+      await this.writeMetadata(app.id, { originalUrl: url, gitUrl: url, branch: resolvedBranch, authentication: 'none' });
+      return { appId: app.id, appName: app.name, source: updated.source };
+    } catch (error) {
+      await rm(checkout, { recursive: true, force: true }).catch(() => undefined);
+      await this.fail(app.id, 'cloning', error);
+      throw error;
+    }
+  }
+
+  async preparePrivateAccess(appIdOrName: string, repositoryUrl?: string) {
+    const app = await this.apps.get(appIdOrName);
+    const location = normalizeRepositoryUrl(repositoryUrl ?? app.source?.url ?? '');
+    if (location.provider !== 'github') throw new GitRepositoryError('authentication_required', 'Private repository setup currently supports GitHub repositories');
+    const root = await this.appRoot(app.id, true);
+    const privateKey = path.join(root, 'id_ed25519');
+    const publicKey = `${privateKey}.pub`;
+    const keyPairExists = await Promise.all([privateKey, publicKey].map(async (file) => {
+      try {
+        return (await lstat(file)).isFile();
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
+        throw error;
+      }
+    }));
+    if (!keyPairExists.every(Boolean)) {
+      await Promise.all([rm(privateKey, { force: true }), rm(publicKey, { force: true })]);
+      await runProcess('ssh-keygen', ['-q', '-t', 'ed25519', '-N', '', '-C', `halfcloud:${app.id}`, '-f', privateKey], root);
+    }
+    await chmod(privateKey, 0o600);
+    await chmod(publicKey, 0o644);
+    const publicKeyValue = (await readFile(publicKey, 'utf8')).trim();
+    if (!publicKeyValue.startsWith('ssh-ed25519 ')) throw new Error('HalfCloud could not generate an SSH deploy key');
+    await writeFile(path.join(root, 'known_hosts'), `${githubEd25519HostKey}\n`, { mode: 0o600 });
+    await this.writeMetadata(app.id, { ...location, authentication: 'ssh-deploy-key', accessVerified: false });
+    const source = {
+      type: 'git' as const,
+      url: location.originalUrl,
+      gitUrl: location.gitUrl,
+      provider: location.provider,
+      owner: location.owner,
+      repository: location.repository,
+      settingsUrl: location.settingsUrl,
+      authentication: 'ssh-deploy-key' as const,
+      ...(app.source?.branch ? { branch: app.source.branch } : {}),
+    };
+    await this.apps.update(app.id, {
+      source,
+      deployment: { status: 'in_progress', stage: 'awaiting_deploy_key', message: 'Waiting for the GitHub deploy key', buildAttempts: 0, updatedAt: new Date().toISOString() },
+    });
+    return this.publicSetup(app.id, publicKeyValue, location, 'pending');
+  }
+
+  async getPrivateAccessSetup(appIdOrName: string) {
+    const app = await this.gitApp(appIdOrName);
+    if (app.source?.authentication !== 'ssh-deploy-key') throw new Error('This App does not use an SSH deploy key');
+    const root = await this.appRoot(app.id);
+    const publicKey = (await readFile(path.join(root, 'id_ed25519.pub'), 'utf8')).trim();
+    const metadata = await this.readMetadata(app.id);
+    return this.publicSetup(app.id, publicKey, normalizeRepositoryUrl(metadata.originalUrl), metadata.accessVerified ? 'verified' : 'pending');
+  }
+
+  async verifyPrivateAccess(appIdOrName: string) {
+    const app = await this.gitApp(appIdOrName);
+    const metadata = await this.privateMetadata(app.id);
+    try {
+      const { stdout } = await this.runPrivateGit(app.id, ['ls-remote', '--symref', metadata.gitUrl, 'HEAD']);
+      const branch = stdout.match(/^ref: refs\/heads\/(.+)\s+HEAD$/m)?.[1];
+      await this.writeMetadata(app.id, { ...metadata, ...(branch ? { branch } : {}), accessVerified: true });
+      return { ...this.publicSetup(app.id, undefined, normalizeRepositoryUrl(metadata.originalUrl), 'verified'), ...(branch ? { branch } : {}) };
+    } catch (error) {
+      if (error instanceof GitRepositoryError && error.code === 'host_verification_failed') throw error;
+      throw new GitRepositoryError('authentication_required', `HalfCloud still cannot access ${metadata.owner}/${metadata.repository} using this deploy key`);
+    }
+  }
+
+  async clonePrivate(appIdOrName: string, requestedBranch?: string) {
+    const app = await this.gitApp(appIdOrName);
+    const metadata = await this.privateMetadata(app.id);
+    if (!metadata.accessVerified) throw new GitRepositoryError('authentication_required', 'Verify the GitHub deploy key before cloning this repository');
+    const branch = validateBranch(requestedBranch ?? app.source?.branch ?? metadata.branch);
+    const root = await this.appRoot(app.id);
+    const checkout = path.join(root, 'repository');
+    try {
+      await lstat(checkout);
+      try {
+        const [{ stdout: branchOutput }, { stdout: commitOutput }] = await Promise.all([
+          runGit(['symbolic-ref', '--quiet', '--short', 'HEAD'], checkout),
+          runGit(['rev-parse', 'HEAD'], checkout),
+        ]);
+        const resolvedBranch = branchOutput.trim();
+        const resolvedCommit = commitOutput.trim().toLowerCase();
+        if (!resolvedBranch || !/^[a-f0-9]{40}$/.test(resolvedCommit)) throw new Error('Incomplete repository checkout');
+        const source = { ...app.source!, branch: resolvedBranch, resolvedCommit };
+        const updated = await this.apps.update(app.id, {
+          source,
+          deployment: { status: 'in_progress', stage: 'inspecting', message: 'Inspecting repository', buildAttempts: 0, updatedAt: new Date().toISOString() },
+        });
+        await this.writeMetadata(app.id, { ...metadata, branch: resolvedBranch, accessVerified: true });
+        return { appId: app.id, appName: app.name, source: updated.source, existing: true };
+      } catch {
+        await rm(checkout, { recursive: true, force: true });
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
+    await this.setStage(app.id, 'cloning', 'Cloning private repository');
+    try {
+      await this.runPrivateGit(app.id, [
+        '-c', 'protocol.file.allow=never', '-c', 'protocol.ext.allow=never', '-c', 'core.hooksPath=/dev/null',
+        'clone', '--depth=1', '--filter=blob:none', '--no-tags', '--no-recurse-submodules',
+        ...(branch ? ['--branch', branch, '--single-branch'] : []), metadata.gitUrl, 'repository',
+      ], root, checkout);
+      const checkoutUsage = await directoryUsage(checkout);
+      if (checkoutUsage.bytes > maxBuildBytes || checkoutUsage.files > maxBuildFiles) throw new GitRepositoryError('clone_failed', 'Repository checkout exceeds HalfCloud safety limits');
+      const [{ stdout: branchOutput }, { stdout: commitOutput }] = await Promise.all([
+        runGit(['symbolic-ref', '--quiet', '--short', 'HEAD'], checkout),
+        runGit(['rev-parse', 'HEAD'], checkout),
+      ]);
+      const resolvedBranch = branchOutput.trim();
+      const resolvedCommit = commitOutput.trim().toLowerCase();
+      if (!resolvedBranch || !/^[a-f0-9]{40}$/.test(resolvedCommit)) throw new Error('Git repository did not provide a branch and commit');
+      const source = { ...app.source!, branch: resolvedBranch, resolvedCommit };
+      const updated = await this.apps.update(app.id, {
+        source,
+        deployment: { status: 'in_progress', stage: 'inspecting', message: 'Inspecting repository', buildAttempts: 0, updatedAt: new Date().toISOString() },
+      });
+      await this.writeMetadata(app.id, { ...metadata, branch: resolvedBranch, accessVerified: true });
       return { appId: app.id, appName: app.name, source: updated.source };
     } catch (error) {
       await rm(checkout, { recursive: true, force: true }).catch(() => undefined);
@@ -436,6 +647,53 @@ export class RepositoryService {
   async delete(appId: string) {
     const appRoot = path.join(this.repositoriesDir, appId);
     if (appRoot.startsWith(`${this.repositoriesDir}${path.sep}`)) await rm(appRoot, { recursive: true, force: true });
+  }
+
+  private publicSetup(appId: string, publicKey: string | undefined, location: RepositoryLocation, status: 'pending' | 'verified') {
+    return {
+      appId,
+      status,
+      provider: location.provider,
+      repository: `${location.owner}/${location.repository}`,
+      settingsUrl: location.settingsUrl,
+      ...(publicKey ? { publicKey } : {}),
+      title: 'HalfCloud',
+      allowWriteAccess: false,
+    };
+  }
+
+  private async privateMetadata(appId: string) {
+    const metadata = await this.readMetadata(appId);
+    if (metadata.authentication !== 'ssh-deploy-key' || metadata.provider !== 'github') throw new Error('SSH deploy-key authentication is not configured for this App');
+    return metadata;
+  }
+
+  private async readMetadata(appId: string): Promise<RepositoryMetadata> {
+    return JSON.parse(await readFile(path.join(await this.appRoot(appId), 'metadata.json'), 'utf8')) as RepositoryMetadata;
+  }
+
+  private async writeMetadata(appId: string, metadata: RepositoryMetadata) {
+    const root = await this.appRoot(appId, true);
+    const destination = path.join(root, 'metadata.json');
+    const temporary = `${destination}.${randomUUID()}.tmp`;
+    await writeFile(temporary, `${JSON.stringify(metadata, null, 2)}\n`, { mode: 0o600 });
+    await rename(temporary, destination);
+  }
+
+  private async runPrivateGit(appId: string, args: string[], cwd?: string, limitedCheckout?: string) {
+    const root = await this.appRoot(appId);
+    const metadata = await this.privateMetadata(appId);
+    const addresses = await this.resolveHost('github.com').catch(() => { throw new GitRepositoryError('dns_failure', 'Could not resolve GitHub'); });
+    if (!addresses.length || addresses.some(({ address }) => !publicAddress(address))) throw new GitRepositoryError('not_public', 'GitHub must resolve only to public network addresses');
+    const config = path.join(root, 'ssh_config');
+    await writeFile(config, [
+      'Host github.com', `  HostName ${addresses[0]!.address}`, '  HostKeyAlias github.com', '  User git',
+      `  IdentityFile ${path.join(root, 'id_ed25519')}`, `  UserKnownHostsFile ${path.join(root, 'known_hosts')}`,
+      '  IdentitiesOnly yes', '  BatchMode yes', '  PasswordAuthentication no', '  KbdInteractiveAuthentication no',
+      '  StrictHostKeyChecking yes', '  ForwardAgent no', '  ClearAllForwardings yes', '',
+    ].join('\n'), { mode: 0o600 });
+    const quotedConfig = `'${config.replaceAll("'", "'\\''")}'`;
+    return runGit(args, cwd ?? root, 120_000, limitedCheckout, { GIT_SSH_COMMAND: `ssh -F ${quotedConfig}`, GIT_SSH_VARIANT: 'ssh', SSH_AUTH_SOCK: '' });
   }
 
   private async gitApp(idOrName: string) {

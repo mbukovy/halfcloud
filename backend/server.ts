@@ -10,6 +10,7 @@ import { SettingsStore } from './config.js';
 import { DockerService } from './docker.js';
 import { ApplicationService } from './applications.js';
 import { createChatResponse } from './agent.js';
+import { GitRepositoryError } from './repositories.js';
 import { getServerStats } from './metrics.js';
 import { credentialsSchema } from './llm/types.js';
 import { listModels, providerMetadata, testModel } from './llm/index.js';
@@ -127,6 +128,9 @@ app.post('/api/apps/:appId/:action', async (request, response) => {
   const methods = { start: docker.startApp.bind(docker), stop: docker.stopApp.bind(docker), restart: docker.restartApp.bind(docker), recreate: docker.recreateApp.bind(docker) };
   response.json(await methods[action](request.params.appId));
 });
+app.post('/api/apps/:appId/repository/verify', async (request, response) => {
+  response.json(await docker.verifyRepositoryDeployKey(request.params.appId));
+});
 app.get('/api/containers', async (_request, response) => response.json(await docker.listContainers()));
 app.get('/api/containers/:id/environment', async (request, response) => {
   response.json({ variables: await docker.listEnvironment(request.params.id) });
@@ -234,7 +238,11 @@ app.get('*splat', (_request, response) => response.sendFile(path.join(publicPath
 app.use((error: unknown, _request: Request, response: Response, _next: NextFunction) => {
   const message = error instanceof ZodError ? error.issues[0]?.message ?? 'Invalid request' : error instanceof Error ? error.message : 'Unexpected error';
   console.error(error instanceof Error ? error.message : error);
-  if (!response.headersSent) response.status(error instanceof ZodError ? 400 : 500).json({ error: message });
+  const status = error instanceof ZodError ? 400
+    : error instanceof GitRepositoryError
+      ? error.code === 'invalid_url' ? 400 : error.code === 'not_found' ? 404 : error.code === 'authentication_required' ? 409 : 502
+      : 500;
+  if (!response.headersSent) response.status(status).json({ error: message });
 });
 
 app.listen(port, '127.0.0.1', () => console.log(`HalfCloud listening on 127.0.0.1:${port}`));

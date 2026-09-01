@@ -5,7 +5,7 @@ import { DockerService, type CreateContainerInput, type DeploymentProgress, type
 import { DomainStore, normalizeHostname, type ServiceDomain } from './domains.js';
 import { EnvironmentStore, assertEnvironmentVariableName, environmentRequestTargets, serializeEnvironmentForAgent, type EnvironmentTarget, type EnvironmentVariable } from './environment.js';
 import { RouteAccessRequestStore, assertBasicAuthPassword, assertBasicAuthUsername, hashBasicAuthPassword } from './route-access.js';
-import { RepositoryService, validatePublicGitUrl } from './repositories.js';
+import { GitRepositoryError, RepositoryService, normalizeRepositoryUrl } from './repositories.js';
 
 export class ApplicationService {
   constructor(
@@ -82,17 +82,26 @@ export class ApplicationService {
   }
 
   async createGitApp(input: { name: string; repositoryUrl: string; branch?: string }, onProgress?: (progress: DeploymentProgress) => void) {
-    const repositoryUrl = validatePublicGitUrl(input.repositoryUrl);
+    const location = normalizeRepositoryUrl(input.repositoryUrl);
+    const repositoryUrl = location.originalUrl;
     const now = new Date().toISOString();
     const app = await this.apps.create(input.name, {
       source: { type: 'git', url: repositoryUrl, ...(input.branch ? { branch: input.branch } : {}) },
       deployment: { status: 'in_progress', stage: 'cloning', message: 'Cloning repository', buildAttempts: 0, updatedAt: now },
     });
+    if (location.requiresSsh) {
+      const repositorySetup = await this.repositories.preparePrivateAccess(app.id, repositoryUrl);
+      return { appId: app.id, appName: app.name, source: (await this.apps.get(app.id)).source, repositorySetup };
+    }
     onProgress?.({ phase: 'activity', label: 'Cloning repository' });
     let result;
     try {
       result = await this.repositories.clone(app.id, repositoryUrl, input.branch);
     } catch (error) {
+      if (location.provider === 'github' && error instanceof GitRepositoryError && (error.code === 'not_found' || error.code === 'not_public')) {
+        const repositorySetup = await this.repositories.preparePrivateAccess(app.id, repositoryUrl);
+        return { appId: app.id, appName: app.name, source: (await this.apps.get(app.id)).source, repositorySetup };
+      }
       await this.repositories.fail(app.id, 'cloning', error).catch(() => undefined);
       throw error;
     }
@@ -100,6 +109,23 @@ export class ApplicationService {
     try {
       const inspection = await this.repositories.inspect(app.id);
       return { ...result, inspection };
+    } catch (error) {
+      await this.repositories.fail(app.id, 'inspecting', error).catch(() => undefined);
+      throw error;
+    }
+  }
+
+  getRepositoryDeployKey(appIdOrName: string) { return this.repositories.getPrivateAccessSetup(appIdOrName); }
+  verifyRepositoryDeployKey(appIdOrName: string) { return this.repositories.verifyPrivateAccess(appIdOrName); }
+
+  async resumePrivateGitApp(appIdOrName: string, onProgress?: (progress: DeploymentProgress) => void) {
+    const app = await this.apps.get(appIdOrName);
+    if (app.source?.authentication !== 'ssh-deploy-key') throw new Error('This App is not waiting for private repository access');
+    onProgress?.({ phase: 'activity', label: 'Cloning private repository' });
+    const result = await this.repositories.clonePrivate(app.id, app.source.branch);
+    onProgress?.({ phase: 'activity', label: 'Inspecting repository' });
+    try {
+      return { ...result, inspection: await this.repositories.inspect(app.id) };
     } catch (error) {
       await this.repositories.fail(app.id, 'inspecting', error).catch(() => undefined);
       throw error;
@@ -173,6 +199,7 @@ export class ApplicationService {
 
   async deleteApp(idOrName: string, deleteData = false) {
     const app = await this.getApp(idOrName, false);
+    const deployKeyRemovalUrl = app.source?.authentication === 'ssh-deploy-key' ? app.source.settingsUrl : undefined;
     for (const service of app.services) await this.docker.deleteContainer(service.id);
     await this.docker.deleteAppNetwork(app.id);
     if (deleteData) {
@@ -180,10 +207,10 @@ export class ApplicationService {
         if (app.services.some((service) => service.serviceId === volume.application)) await this.docker.deleteManagedVolume(volume.name);
       }
     }
-    await this.apps.deleteApp(app.id);
     await this.repositories.delete(app.id);
+    await this.apps.deleteApp(app.id);
     await this.syncRoutes();
-    return { appId: app.id, appName: app.name, deleted: true, persistentDataDeleted: deleteData };
+    return { appId: app.id, appName: app.name, deleted: true, persistentDataDeleted: deleteData, ...(deployKeyRemovalUrl ? { deployKeyRemovalUrl } : {}) };
   }
 
   async getAppLogs(idOrName: string, tail = 200) {

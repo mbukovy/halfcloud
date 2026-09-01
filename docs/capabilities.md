@@ -55,6 +55,7 @@ Renaming an App changes only its HalfCloud display name. It does not rename or r
 - Group environment variables by Service within an App.
 - Add, rename, edit, reveal, protect, and delete Service environment variables.
 - Collect credentials through a dedicated form so their values do not enter the AI conversation.
+- Deploy public Git repositories and private GitHub repositories using per-App, read-only SSH deploy keys.
 - Preserve named volumes and managed bind data when a Service is recreated.
 - Delete an App while retaining persistent data by default.
 - Explicitly request deletion of persistent App data when that is intended.
@@ -76,7 +77,7 @@ See [Why is it safe?](why-is-it-safe.md) for the complete security model and its
 
 HalfCloud 0.1 is intended for Apps on one dedicated server. It does not currently:
 
-- authenticate to private Git repositories or automatically deploy new commits;
+- automatically deploy new Git commits;
 - move a Service between Apps;
 - connect Services across Apps through private networking;
 - provide shared databases across Apps;

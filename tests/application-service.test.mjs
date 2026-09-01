@@ -95,3 +95,46 @@ test('deploys WordPress and MySQL as Services in one App and adds Redis to it', 
   await applications.restartApp('Company Website');
   assert.deepEqual(runtime.restarted, ['container-1', 'container-2', 'container-3']);
 });
+
+test('deleting a private Git App removes credentials before metadata and returns the remote cleanup URL', async (t) => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'halfcloud-private-delete-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const runtime = new FakeDocker();
+  const apps = new AppStore(directory);
+  const app = await apps.create('Private Source', {
+    source: {
+      type: 'git',
+      url: 'https://github.com/example/private-app',
+      gitUrl: 'git@github.com:example/private-app.git',
+      provider: 'github',
+      owner: 'example',
+      repository: 'private-app',
+      settingsUrl: 'https://github.com/example/private-app/settings/keys',
+      authentication: 'ssh-deploy-key',
+    },
+    deployment: { status: 'in_progress', stage: 'awaiting_deploy_key', updatedAt: new Date().toISOString() },
+  });
+  let repositoryDeleted = false;
+  const repositories = {
+    async delete(appId) {
+      assert.equal((await apps.get(appId)).id, app.id);
+      repositoryDeleted = true;
+    },
+  };
+  const applications = new ApplicationService(
+    runtime,
+    { async sync() {} },
+    new DomainStore(directory),
+    new EnvironmentStore(directory),
+    new RouteAccessRequestStore(directory),
+    async () => 'hash',
+    apps,
+    repositories,
+  );
+
+  const result = await applications.deleteApp(app.id);
+
+  assert.equal(repositoryDeleted, true);
+  assert.equal(result.deployKeyRemovalUrl, 'https://github.com/example/private-app/settings/keys');
+  await assert.rejects(apps.get(app.id), /was not found/);
+});
