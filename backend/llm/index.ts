@@ -2,6 +2,7 @@ import { createAnthropic } from '@ai-sdk/anthropic';
 import { createAzure } from '@ai-sdk/azure';
 import { createCerebras } from '@ai-sdk/cerebras';
 import { createGoogleGenerativeAI } from '@ai-sdk/google';
+import { createMistral } from '@ai-sdk/mistral';
 import { createOpenAI } from '@ai-sdk/openai';
 import { createXai } from '@ai-sdk/xai';
 import { streamText, tool, type LanguageModel } from 'ai';
@@ -9,6 +10,15 @@ import { z } from 'zod';
 import type { LlmCredentials, LlmProvider, LlmProviderConfig, ModelCapabilities, ModelInfo, ProviderMetadata } from './types.js';
 
 export const providerMetadata: ProviderMetadata[] = [
+  {
+    id: 'mistral',
+    label: 'Mistral AI',
+    icon: '/providers/mistral.svg',
+    requiresEndpoint: false,
+    recommendedModel: 'mistral-large-latest',
+    promotionalText: 'Free API available - use Halfcloud completely free of charge',
+    pricingUrl: 'https://mistral.ai/pricing',
+  },
   { id: 'openai', label: 'OpenAI', icon: '/providers/openai.png', requiresEndpoint: false, recommendedModel: 'gpt-5.4-mini' },
   { id: 'anthropic', label: 'Anthropic', icon: '/providers/anthropic.svg', requiresEndpoint: false, recommendedModel: 'claude-sonnet-4-5' },
   { id: 'azure-foundry', label: 'Azure Foundry', icon: '/providers/azure-foundry.png', requiresEndpoint: true },
@@ -18,7 +28,7 @@ export const providerMetadata: ProviderMetadata[] = [
 ];
 
 const fallbackModels: Record<LlmProvider, string[]> = {
-  openai: [], anthropic: [], 'azure-foundry': [], cerebras: [], grok: [], gemini: [],
+  openai: [], anthropic: [], 'azure-foundry': [], cerebras: [], grok: [], gemini: [], mistral: [],
 };
 
 function azureBaseUrl(endpointValue: string) {
@@ -49,6 +59,7 @@ function modelEndpoint(credentials: LlmCredentials) {
     case 'cerebras': return { url: 'https://api.cerebras.ai/v1/models', headers: { authorization: `Bearer ${credentials.apiKey}` } };
     case 'grok': return { url: 'https://api.x.ai/v1/models', headers: { authorization: `Bearer ${credentials.apiKey}` } };
     case 'gemini': return { url: 'https://generativelanguage.googleapis.com/v1beta/models', headers: { 'x-goog-api-key': credentials.apiKey } };
+    case 'mistral': return { url: 'https://api.mistral.ai/v1/models', headers: { authorization: `Bearer ${credentials.apiKey}` } };
   }
 }
 
@@ -60,6 +71,7 @@ export function createLanguageModel(config: LlmProviderConfig | (LlmCredentials 
     case 'cerebras': return createCerebras({ apiKey: config.apiKey })(config.model);
     case 'grok': return createXai({ apiKey: config.apiKey })(config.model);
     case 'gemini': return createGoogleGenerativeAI({ apiKey: config.apiKey })(config.model);
+    case 'mistral': return createMistral({ apiKey: config.apiKey })(config.model);
   }
 }
 

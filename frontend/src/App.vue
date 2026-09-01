@@ -1304,13 +1304,19 @@ onBeforeUnmount(() => {
           <h2>Choose your AI provider</h2>
           <p>Your provider powers the HalfCloud operator. You can change it later without reinstalling.</p>
           <div class="provider-grid">
-            <button v-for="provider in providers" :key="provider.id" type="button" @click="chooseProvider(provider)">
-              <span class="provider-icon-shell">
-                <img :src="provider.icon" :alt="`${provider.label} icon`" @error="($event.target as HTMLImageElement).hidden = true">
-                <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 3 14.4 9.6 21 12l-6.6 2.4L12 21l-2.4-6.6L3 12l6.6-2.4L12 3Z"></path></svg>
-              </span>
-              <strong>{{ provider.label }}</strong>
-            </button>
+            <div v-for="provider in providers" :key="provider.id" class="provider-card" :class="{ featured: provider.promotionalText }">
+              <button type="button" @click="chooseProvider(provider)">
+                <span class="provider-icon-shell">
+                  <img :src="provider.icon" :alt="`${provider.label} icon`" @error="($event.target as HTMLImageElement).hidden = true">
+                  <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 3 14.4 9.6 21 12l-6.6 2.4L12 21l-2.4-6.6L3 12l6.6-2.4L12 3Z"></path></svg>
+                </span>
+                <span class="provider-copy">
+                  <strong>{{ provider.label }}</strong>
+                  <span v-if="provider.promotionalText" class="provider-promotion">{{ provider.promotionalText }}</span>
+                </span>
+              </button>
+              <a v-if="provider.pricingUrl" :href="provider.pricingUrl" target="_blank" rel="noopener noreferrer">View Mistral pricing ↗</a>
+            </div>
           </div>
         </template>
 

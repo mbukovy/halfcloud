@@ -12,7 +12,7 @@ import { ApplicationService } from './applications.js';
 import { createChatResponse } from './agent.js';
 import { GitRepositoryError } from './repositories.js';
 import { getServerStats } from './metrics.js';
-import { credentialsSchema } from './llm/types.js';
+import { credentialsSchema, llmProviderSchema } from './llm/types.js';
 import { listModels, providerMetadata, testModel } from './llm/index.js';
 import type { LlmCredentials } from './llm/types.js';
 
@@ -26,7 +26,7 @@ await docker.syncRoutes();
 const loginAttempts = new Map<string, { count: number; resetAt: number }>();
 
 async function resolveLlmCredentials(value: unknown): Promise<LlmCredentials> {
-  const input = z.object({ provider: z.enum(['openai', 'anthropic', 'azure-foundry', 'cerebras', 'grok', 'gemini']), apiKey: z.string().optional(), endpoint: z.string().optional() }).parse(value);
+  const input = z.object({ provider: llmProviderSchema, apiKey: z.string().optional(), endpoint: z.string().optional() }).parse(value);
   const active = await settings.get();
   const apiKey = input.apiKey || (active?.provider === input.provider ? active.apiKey : undefined);
   const endpoint = input.endpoint || (active?.provider === input.provider ? active.endpoint : undefined);

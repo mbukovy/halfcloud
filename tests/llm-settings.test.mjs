@@ -4,11 +4,37 @@ import { mkdtemp, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { SettingsStore } from '../dist/backend/config.js';
-import { providerMetadata, redactProviderError } from '../dist/backend/llm/index.js';
+import { listModels, providerMetadata, redactProviderError } from '../dist/backend/llm/index.js';
 
 test('provider metadata contains every supported provider without remote icons', () => {
-  assert.deepEqual(providerMetadata.map(({ id }) => id), ['openai', 'anthropic', 'azure-foundry', 'cerebras', 'grok', 'gemini']);
+  assert.deepEqual(providerMetadata.map(({ id }) => id), ['mistral', 'openai', 'anthropic', 'azure-foundry', 'cerebras', 'grok', 'gemini']);
   assert.ok(providerMetadata.every(({ icon }) => icon.startsWith('/providers/')));
+  assert.deepEqual(providerMetadata.find(({ id }) => id === 'mistral'), {
+    id: 'mistral',
+    label: 'Mistral AI',
+    icon: '/providers/mistral.svg',
+    requiresEndpoint: false,
+    recommendedModel: 'mistral-large-latest',
+    promotionalText: 'Free API available - use Halfcloud completely free of charge',
+    pricingUrl: 'https://mistral.ai/pricing',
+  });
+});
+
+test('Mistral models are discovered with bearer authentication', async () => {
+  const originalFetch = globalThis.fetch;
+  try {
+    globalThis.fetch = async (url, options) => {
+      assert.equal(url, 'https://api.mistral.ai/v1/models');
+      assert.equal(options.headers.authorization, 'Bearer mistral-secret');
+      return Response.json({ data: [{ id: 'mistral-small-latest' }, { id: 'mistral-large-latest' }] });
+    };
+    assert.deepEqual(await listModels({ provider: 'mistral', apiKey: 'mistral-secret' }), [
+      { id: 'mistral-large-latest', name: 'mistral-large-latest' },
+      { id: 'mistral-small-latest', name: 'mistral-small-latest' },
+    ]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test('settings public value never returns the API key', async () => {

@@ -22,6 +22,7 @@
     "@ai-sdk/azure": "^4.0.49",
     "@ai-sdk/cerebras": "^2.0.79",
     "@ai-sdk/google": "^4.0.56",
+    "@ai-sdk/mistral": "^4.0.38",
     "@ai-sdk/openai": "^4.0.50",
     "@ai-sdk/vue": "^4.0.79",
     "@ai-sdk/xai": "^4.0.51",
