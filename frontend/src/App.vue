@@ -54,7 +54,8 @@ const respondingApprovalId = ref('');
 const continuedRequestIds = reactive(new Set<string>());
 type AgentStatus = { phase: 'pulling-image'; image: string } | { phase: 'activity'; label: string } | { phase: 'working' };
 type AgentErrorDetails = { requestId: string; provider: string; model: string; details: string };
-type HalfCloudMessage = UIMessage<unknown, { agentStatus: AgentStatus; agentError: AgentErrorDetails }>;
+type TokenUsage = { input: number; output: number; thinking: number; cacheRead: number; cacheWrite: number };
+type HalfCloudMessage = UIMessage<{ tokenUsage: TokenUsage }, { agentStatus: AgentStatus; agentError: AgentErrorDetails }>;
 const agentStatus = ref<AgentStatus | null>(null);
 const agentErrorDetails = ref<AgentErrorDetails | null>(null);
 const activityElapsedSeconds = ref(0);
@@ -78,6 +79,17 @@ const { messages, sendMessage, status, error: chatError, stop, clearError, addTo
 });
 
 const chatBusy = computed(() => status.value === 'submitted' || status.value === 'streaming');
+const conversationTokenUsage = computed<TokenUsage>(() => messages.value.reduce((total, message) => {
+  const usage = message.metadata?.tokenUsage;
+  if (!usage) return total;
+  total.input += usage.input;
+  total.output += usage.output;
+  total.thinking += usage.thinking;
+  total.cacheRead += usage.cacheRead;
+  total.cacheWrite += usage.cacheWrite;
+  return total;
+}, { input: 0, output: 0, thinking: 0, cacheRead: 0, cacheWrite: 0 }));
+const conversationTokens = computed(() => conversationTokenUsage.value.input + conversationTokenUsage.value.output);
 const agentActivityLabel = computed(() => {
   if (!chatBusy.value) return '';
   if (agentStatus.value?.phase === 'pulling-image') return `Pulling ${agentStatus.value.image}`;
@@ -121,6 +133,15 @@ function formatUptime(seconds: number) {
   const days = Math.floor(seconds / 86400);
   const hours = Math.floor((seconds % 86400) / 3600);
   return days ? `${days}d ${hours}h` : `${hours}h ${Math.floor((seconds % 3600) / 60)}m`;
+}
+
+function formatCompactTokens(tokens: number) {
+  if (tokens < 1000) return tokens.toLocaleString('en-US');
+  return `${new Intl.NumberFormat('en-US', { maximumFractionDigits: 1 }).format(tokens / 1000)}k`;
+}
+
+function formatTokenCount(tokens: number) {
+  return tokens.toLocaleString('en-US');
 }
 
 function textPart(part: unknown): part is { type: 'text'; text: string } {
@@ -894,7 +915,21 @@ onBeforeUnmount(() => {
         <div class="section-heading">
            <div><p class="eyebrow">AI OPERATOR</p></div>
            <div class="chat-heading-actions">
-             <button class="new-conversation-button" type="button" @click="newConversation">New conversation</button>
+              <div class="token-usage" tabindex="0" aria-describedby="token-usage-details">
+                <span>{{ formatCompactTokens(conversationTokens) }} tokens</span>
+                <div id="token-usage-details" class="token-usage-tooltip" role="tooltip">
+                  <strong>Conversation usage</strong>
+                  <dl>
+                    <div><dt>Total</dt><dd>{{ formatTokenCount(conversationTokens) }}</dd></div>
+                    <div><dt>Input</dt><dd>{{ formatTokenCount(conversationTokenUsage.input) }}</dd></div>
+                    <div><dt>Output</dt><dd>{{ formatTokenCount(conversationTokenUsage.output) }}</dd></div>
+                    <div><dt>Thinking</dt><dd>{{ formatTokenCount(conversationTokenUsage.thinking) }}</dd></div>
+                    <div><dt>Cache read</dt><dd>{{ formatTokenCount(conversationTokenUsage.cacheRead) }}</dd></div>
+                    <div><dt>Cache write</dt><dd>{{ formatTokenCount(conversationTokenUsage.cacheWrite) }}</dd></div>
+                  </dl>
+                </div>
+              </div>
+              <button class="new-conversation-button" type="button" @click="newConversation">New conversation</button>
            </div>
         </div>
         <div ref="transcript" class="transcript">

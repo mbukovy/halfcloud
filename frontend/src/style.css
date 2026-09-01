@@ -86,6 +86,16 @@ input:focus, textarea:focus { border-color: var(--ink); box-shadow: 0 0 0 3px #1
 .section-heading sup { font: 10px 'DM Mono', monospace; color: var(--muted); vertical-align: super; margin-left: 5px; }
 .section-heading.compact { padding-bottom: 20px; position: sticky; top: 0; background: #eeece5eF; backdrop-filter: blur(8px); z-index: 1; }
 .chat-heading-actions { display: flex; align-items: center; gap: 18px; }
+.token-usage { position: relative; color: #59615c; font: 10px 'DM Mono', monospace; cursor: default; outline: none; }
+.token-usage > span { white-space: nowrap; border-bottom: 1px dotted #9b9d96; }
+.token-usage-tooltip { position: absolute; right: 0; bottom: calc(100% + 10px); z-index: 5; width: 210px; padding: 13px 14px; border: 1px solid #cbc8be; border-radius: 4px; background: #16231f; color: #f7f4ec; box-shadow: 0 8px 24px #16231f26; opacity: 0; visibility: hidden; transform: translateY(4px); transition: opacity .15s, transform .15s, visibility .15s; pointer-events: none; }
+.token-usage:hover .token-usage-tooltip, .token-usage:focus-visible .token-usage-tooltip { opacity: 1; visibility: visible; transform: translateY(0); }
+.token-usage-tooltip::after { content: ''; position: absolute; right: 20px; top: 100%; border: 6px solid transparent; border-top-color: #16231f; }
+.token-usage-tooltip strong { display: block; margin-bottom: 9px; color: #fff; font: 500 10px 'DM Mono', monospace; letter-spacing: .06em; text-transform: uppercase; }
+.token-usage-tooltip dl { margin: 0; }
+.token-usage-tooltip dl div { display: flex; justify-content: space-between; gap: 20px; padding: 3px 0; }
+.token-usage-tooltip dt { color: #aeb9b3; }
+.token-usage-tooltip dd { margin: 0; color: #fff; font-weight: 500; }
 .new-conversation-button { border: 1px solid var(--line); background: transparent; border-radius: 3px; padding: 7px 10px; color: #59615c; font: 10px 'DM Mono', monospace; cursor: pointer; }
 .new-conversation-button:hover { border-color: #8c908b; color: var(--ink); background: #fff; }
 .transcript { min-height: 0; overflow-y: auto; padding: 10px 30px 24px; scroll-behavior: smooth; }

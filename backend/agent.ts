@@ -7,6 +7,58 @@ import { createLanguageModel, redactProviderError } from './llm/index.js';
 import type { DeploymentProgress } from './docker.js';
 export { legacyAzureProviderOptions as azureProviderOptions } from './llm/index.js';
 
+type TokenUsage = {
+  input: number;
+  output: number;
+  thinking: number;
+  cacheRead: number;
+  cacheWrite: number;
+};
+
+function tokenCount(value: unknown) {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? Math.floor(value) : 0;
+}
+
+function addTokenUsage(left: TokenUsage, right: TokenUsage): TokenUsage {
+  return {
+    input: left.input + right.input,
+    output: left.output + right.output,
+    thinking: left.thinking + right.thinking,
+    cacheRead: left.cacheRead + right.cacheRead,
+    cacheWrite: left.cacheWrite + right.cacheWrite,
+  };
+}
+
+function messageTokenUsage(message: UIMessage | undefined): TokenUsage {
+  const metadata = message?.metadata;
+  if (typeof metadata !== 'object' || metadata === null || !('tokenUsage' in metadata)) {
+    return { input: 0, output: 0, thinking: 0, cacheRead: 0, cacheWrite: 0 };
+  }
+  const usage = (metadata as { tokenUsage?: Record<string, unknown> }).tokenUsage;
+  return {
+    input: tokenCount(usage?.input),
+    output: tokenCount(usage?.output),
+    thinking: tokenCount(usage?.thinking),
+    cacheRead: tokenCount(usage?.cacheRead),
+    cacheWrite: tokenCount(usage?.cacheWrite),
+  };
+}
+
+function providerTokenUsage(usage: {
+  inputTokens?: number;
+  outputTokens?: number;
+  inputTokenDetails?: { cacheReadTokens?: number; cacheWriteTokens?: number };
+  outputTokenDetails?: { reasoningTokens?: number };
+}): TokenUsage {
+  return {
+    input: tokenCount(usage.inputTokens),
+    output: tokenCount(usage.outputTokens),
+    thinking: tokenCount(usage.outputTokenDetails?.reasoningTokens),
+    cacheRead: tokenCount(usage.inputTokenDetails?.cacheReadTokens),
+    cacheWrite: tokenCount(usage.inputTokenDetails?.cacheWriteTokens),
+  };
+}
+
 export function sanitizeAgentMessages(messages: UIMessage[]): UIMessage[] {
   return messages.map((message) => ({
     ...message,
@@ -156,7 +208,7 @@ export async function createChatResponse(
   abortSignal?: AbortSignal,
   requestId = 'unknown',
 ) {
-  type AgentMessage = UIMessage<unknown, {
+  type AgentMessage = UIMessage<{ tokenUsage: TokenUsage }, {
     agentStatus: DeploymentProgress;
     agentError: { requestId: string; provider: string; model: string; details: string };
   }>;
@@ -423,6 +475,10 @@ export async function createChatResponse(
     });
     return `AI provider request failed (request ID: ${requestId}). Please check the AI Provider settings and try again.`;
   };
+  const previousUsage = messages.at(-1)?.role === 'assistant'
+    ? messageTokenUsage(messages.at(-1))
+    : { input: 0, output: 0, thinking: 0, cacheRead: 0, cacheWrite: 0 };
+  let currentUsage: TokenUsage = { input: 0, output: 0, thinking: 0, cacheRead: 0, cacheWrite: 0 };
   const stream = createUIMessageStream<AgentMessage>({
     onError,
     execute: async ({ writer }) => {
@@ -432,6 +488,12 @@ export async function createChatResponse(
         uiMessages: sanitizeAgentMessages(messages),
         abortSignal,
         onError,
+        messageMetadata: ({ part }) => {
+          if (part.type === 'finish-step') currentUsage = addTokenUsage(currentUsage, providerTokenUsage(part.usage));
+          if (part.type === 'finish') currentUsage = providerTokenUsage(part.totalUsage);
+          if (part.type !== 'finish-step' && part.type !== 'finish') return undefined;
+          return { tokenUsage: addTokenUsage(previousUsage, currentUsage) };
+        },
       });
       // The agent stream has no custom data parts, so it is safe to merge into our richer message stream.
       writer.merge(agentStream as unknown as Parameters<typeof writer.merge>[0]);
