@@ -572,6 +572,18 @@ export class RepositoryService {
     return { appId: app.id, path: relative, bytes: Buffer.byteLength(content), sha256: createHash('sha256').update(content).digest('hex') };
   }
 
+  async prepareGeneratedBuildContext(appIdOrName: string, contextPath: string, dockerfileContent: string, dockerignoreContent: string) {
+    const app = await this.gitApp(appIdOrName);
+    const checkout = await this.checkout(app.id);
+    const contextRelative = safeRelativePath(contextPath, true);
+    const context = await this.existingPath(checkout, contextRelative);
+    if (!(await stat(context)).isDirectory()) throw new Error('Docker build context must be a repository directory');
+    const repositoryPrefix = contextRelative === '.' ? '' : `${contextRelative}/`;
+    await this.writeDeploymentFile(app.id, `${repositoryPrefix}Dockerfile.halfcloud`, dockerfileContent);
+    await this.writeDeploymentFile(app.id, `${repositoryPrefix}.dockerignore`, dockerignoreContent);
+    return this.buildContext(app.id, contextRelative, 'Dockerfile.halfcloud');
+  }
+
   async buildContext(appIdOrName: string, contextPath = '.', dockerfilePath = 'Dockerfile'): Promise<RepositoryBuildContext> {
     const app = await this.gitApp(appIdOrName);
     if (!app.source?.resolvedCommit) throw new Error('Repository does not have a resolved commit');

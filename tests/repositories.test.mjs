@@ -205,3 +205,33 @@ test('prepares a bounded Docker context without Git metadata or likely secret fi
   assert.equal((await apps.get(app.id)).deployment.stage, 'building');
   assert.equal((await apps.get(app.id)).deployment.buildAttempts, 1);
 });
+
+test('persists and selects a generated Dockerfile in the build context before building', async (t) => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'halfcloud-generated-build-context-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const data = path.join(directory, 'data');
+  const repositories = path.join(directory, 'repositories');
+  const apps = new AppStore(data);
+  const commit = 'd'.repeat(40);
+  const app = await apps.create('Generated Build Project', {
+    source: { type: 'git', url: 'https://example.com/project.git', branch: 'main', resolvedCommit: commit },
+    deployment: { status: 'in_progress', stage: 'planning', buildAttempts: 0, updatedAt: new Date().toISOString() },
+  });
+  const checkout = path.join(repositories, app.id, 'repository');
+  await mkdir(path.join(checkout, 'web'), { recursive: true });
+  await writeFile(path.join(checkout, 'web', 'package.json'), '{"scripts":{"start":"node index.js"}}\n');
+  const service = new RepositoryService(apps, repositories);
+
+  const context = await service.prepareGeneratedBuildContext(
+    app.id,
+    'web',
+    'FROM node:24-alpine\nCOPY . .\nCMD ["npm", "start"]\n',
+    'node_modules\n',
+  );
+
+  assert.equal(context.context, path.join(checkout, 'web'));
+  assert.equal(context.dockerfile, 'Dockerfile.halfcloud');
+  assert.deepEqual(context.entries.sort(), ['.dockerignore', 'Dockerfile.halfcloud', 'package.json']);
+  assert.match(await readFile(path.join(checkout, 'web', 'Dockerfile.halfcloud'), 'utf8'), /^FROM node:24-alpine/);
+  assert.equal(await readFile(path.join(checkout, 'web', '.dockerignore'), 'utf8'), 'node_modules\n');
+});

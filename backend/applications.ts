@@ -144,9 +144,17 @@ export class ApplicationService {
   readRepositoryFile(appIdOrName: string, repositoryPath: string) { return this.repositories.readFile(appIdOrName, repositoryPath); }
   writeRepositoryDeploymentFile(appIdOrName: string, repositoryPath: string, content: string) { return this.repositories.writeDeploymentFile(appIdOrName, repositoryPath, content); }
 
-  async buildRepositoryImage(appIdOrName: string, contextPath = '.', dockerfilePath = 'Dockerfile', onProgress?: (progress: DeploymentProgress) => void) {
+  async buildRepositoryImage(
+    appIdOrName: string,
+    contextPath = '.',
+    dockerfilePath = 'Dockerfile',
+    onProgress?: (progress: DeploymentProgress) => void,
+    generatedFiles?: { dockerfileContent: string; dockerignoreContent: string },
+  ) {
     try {
-      const build = await this.repositories.buildContext(appIdOrName, contextPath, dockerfilePath);
+      const build = generatedFiles
+        ? await this.repositories.prepareGeneratedBuildContext(appIdOrName, contextPath, generatedFiles.dockerfileContent, generatedFiles.dockerignoreContent)
+        : await this.repositories.buildContext(appIdOrName, contextPath, dockerfilePath);
       onProgress?.({ phase: 'activity', label: 'Building application' });
       const result = await this.docker.buildImage(build);
       await this.repositories.buildSucceeded(appIdOrName, result.image);
