@@ -26,7 +26,7 @@ await docker.syncRoutes();
 const loginAttempts = new Map<string, { count: number; resetAt: number }>();
 
 async function resolveLlmCredentials(value: unknown): Promise<LlmCredentials> {
-  const input = z.object({ provider: z.enum(['openai', 'anthropic', 'azure-foundry', 'cerebras', 'groq', 'gemini']), apiKey: z.string().optional(), endpoint: z.string().optional() }).parse(value);
+  const input = z.object({ provider: z.enum(['openai', 'anthropic', 'azure-foundry', 'cerebras', 'grok', 'gemini']), apiKey: z.string().optional(), endpoint: z.string().optional() }).parse(value);
   const active = await settings.get();
   const apiKey = input.apiKey || (active?.provider === input.provider ? active.apiKey : undefined);
   const endpoint = input.endpoint || (active?.provider === input.provider ? active.endpoint : undefined);

@@ -7,7 +7,7 @@ import { SettingsStore } from '../dist/backend/config.js';
 import { providerMetadata, redactProviderError } from '../dist/backend/llm/index.js';
 
 test('provider metadata contains every supported provider without remote icons', () => {
-  assert.deepEqual(providerMetadata.map(({ id }) => id), ['openai', 'anthropic', 'azure-foundry', 'cerebras', 'groq', 'gemini']);
+  assert.deepEqual(providerMetadata.map(({ id }) => id), ['openai', 'anthropic', 'azure-foundry', 'cerebras', 'grok', 'gemini']);
   assert.ok(providerMetadata.every(({ icon }) => icon.startsWith('/providers/')));
 });
 
@@ -16,7 +16,7 @@ test('settings public value never returns the API key', async () => {
   try {
     const store = new SettingsStore(directory);
     await store.save({
-      provider: 'groq',
+      provider: 'grok',
       apiKey: 'secret-provider-key',
       model: 'test-model',
       capabilities: { streaming: true, tools: true },

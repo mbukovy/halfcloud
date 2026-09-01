@@ -1,6 +1,6 @@
 import { z } from 'zod';
 
-export const llmProviders = ['openai', 'anthropic', 'azure-foundry', 'cerebras', 'groq', 'gemini'] as const;
+export const llmProviders = ['openai', 'anthropic', 'azure-foundry', 'cerebras', 'grok', 'gemini'] as const;
 export const llmProviderSchema = z.enum(llmProviders);
 export type LlmProvider = z.infer<typeof llmProviderSchema>;
 

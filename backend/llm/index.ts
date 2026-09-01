@@ -2,8 +2,8 @@ import { createAnthropic } from '@ai-sdk/anthropic';
 import { createAzure } from '@ai-sdk/azure';
 import { createCerebras } from '@ai-sdk/cerebras';
 import { createGoogleGenerativeAI } from '@ai-sdk/google';
-import { createGroq } from '@ai-sdk/groq';
 import { createOpenAI } from '@ai-sdk/openai';
+import { createXai } from '@ai-sdk/xai';
 import { streamText, tool, type LanguageModel } from 'ai';
 import { z } from 'zod';
 import type { LlmCredentials, LlmProvider, LlmProviderConfig, ModelCapabilities, ModelInfo, ProviderMetadata } from './types.js';
@@ -13,12 +13,12 @@ export const providerMetadata: ProviderMetadata[] = [
   { id: 'anthropic', label: 'Anthropic', icon: '/providers/anthropic.svg', requiresEndpoint: false, recommendedModel: 'claude-sonnet-4-5' },
   { id: 'azure-foundry', label: 'Azure Foundry', icon: '/providers/azure-foundry.png', requiresEndpoint: true },
   { id: 'cerebras', label: 'Cerebras', icon: '/providers/cerebras.png', requiresEndpoint: false, recommendedModel: 'gpt-oss-120b' },
-  { id: 'groq', label: 'Groq', icon: '/providers/groq.svg', requiresEndpoint: false, recommendedModel: 'openai/gpt-oss-120b' },
+  { id: 'grok', label: 'Grok', icon: '/providers/grok.svg', requiresEndpoint: false, recommendedModel: 'grok-latest' },
   { id: 'gemini', label: 'Google Gemini', icon: '/providers/gemini.png', requiresEndpoint: false, recommendedModel: 'gemini-2.5-flash' },
 ];
 
 const fallbackModels: Record<LlmProvider, string[]> = {
-  openai: [], anthropic: [], 'azure-foundry': [], cerebras: [], groq: [], gemini: [],
+  openai: [], anthropic: [], 'azure-foundry': [], cerebras: [], grok: [], gemini: [],
 };
 
 function azureBaseUrl(endpointValue: string) {
@@ -47,7 +47,7 @@ function modelEndpoint(credentials: LlmCredentials) {
     case 'anthropic': return { url: 'https://api.anthropic.com/v1/models', headers: { 'x-api-key': credentials.apiKey, 'anthropic-version': '2023-06-01' } };
     case 'azure-foundry': return { url: `${azureBaseUrl(credentials.endpoint!)}/models`, headers: { 'api-key': credentials.apiKey } };
     case 'cerebras': return { url: 'https://api.cerebras.ai/v1/models', headers: { authorization: `Bearer ${credentials.apiKey}` } };
-    case 'groq': return { url: 'https://api.groq.com/openai/v1/models', headers: { authorization: `Bearer ${credentials.apiKey}` } };
+    case 'grok': return { url: 'https://api.x.ai/v1/models', headers: { authorization: `Bearer ${credentials.apiKey}` } };
     case 'gemini': return { url: 'https://generativelanguage.googleapis.com/v1beta/models', headers: { 'x-goog-api-key': credentials.apiKey } };
   }
 }
@@ -58,7 +58,7 @@ export function createLanguageModel(config: LlmProviderConfig | (LlmCredentials 
     case 'anthropic': return createAnthropic({ apiKey: config.apiKey })(config.model);
     case 'azure-foundry': return createAzure({ apiKey: config.apiKey, baseURL: azureBaseUrl(config.endpoint!) }).responses(config.model);
     case 'cerebras': return createCerebras({ apiKey: config.apiKey })(config.model);
-    case 'groq': return createGroq({ apiKey: config.apiKey })(config.model);
+    case 'grok': return createXai({ apiKey: config.apiKey })(config.model);
     case 'gemini': return createGoogleGenerativeAI({ apiKey: config.apiKey })(config.model);
   }
 }
