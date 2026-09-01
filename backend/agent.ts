@@ -235,8 +235,9 @@ Rules:
 - Never ask for a Basic Auth username or password in chat and never pass credentials as tool arguments. Use requestBasicAuthSetup or requestBasicAuthPasswordChange so the trusted HalfCloud widget collects credentials outside AI context.
 - Removing route protection makes that hostname publicly accessible. Clearly state this consequence before calling removeRouteProtection; the interface requires explicit user approval.
 - Environment variables may be protected from AI. For protected variables, you can see their name and configuration status but never their value.
+- Protected environment values are still available to the signed-in user. When the user asks for an existing generated password or secret, tell them to open the App's Service, select Environment, find the variable, and select Show. Do not generate a replacement merely because you cannot read the current value.
 - Never ask the user to paste API keys, passwords, tokens, credentials, or other sensitive values into chat. Use requestEnvironmentVariable so the user can submit the value directly to HalfCloud with AI protection enabled by default. When the same credential is required by multiple Services in one App, request it once and use additionalTargets to apply that exact value everywhere.
-- Use generateEnvironmentSecret for new application secrets and service passwords that do not need to be supplied by an external provider. The generated value is applied directly and is never returned to AI.
+- Use generateEnvironmentSecret for new application secrets and service passwords that do not need to be supplied by an external provider. The generated value is applied directly and is never returned to AI. Replace an existing value only when the user explicitly asks for a new or regenerated value; otherwise direct them to its Environment row.
 - Configure all non-sensitive database initialization variables before requesting a shared database credential. Database image password variables commonly apply only on first initialization, so do not repeatedly change one side or delete persistent data when authentication fails; inspect logs and configuration first.
 - Use setEnvironmentVariable only for non-sensitive configuration that may remain visible to AI, such as NODE_ENV, LOG_LEVEL, PORT, or a public APP_URL. Never use it for credentials.
 - createApp and addService deliberately stage new Services without starting them. Configure every required non-sensitive variable, collect every required sensitive value, and only then use startApp or startService. Never start a database or another initialization-sensitive Service before its complete first-run environment is set.
@@ -425,14 +426,15 @@ export async function createChatResponse(
       execute: ({ serviceId, name, description, additionalTargets }) => docker.requestEnvironmentVariable(serviceId, name, description, additionalTargets),
     }),
     generateEnvironmentSecret: tool({
-      description: 'Generate a cryptographically secure value inside HalfCloud and apply it as an AI-protected environment variable to one or more Services in the same App. The value is never returned.',
+      description: 'Generate a cryptographically secure value inside HalfCloud and apply it as an AI-protected environment variable to one or more Services in the same App. The value is never returned. Existing values are preserved unless replaceExisting is true following an explicit user request for a new or regenerated value.',
       inputSchema: z.object({
         serviceId,
         name: z.string().min(1),
         additionalTargets: z.array(z.object({ serviceId, name: z.string().min(1) })).max(19).optional(),
         bytes: z.number().int().min(16).max(128).default(32),
+        replaceExisting: z.boolean().default(false).describe('Set true only when the user explicitly requests replacing or regenerating an existing value'),
       }),
-      execute: ({ serviceId, name, additionalTargets, bytes }) => docker.generateEnvironmentSecret(serviceId, name, additionalTargets, bytes),
+      execute: ({ serviceId, name, additionalTargets, bytes, replaceExisting }) => docker.generateEnvironmentSecret(serviceId, name, additionalTargets, bytes, replaceExisting),
     }),
     listServiceDomains: tool({
       description: 'List all routing domains for a public HalfCloud application, including primary, managed, DNS, and HTTPS state.',

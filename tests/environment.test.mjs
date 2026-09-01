@@ -131,6 +131,30 @@ test('generated environment secrets are protected and never returned to the agen
   assert.ok(generated.length >= 40);
   assert.equal((await store.list('service_web')).find((variable) => variable.name === 'APP_SECRET').protectedFromAI, true);
   assert.equal(JSON.stringify(result).includes(generated), false);
+  assert.match(result.valueLocation, /Environment table.*Show/);
+});
+
+test('generated environment secrets preserve existing values unless replacement is explicit', async (t) => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'halfcloud-environment-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const store = new EnvironmentStore(directory);
+  const environments = new Map([['service_web', { ADMIN_PASSWORD: 'existing-password' }]]);
+  const services = [{ id: 'container_web', serviceId: 'service_web', appId: 'app_web', runtimeName: 'web-runtime', name: 'web', ports: [] }];
+  const docker = {
+    listContainers: async () => services,
+    getContainerEnvironment: async (id) => ({ containerId: id, name: id, environment: environments.get(id) ?? {} }),
+    replaceContainerEnvironment: async (id, environment) => { environments.set(id, environment); return { containerId: id }; },
+  };
+  const applications = new ApplicationService(docker, { sync: async () => undefined }, { get: async () => [] }, store);
+
+  await assert.rejects(
+    applications.generateEnvironmentSecret('service_web', 'ADMIN_PASSWORD'),
+    /Environment table.*Show.*explicitly requests a new value/,
+  );
+  assert.equal(environments.get('service_web').ADMIN_PASSWORD, 'existing-password');
+
+  await applications.generateEnvironmentSecret('service_web', 'ADMIN_PASSWORD', [], 32, true);
+  assert.notEqual(environments.get('service_web').ADMIN_PASSWORD, 'existing-password');
 });
 
 test('shared environment requests reject targets outside the App', async (t) => {

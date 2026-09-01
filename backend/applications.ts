@@ -420,10 +420,22 @@ export class ApplicationService {
     };
   }
 
-  async generateEnvironmentSecret(id: string, name: string, additionalTargets: EnvironmentTarget[] = [], bytes = 32) {
+  async generateEnvironmentSecret(id: string, name: string, additionalTargets: EnvironmentTarget[] = [], bytes = 32, replaceExisting = false) {
     if (!Number.isInteger(bytes) || bytes < 16 || bytes > 128) throw new Error('Generated secret size must be between 16 and 128 bytes');
+    if (!replaceExisting) {
+      for (const target of [{ serviceId: id, name }, ...additionalTargets]) {
+        const existing = (await this.listEnvironment(target.serviceId)).find((variable) => variable.name === target.name);
+        if (existing) {
+          throw new Error(`${target.name} is already configured. The user can retrieve it from the Service's Environment table by selecting Show. Set replaceExisting only if the user explicitly requests a new value.`);
+        }
+      }
+    }
     const request = await this.requestEnvironmentVariable(id, name, 'Generated securely by HalfCloud', additionalTargets);
-    return this.completeEnvironmentRequest(id, request.requestId, randomBytes(bytes).toString('base64url'), true);
+    const result = await this.completeEnvironmentRequest(id, request.requestId, randomBytes(bytes).toString('base64url'), true);
+    return {
+      ...result,
+      valueLocation: `Open the Service's Environment table, find ${name}, and select Show.`,
+    };
   }
 
   async completeEnvironmentRequest(id: string, requestId: string, value: string, protectedFromAI = true) {
