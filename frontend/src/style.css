@@ -97,7 +97,7 @@ input:focus, textarea:focus { border-color: var(--ink); box-shadow: 0 0 0 3px #1
 .token-usage-tooltip dl div { display: flex; justify-content: space-between; gap: 20px; padding: 3px 0; }
 .token-usage-tooltip dt { color: #aeb9b3; }
 .token-usage-tooltip dd { margin: 0; color: #fff; font-weight: 500; }
-.conversation-debug-button { display: grid; place-items: center; width: 25px; height: 25px; padding: 0 0 2px 2px; border: 1px solid transparent; border-radius: 3px; background: transparent; color: #888c85; cursor: pointer; transition: color .15s, border-color .15s, background .15s; }
+.conversation-debug-button { display: grid; place-items: center; width: 25px; height: 25px; padding: 0; border: 1px solid transparent; border-radius: 3px; background: transparent; color: #888c85; cursor: pointer; transition: color .15s, border-color .15s, background .15s; }
 .conversation-debug-button:hover, .conversation-debug-button:focus-visible { border-color: var(--line); background: #fff; color: var(--ink); outline: none; }
 .conversation-debug-button.copied { color: var(--green); }
 .conversation-debug-button.failed { color: #b13722; }
@@ -184,7 +184,7 @@ input:focus, textarea:focus { border-color: var(--ink); box-shadow: 0 0 0 3px #1
 .send-button { flex: 0 0 36px; width: 36px; height: 36px; border: 0; border-radius: 3px; background: var(--accent); color: white; font-size: 18px; cursor: pointer; }
 .send-button.stop { font-size: 10px; background: var(--ink); }
 .send-button:disabled { background: #bbb8af; cursor: default; }
-.conversation-loader { display: grid; grid-template-columns: auto 1fr; align-items: center; gap: 10px; height: 9px; margin: 0 30px; visibility: hidden; color: #59615c; font: 500 9px 'DM Mono', monospace; letter-spacing: .1em; text-transform: uppercase; }
+.conversation-loader { display: grid; grid-template-columns: auto 1fr; align-items: center; gap: 10px; height: 9px; margin: 0 30px 6px; padding-left: 8px; visibility: hidden; color: #59615c; font: 500 9px 'DM Mono', monospace; letter-spacing: .1em; text-transform: uppercase; }
 .conversation-loader span { white-space: nowrap; }
 .conversation-loader.active { visibility: visible; }
 .conversation-loader i { position: relative; height: 2px; overflow: hidden; background: #dedbd2; }
