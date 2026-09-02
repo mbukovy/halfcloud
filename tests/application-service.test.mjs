@@ -46,8 +46,8 @@ class FakeDocker {
     return { containerId: id, state: 'running' };
   }
   async restartContainer(id) { this.restarted.push(id); return { containerId: id, state: 'running' }; }
-  async runServiceInitializationCommand(id, command) {
-    this.initializationCommands.push({ id, command });
+  async runServiceInitializationCommand(id, command, networkMode) {
+    this.initializationCommands.push({ id, command, networkMode });
     return { serviceId: this.services.find((service) => service.id === id)?.serviceId, exitCode: 0, completed: true };
   }
   async deleteContainer(id) { this.services = this.services.filter((service) => service.id !== id); }
@@ -100,9 +100,9 @@ test('deploys WordPress and MySQL as Services in one App and adds Redis to it', 
   await applications.restartApp('Company Website');
   assert.deepEqual(runtime.restarted, ['container-1', 'container-2', 'container-3']);
 
-  const initialized = await applications.runServiceInitializationCommand('Company Website', 'redis', ['redis-cli', '--cluster', 'fix']);
+  const initialized = await applications.runServiceInitializationCommand('Company Website', 'redis', ['redis-cli', '--cluster', 'fix'], 'service');
   assert.equal(initialized.completed, true);
-  assert.deepEqual(runtime.initializationCommands, [{ id: 'container-3', command: ['redis-cli', '--cluster', 'fix'] }]);
+  assert.deepEqual(runtime.initializationCommands, [{ id: 'container-3', command: ['redis-cli', '--cluster', 'fix'], networkMode: 'service' }]);
 });
 
 test('deleting a private Git App removes credentials before metadata and returns the remote cleanup URL', async (t) => {

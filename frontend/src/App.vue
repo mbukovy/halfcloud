@@ -434,6 +434,7 @@ function toolDetails(part: Record<string, unknown>) {
   if (name === 'getApplicationLogs' && typeof input?.tail === 'number') details.push({ text: `Recent lines: ${input.tail}` });
   if (name === 'setEnvironmentVariable' && typeof input?.name === 'string') details.push({ text: `Environment key: ${input.name}` });
   if (name === 'runServiceInitializationCommand' && Array.isArray(input?.command)) details.push({ text: `Arguments: ${JSON.stringify(input.command)}` });
+  if (name === 'runServiceInitializationCommand') details.push({ text: input?.networkMode === 'service' ? 'Network: live Service localhost' : 'Network: private App network' });
   if (typeof input?.volumeName === 'string') details.push({ text: `Volume: ${input.volumeName}` });
   if (typeof input?.mountTarget === 'string') details.push({ text: `Mount: ${input.mountTarget}` });
   if (typeof input?.hostname === 'string' && name.includes('ServiceDomain')) details.push({ text: `Domain: ${input.hostname}` });
@@ -529,7 +530,16 @@ function approvalCopy(part: Record<string, unknown>) {
   if (name === 'pruneUnusedImages') return { title: 'Remove all unused software?', detail: 'Apps and saved data will remain. Removed software will be downloaded again if it is needed later.', targets };
   if (name === 'removeService') return { title: 'Remove this Service?', detail: 'The Service will be removed from its App. Managed persistent data will remain.', targets };
   if (name === 'repairStorageOwnership') return { title: 'Repair this storage ownership?', detail: 'The application may be briefly stopped while ownership is changed recursively.', targets };
-  if (name === 'runServiceInitializationCommand') return { title: 'Run this Service command?', detail: 'The command can change persistent data and contact private Services using configured credentials. It runs in a temporary container without publishing ports and does not start or stop the original Service.', targets };
+  if (name === 'runServiceInitializationCommand') {
+    const sharesServiceNetwork = recordValue(part.input)?.networkMode === 'service';
+    return {
+      title: 'Run this Service command?',
+      detail: sharesServiceNetwork
+        ? 'The command can change persistent data and access the running Service through localhost using configured credentials. It runs in a temporary container and does not restart the original Service.'
+        : 'The command can change persistent data and contact private Services using configured credentials. It runs in a temporary container without publishing ports and does not start or stop the original Service.',
+      targets,
+    };
+  }
   if (name === 'removeRouteProtection') return { title: 'Make this route public?', detail: 'Anyone who knows the URL will be able to access it without a password.', targets };
   if (name === 'deleteApp') {
     const deletesData = recordValue(part.input)?.deleteData === true;

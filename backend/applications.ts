@@ -1,7 +1,7 @@
 import { randomBytes, randomUUID } from 'node:crypto';
 import { AppStore } from './apps.js';
 import { CaddyService } from './caddy.js';
-import { DockerService, type CreateContainerInput, type DeploymentProgress, type ManagedVolumeFilter, type SearchContainerImagesInput } from './docker.js';
+import { DockerService, type CreateContainerInput, type DeploymentProgress, type ManagedVolumeFilter, type SearchContainerImagesInput, type ServiceCommandNetworkMode } from './docker.js';
 import { DomainStore, normalizeHostname, type ServiceDomain } from './domains.js';
 import { EnvironmentStore, assertEnvironmentVariableName, environmentRequestTargets, serializeEnvironmentForAgent, type EnvironmentTarget, type EnvironmentVariable } from './environment.js';
 import { RouteAccessRequestStore, assertBasicAuthPassword, assertBasicAuthUsername, hashBasicAuthPassword } from './route-access.js';
@@ -267,10 +267,10 @@ export class ApplicationService {
   }
   getContainerLogs(id: string, tail?: number) { return this.docker.getContainerLogs(id, tail); }
   getContainerStats(id: string) { return this.docker.getContainerStats(id); }
-  async runServiceInitializationCommand(appIdOrName: string, serviceIdOrName: string, command: string[]) {
+  async runServiceInitializationCommand(appIdOrName: string, serviceIdOrName: string, command: string[], networkMode: ServiceCommandNetworkMode = 'app') {
     const app = await this.apps.get(appIdOrName);
     const service = await this.service(app.id, serviceIdOrName);
-    return this.docker.runServiceInitializationCommand(service.id, command);
+    return this.docker.runServiceInitializationCommand(service.id, command, networkMode);
   }
 
   async verifyGitDeployment(appIdOrName: string, serviceIdOrName?: string, healthPath = '/') {

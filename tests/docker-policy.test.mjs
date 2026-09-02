@@ -272,7 +272,9 @@ test('runs Service initialization in an isolated one-shot container with the sam
   const bindSource = path.join(appsDir, appId, 'config');
   await mkdir(bindSource, { recursive: true });
   const sourceInspection = {
+    Id: 'container-source',
     Image: 'sha256:immutable-image',
+    State: { Running: true },
     Config: {
       Labels: {
         'halfcloud.managed': 'true',
@@ -354,6 +356,10 @@ test('runs Service initialization in an isolated one-shot container with the sam
   });
   assert.deepEqual(createOptions.NetworkingConfig, { EndpointsConfig: { [appNetworkName(appId)]: {} } });
 
+  await service.runServiceInitializationCommand(serviceId, ['openclaw', 'devices', 'list'], 'service');
+  assert.equal(createOptions.HostConfig.NetworkMode, 'container:container-source');
+  assert.equal(createOptions.NetworkingConfig, undefined);
+
   service.initializingServices.add(serviceId);
   await assert.rejects(service.runServiceInitializationCommand(serviceId, ['setup']), /already running/);
   service.initializingServices.delete(serviceId);
@@ -372,6 +378,8 @@ test('cleans up a failed one-shot initialization without changing the source Ser
     async inspect() {
       return {
         Image: 'sha256:image',
+        Id: 'source',
+        State: { Running: false },
         Config: { Labels: labels, Env: [] },
         HostConfig: { PidsLimit: 512 },
         NetworkSettings: { Networks: { [appNetworkName(appId)]: {} } },
@@ -402,4 +410,5 @@ test('cleans up a failed one-shot initialization without changing the source Ser
   assert.equal(sourceLifecycleCalls, 0);
   assert.equal(service.initializingServices.size, 0);
   await assert.rejects(service.runServiceInitializationCommand(serviceId, []), /1-32 bounded arguments/);
+  await assert.rejects(service.runServiceInitializationCommand(serviceId, ['setup'], 'service'), /requires a running Service/);
 });

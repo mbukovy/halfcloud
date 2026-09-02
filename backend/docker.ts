@@ -186,6 +186,8 @@ export interface ManagedVolumeFilter {
   orphaned?: boolean;
 }
 
+export type ServiceCommandNetworkMode = 'app' | 'service';
+
 export class DockerService {
   private readonly docker: Docker;
   private readonly appsDir: string;
@@ -507,10 +509,11 @@ export class DockerService {
     return { containerId: container.id, state: 'running' };
   }
 
-  async runServiceInitializationCommand(id: string, command: string[]) {
+  async runServiceInitializationCommand(id: string, command: string[], networkMode: ServiceCommandNetworkMode = 'app') {
     if (!command.length || command.length > 32 || command.some((part) => !part || part.length > 4096 || part.includes('\0'))) {
       throw new Error('Initialization command must contain 1-32 bounded arguments');
     }
+    if (networkMode !== 'app' && networkMode !== 'service') throw new Error('Initialization network mode must be app or service');
     const source = await this.managedContainer(id);
     const inspection = await source.inspect();
     const appId = inspection.Config.Labels?.['halfcloud.app.id'];
@@ -526,6 +529,7 @@ export class DockerService {
       const networkName = appNetworkName(appId);
       if (!inspection.NetworkSettings.Networks?.[networkName]) throw new Error(`Managed Service is not connected to its App network ${networkName}`);
       await this.ensureAppNetwork(appId);
+      if (networkMode === 'service' && !inspection.State.Running) throw new Error('Service-local initialization requires a running Service');
 
       const appsRoot = await realpath(this.appsDir);
       const appDir = path.join(appsRoot, appId);
@@ -557,7 +561,7 @@ export class DockerService {
           'halfcloud.service.id': serviceId,
         },
         HostConfig: {
-          NetworkMode: networkName,
+          NetworkMode: networkMode === 'service' ? `container:${inspection.Id}` : networkName,
           PortBindings: {},
           PublishAllPorts: false,
           RestartPolicy: { Name: 'no' },
@@ -566,7 +570,7 @@ export class DockerService {
           PidsLimit: Math.min(inspection.HostConfig.PidsLimit ?? 512, 512),
           Mounts: mounts,
         },
-        NetworkingConfig: { EndpointsConfig: { [networkName]: {} } },
+        ...(networkMode === 'app' ? { NetworkingConfig: { EndpointsConfig: { [networkName]: {} } } } : {}),
       });
     } catch (error) {
       initializingServices.delete(serviceId);

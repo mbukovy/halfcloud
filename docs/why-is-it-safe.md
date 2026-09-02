@@ -28,7 +28,7 @@ Rootless Docker runs the daemon and containers without host root privileges and 
 
 The model can call only operations defined by HalfCloud. There is no host shell, interactive container shell, arbitrary Docker API proxy, general file browser, or SSH tool. For Git-backed Apps, repository tools are read-only except for Dockerfile variants and `.dockerignore`; all paths are confined to that App's persistent checkout and file contents are bounded.
 
-An approval-gated initialization tool can execute one bounded argument vector in a disposable container for a selected managed Service. It receives that Service's image, environment, user, persistent mounts, and private App network, but no host ports, restart policy, or stable Service alias. HalfCloud does not return command output to the model. The tool cannot mount new host paths or address an unmanaged container, but the command can change existing Service data, use configured credentials, and contact dependencies in the same App.
+An approval-gated initialization tool can execute one bounded argument vector in a disposable container for a selected managed Service. It receives that Service's image, environment, user, and persistent mounts, but no host ports or restart policy. It normally joins the private App network; an explicit mode can share a running Service's network namespace when a documented administrative CLI requires local access. HalfCloud does not return command output to the model. The tool cannot mount new host paths or address an unmanaged container, but the command can change existing Service data, use configured credentials, and contact dependencies in the same App.
 
 The deployment API rejects:
 
