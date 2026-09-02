@@ -61,9 +61,11 @@ type HalfCloudMessage = UIMessage<{ tokenUsage: TokenUsage }, { agentStatus: Age
 const agentStatus = ref<AgentStatus | null>(null);
 const agentErrorDetails = ref<AgentErrorDetails | null>(null);
 const activityElapsedSeconds = ref(0);
+const debugCopyState = ref<'idle' | 'copied' | 'failed'>('idle');
 const mobileTab = ref<'operator' | 'apps' | 'server'>('operator');
 let refreshTimer: number | undefined;
 let activityTimer: number | undefined;
+let debugCopyTimer: number | undefined;
 
 const authenticatedFetch: typeof fetch = async (input, init) => {
   const response = await fetch(input, init);
@@ -146,6 +148,33 @@ function formatTokenCount(tokens: number) {
   return tokens.toLocaleString('en-US');
 }
 
+async function copyConversationDebug() {
+  const payload = {
+    format: 'halfcloud-conversation-debug',
+    version: 1,
+    exportedAt: new Date().toISOString(),
+    provider: settings.value?.provider ?? null,
+    model: settings.value?.model ?? null,
+    status: status.value,
+    tokenUsage: conversationTokenUsage.value,
+    agentStatus: agentStatus.value,
+    error: agentErrorDetails.value ?? (chatError.value ? {
+      name: chatError.value.name,
+      message: chatError.value.message,
+    } : null),
+    messages: messages.value,
+  };
+
+  try {
+    await navigator.clipboard.writeText(JSON.stringify(payload, null, 2));
+    debugCopyState.value = 'copied';
+  } catch {
+    debugCopyState.value = 'failed';
+  }
+  if (debugCopyTimer) window.clearTimeout(debugCopyTimer);
+  debugCopyTimer = window.setTimeout(() => { debugCopyState.value = 'idle'; }, 2000);
+}
+
 function textPart(part: unknown): part is { type: 'text'; text: string } {
   return typeof part === 'object' && part !== null && (part as { type?: string }).type === 'text';
 }
@@ -220,7 +249,7 @@ function toolLabel(part: Record<string, unknown>) {
     searchContainerImages: 'Finding the right software',
     listApps: 'Inspecting Apps', createApp: 'Creating App', createGitApp: 'Cloning repository', inspectRepository: 'Inspecting repository', listRepositoryDirectory: 'Browsing repository', readRepositoryFile: 'Reading project file', writeRepositoryDeploymentFile: 'Preparing Docker configuration', buildRepositoryImage: 'Building application', addService: 'Adding Service', renameApp: 'Renaming App',
     startApp: 'Starting App', stopApp: 'Stopping App', restartApp: 'Restarting App', recreateApp: 'Recreating App', startService: 'Starting Service', stopService: 'Stopping Service', restartService: 'Restarting Service', recreateService: 'Recreating Service', removeService: 'Removing Service', deleteApp: 'Deleting App',
-    getAppLogs: 'Reading App logs', getServiceLogs: 'Reading Service logs', runDeploymentCommand: 'Initializing application', verifyGitDeployment: 'Verifying application', getApp: 'Inspecting App', getHostStatus: 'Inspecting host',
+    getAppLogs: 'Reading App logs', getServiceLogs: 'Reading Service logs', runServiceInitializationCommand: 'Initializing Service', verifyGitDeployment: 'Verifying application', getApp: 'Inspecting App', getHostStatus: 'Inspecting host',
     setEnvironmentVariable: 'Updating application environment', listEnvironment: 'Inspecting application environment',
     inspectContainer: 'Inspecting application', requestEnvironmentVariable: 'Requesting an environment variable', generateEnvironmentSecret: 'Generating application secret',
     listManagedVolumes: 'Inspecting managed storage', listDockerVolumes: 'Inspecting all storage', inspectManagedVolume: 'Inspecting managed volume',
@@ -404,6 +433,7 @@ function toolDetails(part: Record<string, unknown>) {
   }
   if (name === 'getApplicationLogs' && typeof input?.tail === 'number') details.push({ text: `Recent lines: ${input.tail}` });
   if (name === 'setEnvironmentVariable' && typeof input?.name === 'string') details.push({ text: `Environment key: ${input.name}` });
+  if (name === 'runServiceInitializationCommand' && Array.isArray(input?.command)) details.push({ text: `Arguments: ${JSON.stringify(input.command)}` });
   if (typeof input?.volumeName === 'string') details.push({ text: `Volume: ${input.volumeName}` });
   if (typeof input?.mountTarget === 'string') details.push({ text: `Mount: ${input.mountTarget}` });
   if (typeof input?.hostname === 'string' && name.includes('ServiceDomain')) details.push({ text: `Domain: ${input.hostname}` });
@@ -499,6 +529,7 @@ function approvalCopy(part: Record<string, unknown>) {
   if (name === 'pruneUnusedImages') return { title: 'Remove all unused software?', detail: 'Apps and saved data will remain. Removed software will be downloaded again if it is needed later.', targets };
   if (name === 'removeService') return { title: 'Remove this Service?', detail: 'The Service will be removed from its App. Managed persistent data will remain.', targets };
   if (name === 'repairStorageOwnership') return { title: 'Repair this storage ownership?', detail: 'The application may be briefly stopped while ownership is changed recursively.', targets };
+  if (name === 'runServiceInitializationCommand') return { title: 'Run this Service command?', detail: 'The command can change persistent data and contact private Services using configured credentials. It runs in a temporary container without publishing ports and does not start or stop the original Service.', targets };
   if (name === 'removeRouteProtection') return { title: 'Make this route public?', detail: 'Anyone who knows the URL will be able to access it without a password.', targets };
   if (name === 'deleteApp') {
     const deletesData = recordValue(part.input)?.deleteData === true;
@@ -904,6 +935,7 @@ onMounted(() => window.addEventListener('halfcloud:unauthorized', clearSession))
 onBeforeUnmount(() => {
   if (refreshTimer) window.clearInterval(refreshTimer);
   if (activityTimer) window.clearInterval(activityTimer);
+  if (debugCopyTimer) window.clearTimeout(debugCopyTimer);
   window.removeEventListener('halfcloud:unauthorized', clearSession);
 });
 </script>
@@ -967,25 +999,38 @@ onBeforeUnmount(() => {
 
     <div class="workspace">
       <section id="operator-panel" class="chat-panel" :class="{ 'mobile-panel-active': mobileTab === 'operator' }" role="tabpanel">
-        <div class="section-heading">
-           <div><p class="eyebrow">AI OPERATOR</p></div>
-           <div class="chat-heading-actions">
-              <div class="token-usage" tabindex="0" aria-describedby="token-usage-details">
-                <span>{{ formatCompactTokens(conversationTokens) }} tokens</span>
-                <div id="token-usage-details" class="token-usage-tooltip" role="tooltip">
-                  <strong>Conversation usage</strong>
-                  <dl>
-                    <div><dt>Total</dt><dd>{{ formatTokenCount(conversationTokens) }}</dd></div>
-                    <div><dt>Input</dt><dd>{{ formatTokenCount(conversationTokenUsage.input) }}</dd></div>
-                    <div><dt>Output</dt><dd>{{ formatTokenCount(conversationTokenUsage.output) }}</dd></div>
-                    <div><dt>Thinking</dt><dd>{{ formatTokenCount(conversationTokenUsage.thinking) }}</dd></div>
-                    <div><dt>Cache read</dt><dd>{{ formatTokenCount(conversationTokenUsage.cacheRead) }}</dd></div>
-                    <div><dt>Cache write</dt><dd>{{ formatTokenCount(conversationTokenUsage.cacheWrite) }}</dd></div>
-                  </dl>
+         <div class="section-heading">
+            <div><p class="eyebrow">AI OPERATOR</p></div>
+            <div class="chat-heading-actions">
+              <div class="conversation-debug-actions">
+                <div class="token-usage" tabindex="0" aria-describedby="token-usage-details">
+                  <span>{{ formatCompactTokens(conversationTokens) }} tokens</span>
+                  <div id="token-usage-details" class="token-usage-tooltip" role="tooltip">
+                    <strong>Conversation usage</strong>
+                    <dl>
+                      <div><dt>Total</dt><dd>{{ formatTokenCount(conversationTokens) }}</dd></div>
+                      <div><dt>Input</dt><dd>{{ formatTokenCount(conversationTokenUsage.input) }}</dd></div>
+                      <div><dt>Output</dt><dd>{{ formatTokenCount(conversationTokenUsage.output) }}</dd></div>
+                      <div><dt>Thinking</dt><dd>{{ formatTokenCount(conversationTokenUsage.thinking) }}</dd></div>
+                      <div><dt>Cache read</dt><dd>{{ formatTokenCount(conversationTokenUsage.cacheRead) }}</dd></div>
+                      <div><dt>Cache write</dt><dd>{{ formatTokenCount(conversationTokenUsage.cacheWrite) }}</dd></div>
+                    </dl>
+                  </div>
                 </div>
+                <button
+                  class="conversation-debug-button"
+                  :class="debugCopyState"
+                  type="button"
+                  :title="debugCopyState === 'copied' ? 'Conversation debug data copied' : debugCopyState === 'failed' ? 'Could not copy conversation' : 'Copy conversation debug data'"
+                  :aria-label="debugCopyState === 'copied' ? 'Conversation debug data copied' : debugCopyState === 'failed' ? 'Could not copy conversation' : 'Copy conversation debug data'"
+                  @click="copyConversationDebug"
+                >
+                  <svg v-if="debugCopyState === 'copied'" viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 4 4L19 6"></path></svg>
+                  <svg v-else viewBox="0 0 24 24" aria-hidden="true"><path d="M8 2v2m8-2v2M9 9h6m-7 4h8m-4-9a6 6 0 0 1 6 6v5a6 6 0 0 1-12 0v-5a6 6 0 0 1 6-6Zm-6 7H3m3 5H3m15-5h3m-3 5h3"></path></svg>
+                </button>
               </div>
               <button class="new-conversation-button" type="button" @click="newConversation">New conversation</button>
-           </div>
+            </div>
         </div>
         <div ref="transcript" class="transcript">
           <div v-if="messages.length === 0" class="empty-chat">
@@ -1148,15 +1193,15 @@ onBeforeUnmount(() => {
           </div>
         </div>
         <div class="conversation-footer">
+          <div class="conversation-loader" :class="{ active: chatBusy }" role="status" aria-live="polite">
+            <span>{{ agentActivityLabel }}<template v-if="agentActivityLabel && activityElapsedSeconds"> · {{ activityElapsedSeconds }}s</template></span>
+            <i aria-hidden="true"><b></b></i>
+          </div>
           <form class="composer" @submit.prevent="submitPrompt">
             <textarea ref="composerInput" v-model="prompt" :disabled="!settings?.llmReady || chatBusy" rows="2" :placeholder="!settings?.llmReady ? 'Configure an AI provider to start…' : chatBusy ? 'HalfCloud is working…' : 'Tell HalfCloud what should be running…'" @keydown.enter.exact.prevent="submitPrompt"></textarea>
             <button v-if="chatBusy" class="send-button stop" type="button" title="Stop" @click="stop">■</button>
             <button v-else class="send-button" type="submit" :disabled="!prompt.trim() || !settings?.llmReady" title="Send">↑</button>
           </form>
-          <div class="conversation-loader" :class="{ active: chatBusy }" role="status" aria-live="polite">
-            <span>{{ agentActivityLabel }}<template v-if="agentActivityLabel && activityElapsedSeconds"> · {{ activityElapsedSeconds }}s</template></span>
-            <i aria-hidden="true"><b></b></i>
-          </div>
         </div>
       </section>
 
