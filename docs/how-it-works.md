@@ -48,9 +48,11 @@ HalfCloud verifies at startup that the Docker daemon reports rootless mode and r
 3. The model chooses a tool such as listing Apps, creating a multi-service App, adding a Service, or reading logs.
 4. HalfCloud validates the structured tool arguments before executing code against rootless Docker.
 5. Tool results return to the model so it can verify the operation and explain the outcome.
-6. Selected destructive, ownership-changing, or exposure-increasing tools pause for approval in the browser before execution.
+6. Selected destructive, command-running, ownership-changing, or exposure-increasing tools pause for approval in the browser before execution.
 
 The model never receives a general shell tool. Docker operations are implemented in application code and reject requests outside the supported policy.
+
+For software that requires initialization outside its normal process, an approved tool can run one bounded argument vector in a disposable container. HalfCloud reuses the managed Service's immutable image, environment, user, working directory, storage, and App network, while omitting host ports, restart behavior, and the Service DNS alias. Command output is withheld, the original Service is not changed, and the disposable container is removed afterward. This capability can still change persistent data or contact private dependencies, which is why each invocation requires approval.
 
 Environment management has separate administrator and agent representations. The authenticated Environment API can return raw values to the dashboard. Agent tools use an explicit serializer that entirely omits `value` for protected variables, and the controlled container-inspection tool never forwards raw Docker `Config.Env`. A credential requested in chat is submitted from its dedicated widget directly to the Environment API.
 

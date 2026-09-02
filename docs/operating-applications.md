@@ -127,6 +127,14 @@ Recreate the web Service in MyApp.
 
 Managed Services use Docker's `unless-stopped` restart policy, so they normally return after a daemon or server restart unless intentionally stopped.
 
+## One-shot Service initialization
+
+Some software requires a non-interactive setup, migration, seed, repair, or administrative command before its normal process can run. HalfCloud can run such a command for any managed Service, including a stopped Service deployed directly from an image.
+
+The command runs as a disposable container with the Service's exact image, environment, user, working directory, persistent mounts, and private App network. It does not publish ports, receive the Service's private DNS alias, or start, stop, or replace the original Service. HalfCloud removes the disposable container after completion and withholds its output so configured credentials are not copied into the AI conversation.
+
+This is not an interactive shell. The command is a bounded argument list selected for a documented operation, and the signed-in user must approve the exact request. It can still modify the Service's persistent data and contact dependencies on the App network. If the normal Service is running, stop it first when the operation requires exclusive access to shared storage.
+
 ## Status, logs, and metrics
 
 App status is derived from its Services. The dashboard reports whether the App is running, partially running, stopped, degraded, or failed and shows how many Services are running.
@@ -154,6 +162,7 @@ The conversational interface asks for explicit approval before it can:
 - permanently delete managed data;
 - recursively repair ownership on mounted storage;
 - remove password protection from a route, making it public.
+- run a one-shot command with a Service's credentials, persistent storage, and private network access.
 
 Review the target and data-retention choice shown in the approval card. Approval confirms the exact pending tool call, not a general permission for future operations.
 

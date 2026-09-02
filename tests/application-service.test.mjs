@@ -14,6 +14,7 @@ class FakeDocker {
   created = [];
   started = [];
   restarted = [];
+  initializationCommands = [];
   networksDeleted = [];
 
   async createContainer(input) {
@@ -45,6 +46,10 @@ class FakeDocker {
     return { containerId: id, state: 'running' };
   }
   async restartContainer(id) { this.restarted.push(id); return { containerId: id, state: 'running' }; }
+  async runServiceInitializationCommand(id, command) {
+    this.initializationCommands.push({ id, command });
+    return { serviceId: this.services.find((service) => service.id === id)?.serviceId, exitCode: 0, completed: true };
+  }
   async deleteContainer(id) { this.services = this.services.filter((service) => service.id !== id); }
   async deleteAppNetwork(id) { this.networksDeleted.push(id); return { deleted: true }; }
   async listManagedVolumes() { return []; }
@@ -94,6 +99,10 @@ test('deploys WordPress and MySQL as Services in one App and adds Redis to it', 
 
   await applications.restartApp('Company Website');
   assert.deepEqual(runtime.restarted, ['container-1', 'container-2', 'container-3']);
+
+  const initialized = await applications.runServiceInitializationCommand('Company Website', 'redis', ['redis-cli', '--cluster', 'fix']);
+  assert.equal(initialized.completed, true);
+  assert.deepEqual(runtime.initializationCommands, [{ id: 'container-3', command: ['redis-cli', '--cluster', 'fix'] }]);
 });
 
 test('deleting a private Git App removes credentials before metadata and returns the remote cleanup URL', async (t) => {

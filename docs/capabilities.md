@@ -45,6 +45,7 @@ Domain changes and password setup begin in chat. Passwords are entered in a dedi
 - Start, stop, restart, recreate, rename, and delete an entire App.
 - Start, stop, restart, recreate, inspect, or remove an individual Service when needed.
 - Read combined App logs with Service prefixes or inspect one Service's logs.
+- Run an approved one-shot initialization, migration, seed, repair, or administrative command using a Service's existing runtime configuration.
 - Inspect host CPU, memory, disk use, and uptime.
 - Diagnose common failures through the AI operator using the same bounded tools.
 
@@ -69,7 +70,7 @@ Renaming an App changes only its HalfCloud display name. It does not rename or r
 
 ## How actions are controlled
 
-The AI does not receive a terminal, SSH access, or a general Docker API. It can use only HalfCloud's built-in tools, whose inputs are validated by the server. Selected high-impact operations pause for approval, including deleting an App, removing a Service, deleting a volume, repairing storage ownership, and removing route password protection.
+The AI does not receive a terminal, SSH access, or a general Docker API. It can use only HalfCloud's built-in tools, whose inputs are validated by the server. Selected high-impact operations pause for approval, including running a one-shot Service command, deleting an App, removing a Service, deleting a volume, repairing storage ownership, and removing route password protection.
 
 See [Why is it safe?](why-is-it-safe.md) for the complete security model and its limitations.
 

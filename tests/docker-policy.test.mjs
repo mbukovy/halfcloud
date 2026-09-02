@@ -1,4 +1,7 @@
 import assert from 'node:assert/strict';
+import { mkdir, mkdtemp, realpath, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import test from 'node:test';
 import { appNetworkName, assertManagedVolumeLabels, createOrReuseAppNetwork, createOrReuseManagedVolume, DockerService, managedBindPath, rootlessSocketPath, searchContainerImages, validateHostPort } from '../dist/backend/docker.js';
 
@@ -259,4 +262,144 @@ test('refuses to reuse a network not owned by the App', async () => {
   };
 
   await assert.rejects(createOrReuseAppNetwork(docker, 'app_12345678-1234-1234-1234-123456789abc'), /not managed by HalfCloud/);
+});
+
+test('runs Service initialization in an isolated one-shot container with the same runtime state', async (t) => {
+  const appsDir = await mkdtemp(path.join(tmpdir(), 'halfcloud-initialization-'));
+  t.after(() => rm(appsDir, { recursive: true, force: true }));
+  const appId = 'app_12345678-1234-1234-1234-123456789abc';
+  const serviceId = 'service_12345678-1234-1234-1234-123456789abc';
+  const bindSource = path.join(appsDir, appId, 'config');
+  await mkdir(bindSource, { recursive: true });
+  const sourceInspection = {
+    Image: 'sha256:immutable-image',
+    Config: {
+      Labels: {
+        'halfcloud.managed': 'true',
+        'halfcloud.app.id': appId,
+        'halfcloud.service.id': serviceId,
+        'halfcloud.service.name': 'web',
+      },
+      Env: ['API_KEY=protected-value', 'PORT=3000'],
+      User: '1000:1000',
+      WorkingDir: '/app',
+    },
+    HostConfig: { PidsLimit: 256 },
+    NetworkSettings: { Networks: { [appNetworkName(appId)]: {} } },
+    Mounts: [
+      { Type: 'bind', Source: bindSource, Destination: '/app/config', RW: false },
+      { Type: 'volume', Name: 'halfcloud-service-data', Source: '/var/lib/docker/volumes/data/_data', Destination: '/app/data', RW: true },
+    ],
+  };
+  let createOptions;
+  let started = 0;
+  let removed = 0;
+  const source = { async inspect() { return sourceInspection; } };
+  const operation = {
+    async start() { started += 1; },
+    async wait() { return { StatusCode: 0 }; },
+    async stop() { throw new Error('successful operation must not be stopped'); },
+    async remove(options) { removed += 1; assert.deepEqual(options, { force: true, v: false }); },
+  };
+  const service = Object.create(DockerService.prototype);
+  service.appsDir = appsDir;
+  service.initializingServices = new Set();
+  service.ensureAppNetwork = async (candidate) => {
+    assert.equal(candidate, appId);
+    return { name: appNetworkName(appId), driver: 'bridge' };
+  };
+  service.docker = {
+    async listContainers() {
+      return [{ Id: 'container-source', Names: ['/source'], Labels: sourceInspection.Config.Labels }];
+    },
+    getContainer(id) {
+      assert.equal(id, 'container-source');
+      return source;
+    },
+    async createContainer(options) {
+      createOptions = options;
+      return operation;
+    },
+  };
+
+  const result = await service.runServiceInitializationCommand(serviceId, ['node', 'dist/setup.js', '--non-interactive']);
+
+  assert.deepEqual(result, { serviceId, exitCode: 0, completed: true });
+  assert.equal(started, 1);
+  assert.equal(removed, 1);
+  assert.equal(createOptions.Image, 'sha256:immutable-image');
+  assert.deepEqual(createOptions.Entrypoint, ['node']);
+  assert.deepEqual(createOptions.Cmd, ['dist/setup.js', '--non-interactive']);
+  assert.deepEqual(createOptions.Env, sourceInspection.Config.Env);
+  assert.equal(createOptions.User, '1000:1000');
+  assert.equal(createOptions.WorkingDir, '/app');
+  assert.deepEqual(createOptions.Labels, {
+    'halfcloud.operation': 'service-initialization',
+    'halfcloud.app.id': appId,
+    'halfcloud.service.id': serviceId,
+  });
+  assert.equal(createOptions.Labels['halfcloud.managed'], undefined);
+  assert.deepEqual(createOptions.HostConfig, {
+    NetworkMode: appNetworkName(appId),
+    PortBindings: {},
+    PublishAllPorts: false,
+    RestartPolicy: { Name: 'no' },
+    LogConfig: { Type: 'none', Config: {} },
+    SecurityOpt: ['no-new-privileges'],
+    PidsLimit: 256,
+    Mounts: [
+      { Type: 'bind', Source: await realpath(bindSource), Target: '/app/config', ReadOnly: true },
+      { Type: 'volume', Source: 'halfcloud-service-data', Target: '/app/data', ReadOnly: false },
+    ],
+  });
+  assert.deepEqual(createOptions.NetworkingConfig, { EndpointsConfig: { [appNetworkName(appId)]: {} } });
+
+  service.initializingServices.add(serviceId);
+  await assert.rejects(service.runServiceInitializationCommand(serviceId, ['setup']), /already running/);
+  service.initializingServices.delete(serviceId);
+});
+
+test('cleans up a failed one-shot initialization without changing the source Service', async (t) => {
+  const appsDir = await mkdtemp(path.join(tmpdir(), 'halfcloud-initialization-failure-'));
+  t.after(() => rm(appsDir, { recursive: true, force: true }));
+  const appId = 'app_12345678-1234-1234-1234-123456789abc';
+  const serviceId = 'service_12345678-1234-1234-1234-123456789abc';
+  await mkdir(path.join(appsDir, appId), { recursive: true });
+  const labels = { 'halfcloud.managed': 'true', 'halfcloud.app.id': appId, 'halfcloud.service.id': serviceId, 'halfcloud.service.name': 'web' };
+  let removed = 0;
+  let sourceLifecycleCalls = 0;
+  const source = {
+    async inspect() {
+      return {
+        Image: 'sha256:image',
+        Config: { Labels: labels, Env: [] },
+        HostConfig: { PidsLimit: 512 },
+        NetworkSettings: { Networks: { [appNetworkName(appId)]: {} } },
+        Mounts: [],
+      };
+    },
+    async start() { sourceLifecycleCalls += 1; },
+    async stop() { sourceLifecycleCalls += 1; },
+  };
+  const service = Object.create(DockerService.prototype);
+  service.appsDir = appsDir;
+  service.initializingServices = new Set();
+  service.ensureAppNetwork = async () => ({ name: appNetworkName(appId), driver: 'bridge' });
+  service.docker = {
+    async listContainers() { return [{ Id: 'source', Labels: labels }]; },
+    getContainer() { return source; },
+    async createContainer() {
+      return {
+        async start() {},
+        async wait() { return { StatusCode: 23 }; },
+        async remove() { removed += 1; },
+      };
+    },
+  };
+
+  await assert.rejects(service.runServiceInitializationCommand(serviceId, ['setup']), /exit code 23/);
+  assert.equal(removed, 1);
+  assert.equal(sourceLifecycleCalls, 0);
+  assert.equal(service.initializingServices.size, 0);
+  await assert.rejects(service.runServiceInitializationCommand(serviceId, []), /1-32 bounded arguments/);
 });

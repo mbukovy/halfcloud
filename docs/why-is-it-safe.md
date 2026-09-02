@@ -26,7 +26,9 @@ Rootless Docker runs the daemon and containers without host root privileges and 
 
 ## The AI has tools, not a terminal
 
-The model can call only operations defined by HalfCloud. There is no host shell, arbitrary Docker API proxy, general file browser, or SSH tool. For Git-backed Apps, repository tools are read-only except for Dockerfile variants and `.dockerignore`; all paths are confined to that App's persistent checkout and file contents are bounded.
+The model can call only operations defined by HalfCloud. There is no host shell, interactive container shell, arbitrary Docker API proxy, general file browser, or SSH tool. For Git-backed Apps, repository tools are read-only except for Dockerfile variants and `.dockerignore`; all paths are confined to that App's persistent checkout and file contents are bounded.
+
+An approval-gated initialization tool can execute one bounded argument vector in a disposable container for a selected managed Service. It receives that Service's image, environment, user, persistent mounts, and private App network, but no host ports, restart policy, or stable Service alias. HalfCloud does not return command output to the model. The tool cannot mount new host paths or address an unmanaged container, but the command can change existing Service data, use configured credentials, and contact dependencies in the same App.
 
 The deployment API rejects:
 
@@ -45,7 +47,7 @@ These checks are code-enforced. They do not depend only on asking the language m
 
 ## Destructive actions require approval
 
-Deleting an App, removing a Service, deleting a managed volume, recursively changing storage ownership, and removing password protection from a route pause until the signed-in user approves the exact tool call. If approval is dismissed, the operation is not executed.
+Running a one-shot Service command, deleting an App, removing a Service, deleting a managed volume, recursively changing storage ownership, and removing password protection from a route pause until the signed-in user approves the exact tool call. If approval is dismissed, the operation is not executed.
 
 App deletion preserves named volumes and images by default. Deleting persistent data requires an explicit choice because it cannot be recovered through HalfCloud.
 

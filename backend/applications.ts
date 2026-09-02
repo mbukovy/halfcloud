@@ -267,20 +267,10 @@ export class ApplicationService {
   }
   getContainerLogs(id: string, tail?: number) { return this.docker.getContainerLogs(id, tail); }
   getContainerStats(id: string) { return this.docker.getContainerStats(id); }
-  async runDeploymentCommand(appIdOrName: string, serviceIdOrName: string, command: string[]) {
+  async runServiceInitializationCommand(appIdOrName: string, serviceIdOrName: string, command: string[]) {
     const app = await this.apps.get(appIdOrName);
-    if (app.source?.type !== 'git') throw new Error('Deployment commands are available only for Git-backed Apps');
-    if (!app.source.resolvedCommit || app.source.resolvedCommit === app.source.currentCommit) throw new Error('Deployment commands require a pending Git deployment');
-    const attempts = (app.deployment?.initializationAttempts ?? 0) + 1;
-    if (attempts > 3) throw new Error('Initialization command retry limit reached');
     const service = await this.service(app.id, serviceIdOrName);
-    await this.repositories.setStage(app.id, 'initializing', `Initializing ${service.name} (attempt ${attempts} of 3)`, { initializationAttempts: attempts });
-    try {
-      return await this.docker.runContainerCommand(service.id, command);
-    } catch (error) {
-      await this.repositories.fail(app.id, 'initializing', error);
-      throw error;
-    }
+    return this.docker.runServiceInitializationCommand(service.id, command);
   }
 
   async verifyGitDeployment(appIdOrName: string, serviceIdOrName?: string, healthPath = '/') {

@@ -189,6 +189,7 @@ export interface ManagedVolumeFilter {
 export class DockerService {
   private readonly docker: Docker;
   private readonly appsDir: string;
+  private readonly initializingServices = new Set<string>();
 
   constructor() {
     const socketPath = rootlessSocketPath(process.env.DOCKER_HOST);
@@ -506,33 +507,89 @@ export class DockerService {
     return { containerId: container.id, state: 'running' };
   }
 
-  async runContainerCommand(id: string, command: string[]) {
-    if (!command.length || command.length > 32 || command.some((part) => !part || part.length > 4096 || part.includes('\0'))) throw new Error('Deployment command must contain 1-32 bounded arguments');
-    const container = await this.managedContainer(id);
-    const containerInspection = await container.inspect();
-    if (!containerInspection.State.Running) throw new Error('Deployment commands require a running Service');
-    const execution = await container.exec({ Cmd: command, AttachStdout: true, AttachStderr: true });
+  async runServiceInitializationCommand(id: string, command: string[]) {
+    if (!command.length || command.length > 32 || command.some((part) => !part || part.length > 4096 || part.includes('\0'))) {
+      throw new Error('Initialization command must contain 1-32 bounded arguments');
+    }
+    const source = await this.managedContainer(id);
+    const inspection = await source.inspect();
+    const appId = inspection.Config.Labels?.['halfcloud.app.id'];
+    const serviceId = inspection.Config.Labels?.['halfcloud.service.id'];
+    const serviceName = inspection.Config.Labels?.['halfcloud.service.name'];
+    if (!appId || !serviceId || !serviceName) throw new Error('Managed Service is missing required ownership labels');
+    const initializingServices = this.initializingServices;
+    if (initializingServices.has(serviceId)) throw new Error(`An initialization command is already running for Service ${serviceName}`);
+    initializingServices.add(serviceId);
+
+    let operation: Docker.Container;
+    try {
+      const networkName = appNetworkName(appId);
+      if (!inspection.NetworkSettings.Networks?.[networkName]) throw new Error(`Managed Service is not connected to its App network ${networkName}`);
+      await this.ensureAppNetwork(appId);
+
+      const appsRoot = await realpath(this.appsDir);
+      const appDir = path.join(appsRoot, appId);
+      const mounts: Docker.MountSettings[] = [];
+      for (const mount of inspection.Mounts) {
+        if (mount.Type === 'bind') {
+          const sourcePath = await realpath(mount.Source);
+          if (sourcePath === appDir || !sourcePath.startsWith(`${appDir}${path.sep}`)) throw new Error(`Service bind mount ${mount.Destination} is outside its managed App directory`);
+          mounts.push({ Type: 'bind', Source: sourcePath, Target: mount.Destination, ReadOnly: mount.RW === false });
+          continue;
+        }
+        if (mount.Type === 'volume' && mount.Name) {
+          mounts.push({ Type: 'volume', Source: mount.Name, Target: mount.Destination, ReadOnly: mount.RW === false });
+          continue;
+        }
+        throw new Error(`Service mount ${mount.Destination} has unsupported type ${mount.Type}`);
+      }
+
+      operation = await this.docker.createContainer({
+        Image: inspection.Image,
+        Entrypoint: [command[0]!],
+        Cmd: command.slice(1),
+        WorkingDir: inspection.Config.WorkingDir,
+        User: inspection.Config.User,
+        Env: inspection.Config.Env,
+        Labels: {
+          'halfcloud.operation': 'service-initialization',
+          'halfcloud.app.id': appId,
+          'halfcloud.service.id': serviceId,
+        },
+        HostConfig: {
+          NetworkMode: networkName,
+          PortBindings: {},
+          PublishAllPorts: false,
+          RestartPolicy: { Name: 'no' },
+          LogConfig: { Type: 'none', Config: {} },
+          SecurityOpt: ['no-new-privileges'],
+          PidsLimit: Math.min(inspection.HostConfig.PidsLimit ?? 512, 512),
+          Mounts: mounts,
+        },
+        NetworkingConfig: { EndpointsConfig: { [networkName]: {} } },
+      });
+    } catch (error) {
+      initializingServices.delete(serviceId);
+      throw error;
+    }
     const abortController = new AbortController();
     const timer = setTimeout(() => abortController.abort(), 300_000);
     try {
-      const output = await execution.start({ hijack: true, stdin: false, abortSignal: abortController.signal });
-      await new Promise<void>((resolve, reject) => {
-        output.on('data', () => undefined);
-        output.once('end', resolve);
-        output.once('error', reject);
-      });
+      await operation.start();
+      const result = await Promise.race([
+        operation.wait(),
+        new Promise<never>((_resolve, reject) => abortController.signal.addEventListener('abort', () => reject(new Error('Initialization command timed out after 300 seconds')), { once: true })),
+      ]);
+      if (result.StatusCode !== 0) throw new Error(`Initialization command failed with exit code ${result.StatusCode}`);
+      return { serviceId, exitCode: result.StatusCode, completed: true };
     } catch (error) {
-      if (abortController.signal.aborted) {
-        const stopped = await container.stop({ t: 5 }).then(() => true, () => false);
-        throw new Error(stopped ? 'Deployment command timed out after 300 seconds and the Service was stopped' : 'Deployment command timed out after 300 seconds; HalfCloud could not confirm that the Service stopped');
-      }
+      if (abortController.signal.aborted) await operation.stop({ t: 5 }).catch(() => undefined);
       throw error;
     } finally {
       clearTimeout(timer);
+      initializingServices.delete(serviceId);
+      await operation.remove({ force: true, v: false }).catch(() => undefined);
     }
-    const inspection = await execution.inspect();
-    if (inspection.ExitCode !== 0) throw new Error(`Deployment command failed with exit code ${inspection.ExitCode}`);
-    return { containerId: container.id, exitCode: inspection.ExitCode, completed: true };
   }
 
   async recreateContainer(id: string) {
