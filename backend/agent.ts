@@ -1,4 +1,4 @@
-import { ToolLoopAgent, createAgentUIStream, createUIMessageStream, createUIMessageStreamResponse, tool, type UIMessage, type UIMessageStreamWriter } from 'ai';
+import { APICallError, EmptyResponseBodyError, InvalidResponseDataError, LoadAPIKeyError, LoadSettingError, NoSuchModelError, NoSuchProviderReferenceError, RetryError, ToolLoopAgent, createAgentUIStream, createUIMessageStream, createUIMessageStreamResponse, tool, type UIMessage, type UIMessageStreamWriter } from 'ai';
 import { z } from 'zod';
 import type { AiSettings } from './config.js';
 import type { ApplicationService } from './applications.js';
@@ -57,6 +57,17 @@ function providerTokenUsage(usage: {
     cacheRead: tokenCount(usage.inputTokenDetails?.cacheReadTokens),
     cacheWrite: tokenCount(usage.inputTokenDetails?.cacheWriteTokens),
   };
+}
+
+export function isProviderRequestError(error: unknown): boolean {
+  if (RetryError.isInstance(error)) return error.errors.some(isProviderRequestError);
+  return APICallError.isInstance(error)
+    || EmptyResponseBodyError.isInstance(error)
+    || InvalidResponseDataError.isInstance(error)
+    || LoadAPIKeyError.isInstance(error)
+    || LoadSettingError.isInstance(error)
+    || NoSuchModelError.isInstance(error)
+    || NoSuchProviderReferenceError.isInstance(error);
 }
 
 export function sanitizeAgentMessages(messages: UIMessage[]): UIMessage[] {
@@ -541,6 +552,10 @@ export async function createChatResponse(
   });
   const onError = (error: unknown) => {
     const details = redactProviderError(error, settings.apiKey);
+    if (!isProviderRequestError(error)) {
+      console.error(`[chat:${requestId}] Agent operation failed\n${details}`);
+      return "HalfCloud could not complete this operation. Check the failed step and the agent's explanation for details.";
+    }
     console.error(`[chat:${requestId}] LLM stream failed (${settings.provider}/${settings.model})\n${details}`);
     progressWriter?.write({
       type: 'data-agentError',
