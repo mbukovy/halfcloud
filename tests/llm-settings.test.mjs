@@ -15,8 +15,6 @@ test('provider metadata contains every supported provider without remote icons',
     icon: '/providers/groq.svg',
     requiresEndpoint: false,
     recommendedModel: 'openai/gpt-oss-120b',
-    promotionalText: 'Free API available - use Halfcloud completely free of charge',
-    pricingUrl: 'https://groq.com/pricing',
   });
 });
 

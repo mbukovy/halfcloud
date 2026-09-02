@@ -61,6 +61,4 @@ export interface ProviderMetadata {
   icon: string;
   requiresEndpoint: boolean;
   recommendedModel?: string;
-  promotionalText?: string;
-  pricingUrl?: string;
 }

@@ -16,8 +16,6 @@ export const providerMetadata: ProviderMetadata[] = [
     icon: '/providers/groq.svg',
     requiresEndpoint: false,
     recommendedModel: 'openai/gpt-oss-120b',
-    promotionalText: 'Free API available - use Halfcloud completely free of charge',
-    pricingUrl: 'https://groq.com/pricing',
   },
   { id: 'openai', label: 'OpenAI', icon: '/providers/openai.png', requiresEndpoint: false, recommendedModel: 'gpt-5.4-mini' },
   { id: 'anthropic', label: 'Anthropic', icon: '/providers/anthropic.svg', requiresEndpoint: false, recommendedModel: 'claude-sonnet-4-5' },

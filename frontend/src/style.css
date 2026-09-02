@@ -294,18 +294,8 @@ input:focus, textarea:focus { border-color: var(--ink); box-shadow: 0 0 0 3px #1
 .provider-card:hover, .provider-card:focus-within { border-color: var(--ink); box-shadow: 0 5px 18px #16231f12; }
 .provider-grid strong { font-size: 13px; }
 .provider-copy { display: flex; flex-direction: column; gap: 5px; }
-.provider-card.featured { position: relative; grid-column: 1 / -1; min-height: 116px; border-color: #e2682a; background: linear-gradient(115deg, #fff5e9, #fffefb 68%); }
-.provider-card.featured::before { content: 'FREE API'; position: absolute; top: 0; left: 0; padding: 5px 9px; background: #e34c26; color: #fff; font: 700 8px 'DM Mono', monospace; letter-spacing: .08em; }
-.provider-card.featured > button { min-height: 82px; flex-direction: row; gap: 18px; padding: 18px 24px 8px; }
-.provider-card.featured .provider-copy { align-items: flex-start; text-align: left; }
-.provider-card.featured strong { font-size: 16px; }
-.provider-promotion { color: #7d3a1f; font-size: 11px; line-height: 1.45; }
-.provider-card > a { display: block; padding: 0 24px 14px 94px; color: #994421; font: 600 9px 'DM Mono', monospace; text-decoration: underline; text-underline-offset: 3px; }
-.provider-card > a:hover { color: var(--ink); }
 .provider-icon-shell { display: grid; width: 52px; height: 52px; place-items: center; }
-.provider-icon-shell > * { grid-area: 1 / 1; }
-.provider-icon-shell img { position: relative; z-index: 1; width: 36px; height: 36px; object-fit: contain; }
-.provider-icon-shell svg { width: 30px; height: 30px; fill: none; stroke: var(--muted); stroke-width: 1.4; }
+.provider-icon-shell img { width: 36px; height: 36px; object-fit: contain; }
 .settings-back { border: 0; background: none; padding: 0; margin-bottom: 20px; color: var(--muted); font: 10px 'DM Mono', monospace; cursor: pointer; }
 .settings-back:hover { color: var(--ink); }
 .field-help { display: block; margin-top: 7px; color: var(--muted); font-size: 10px; line-height: 1.5; }
@@ -436,8 +426,6 @@ input:focus, textarea:focus { border-color: var(--ink); box-shadow: 0 0 0 3px #1
   .auth-panel { padding: 30px 24px; }
   .modal { padding: 30px 22px; }
   .provider-grid { grid-template-columns: repeat(2, 1fr); }
-  .provider-card.featured > button { padding-left: 16px; padding-right: 16px; }
-  .provider-card > a { padding-left: 86px; }
   .domain-row { grid-template-columns: 8px minmax(0, 1fr); }
   .domain-actions { grid-column: 2; justify-content: flex-start; }
   .environment-list-heading { display: none; }

@@ -107,7 +107,7 @@ export interface PublicSettings {
 export type LlmProvider = 'openai' | 'anthropic' | 'azure-foundry' | 'cerebras' | 'grok' | 'gemini' | 'groq';
 export interface ModelCapabilities { streaming: boolean; tools: boolean; vision?: boolean; reasoning?: boolean }
 export interface ModelInfo { id: string; name: string }
-export interface ProviderMetadata { id: LlmProvider; label: string; icon: string; requiresEndpoint: boolean; recommendedModel?: string; promotionalText?: string; pricingUrl?: string }
+export interface ProviderMetadata { id: LlmProvider; label: string; icon: string; requiresEndpoint: boolean; recommendedModel?: string }
 export interface LlmSettingsResponse extends PublicSettings { providers: ProviderMetadata[] }
 
 export async function api<T>(url: string, options?: RequestInit): Promise<T> {
