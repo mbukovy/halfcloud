@@ -1,7 +1,7 @@
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { z } from 'zod';
-import { llmConfigurationSchema, type LlmProviderConfig, type PublicLlmSettings } from './llm/types.js';
+import { llmConfigurationSchema, llmProviders, type LlmProviderConfig, type PublicLlmSettings } from './llm/types.js';
 
 const legacySettingsSchema = z.object({
   provider: z.literal('azure'),
@@ -36,7 +36,16 @@ export class SettingsStore {
           verifiedAt: new Date(0).toISOString(),
         });
       }
-      return llmConfigurationSchema.parse(value);
+      const settings = llmConfigurationSchema.safeParse(value);
+      if (settings.success) return settings.data;
+      if (
+        typeof value === 'object'
+        && value !== null
+        && 'provider' in value
+        && typeof value.provider === 'string'
+        && !llmProviders.some((provider) => provider === value.provider)
+      ) return null;
+      throw settings.error;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
       throw error;

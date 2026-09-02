@@ -72,6 +72,29 @@ test('legacy Azure settings are migrated in memory to Foundry v1', async () => {
   }
 });
 
+test('removed providers are treated as unconfigured so they can be replaced', async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'halfcloud-removed-provider-'));
+  try {
+    await writeFile(path.join(directory, 'settings.json'), JSON.stringify({
+      provider: 'removed-provider',
+      apiKey: 'obsolete-secret',
+      model: 'obsolete-model',
+      capabilities: { streaming: true, tools: true },
+      verifiedAt: new Date().toISOString(),
+    }));
+    const store = new SettingsStore(directory);
+    assert.equal(await store.get(), null);
+    assert.deepEqual(await store.publicValue(), {
+      configured: false,
+      providerConfigured: false,
+      llmReady: false,
+      hasApiKey: false,
+    });
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test('provider errors redact credentials', () => {
   assert.equal(redactProviderError(new Error('Bearer top-secret failed for top-secret'), 'top-secret').includes('top-secret'), false);
 });
