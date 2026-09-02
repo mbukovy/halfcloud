@@ -7,30 +7,30 @@ import { SettingsStore } from '../dist/backend/config.js';
 import { listModels, providerMetadata, redactProviderError } from '../dist/backend/llm/index.js';
 
 test('provider metadata contains every supported provider without remote icons', () => {
-  assert.deepEqual(providerMetadata.map(({ id }) => id), ['mistral', 'openai', 'anthropic', 'azure-foundry', 'cerebras', 'grok', 'gemini']);
+  assert.deepEqual(providerMetadata.map(({ id }) => id), ['groq', 'openai', 'anthropic', 'azure-foundry', 'cerebras', 'grok', 'gemini']);
   assert.ok(providerMetadata.every(({ icon }) => icon.startsWith('/providers/')));
-  assert.deepEqual(providerMetadata.find(({ id }) => id === 'mistral'), {
-    id: 'mistral',
-    label: 'Mistral AI',
-    icon: '/providers/mistral.svg',
+  assert.deepEqual(providerMetadata.find(({ id }) => id === 'groq'), {
+    id: 'groq',
+    label: 'Groq',
+    icon: '/providers/groq.svg',
     requiresEndpoint: false,
-    recommendedModel: 'mistral-large-latest',
+    recommendedModel: 'openai/gpt-oss-120b',
     promotionalText: 'Free API available - use Halfcloud completely free of charge',
-    pricingUrl: 'https://mistral.ai/pricing',
+    pricingUrl: 'https://groq.com/pricing',
   });
 });
 
-test('Mistral models are discovered with bearer authentication', async () => {
+test('Groq models are discovered with bearer authentication', async () => {
   const originalFetch = globalThis.fetch;
   try {
     globalThis.fetch = async (url, options) => {
-      assert.equal(url, 'https://api.mistral.ai/v1/models');
-      assert.equal(options.headers.authorization, 'Bearer mistral-secret');
-      return Response.json({ data: [{ id: 'mistral-small-latest' }, { id: 'mistral-large-latest' }] });
+      assert.equal(url, 'https://api.groq.com/openai/v1/models');
+      assert.equal(options.headers.authorization, 'Bearer groq-secret');
+      return Response.json({ data: [{ id: 'llama-3.3-70b-versatile' }, { id: 'openai/gpt-oss-120b' }] });
     };
-    assert.deepEqual(await listModels({ provider: 'mistral', apiKey: 'mistral-secret' }), [
-      { id: 'mistral-large-latest', name: 'mistral-large-latest' },
-      { id: 'mistral-small-latest', name: 'mistral-small-latest' },
+    assert.deepEqual(await listModels({ provider: 'groq', apiKey: 'groq-secret' }), [
+      { id: 'llama-3.3-70b-versatile', name: 'llama-3.3-70b-versatile' },
+      { id: 'openai/gpt-oss-120b', name: 'openai/gpt-oss-120b' },
     ]);
   } finally {
     globalThis.fetch = originalFetch;

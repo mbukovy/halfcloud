@@ -1315,7 +1315,7 @@ onBeforeUnmount(() => {
                   <span v-if="provider.promotionalText" class="provider-promotion">{{ provider.promotionalText }}</span>
                 </span>
               </button>
-              <a v-if="provider.pricingUrl" :href="provider.pricingUrl" target="_blank" rel="noopener noreferrer">View Mistral pricing ↗</a>
+              <a v-if="provider.pricingUrl" :href="provider.pricingUrl" target="_blank" rel="noopener noreferrer">View pricing ↗</a>
             </div>
           </div>
         </template>

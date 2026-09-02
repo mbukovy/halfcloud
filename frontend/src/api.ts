@@ -104,7 +104,7 @@ export interface PublicSettings {
   verifiedAt?: string;
 }
 
-export type LlmProvider = 'openai' | 'anthropic' | 'azure-foundry' | 'cerebras' | 'grok' | 'gemini' | 'mistral';
+export type LlmProvider = 'openai' | 'anthropic' | 'azure-foundry' | 'cerebras' | 'grok' | 'gemini' | 'groq';
 export interface ModelCapabilities { streaming: boolean; tools: boolean; vision?: boolean; reasoning?: boolean }
 export interface ModelInfo { id: string; name: string }
 export interface ProviderMetadata { id: LlmProvider; label: string; icon: string; requiresEndpoint: boolean; recommendedModel?: string; promotionalText?: string; pricingUrl?: string }
