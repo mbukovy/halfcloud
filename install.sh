@@ -119,9 +119,9 @@ chmod 600 "${DATA_DIR}/secrets/access-code" "${DATA_DIR}/config/service.env"
 cat > /etc/systemd/system/halfcloud.service <<EOF
 [Unit]
 Description=HalfCloud control plane
-After=network-online.target user@${runtime_uid}.service
+After=network-online.target user@${runtime_uid}.service caddy.service
 Wants=network-online.target
-Requires=user@${runtime_uid}.service
+Requires=user@${runtime_uid}.service caddy.service
 
 [Service]
 Type=simple
@@ -160,9 +160,15 @@ ${hostname} {
 }
 EOF
 caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
-systemctl enable --now caddy
 systemctl daemon-reload
-systemctl enable --now halfcloud
+systemctl enable caddy
+if ! systemctl restart caddy; then
+  journalctl -u caddy --no-pager -n 50 >&2
+  fail "Caddy could not start. Check whether ports 80 or 443 are already in use."
+fi
+systemctl is-active --quiet caddy || { journalctl -u caddy --no-pager -n 50 >&2; fail "Caddy stopped immediately after startup."; }
+systemctl enable halfcloud
+systemctl start halfcloud
 success "HalfCloud and Caddy services installed"
 
 test_name="halfcloud-install-test"
