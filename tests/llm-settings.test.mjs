@@ -9,6 +9,8 @@ import { listModels, providerMetadata, redactProviderError } from '../dist/backe
 test('provider metadata contains every supported provider without remote icons', () => {
   assert.deepEqual(providerMetadata.map(({ id }) => id), ['groq', 'openai', 'anthropic', 'azure-foundry', 'cerebras', 'grok', 'gemini']);
   assert.ok(providerMetadata.every(({ icon }) => icon.startsWith('/providers/')));
+  assert.equal(providerMetadata.find(({ id }) => id === 'openai')?.recommendedModel, 'gpt-5.6-luna');
+  assert.equal(providerMetadata.find(({ id }) => id === 'azure-foundry')?.recommendedModel, 'gpt-5.6-luna');
   assert.deepEqual(providerMetadata.find(({ id }) => id === 'groq'), {
     id: 'groq',
     label: 'Groq',

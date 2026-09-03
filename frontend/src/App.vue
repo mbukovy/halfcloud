@@ -782,7 +782,9 @@ async function testConnection() {
     });
     availableModels.value = result.models;
     credentialsVerified.value = true;
-    if (!settingsForm.model || !result.models.some((model) => model.id === settingsForm.model)) settingsForm.model = result.models[0]?.id ?? '';
+    if (!settingsForm.model || !result.models.some((model) => model.id === settingsForm.model)) {
+      settingsForm.model = result.models.find((model) => model.id === selectedProvider.value?.recommendedModel)?.id ?? result.models[0]?.id ?? '';
+    }
     if (!result.models.length) useCustomModel.value = true;
   } catch (error) {
     settingsError.value = error instanceof Error ? error.message : 'Could not test connection';
