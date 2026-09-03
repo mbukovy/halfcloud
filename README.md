@@ -93,7 +93,7 @@ It can inspect repositories, build applications, run supporting services, config
 
 ## Install
 
-For HalfCloud 0.1, start with a new Ubuntu 22.04 or newer VPS that is not being used for anything else. Choose an amd64 or arm64 server with a public IPv4 address, and make sure web traffic on ports 80 and 443 is allowed.
+For HalfCloud 0.9, start with a new Ubuntu 22.04 or newer VPS that is not being used for anything else. Choose an amd64 or arm64 server with a public IPv4 address, and make sure web traffic on ports 80 and 443 is allowed.
 
 Connect to the server with SSH and run:
 
@@ -123,91 +123,92 @@ Open the address, enter the code, connect your AI provider, and tell HalfCloud w
 
 ## FAQ
 
-### What do I need to run HalfCloud?
-
+#### What do I need to run HalfCloud?
 A fresh Ubuntu 22.04+ VPS with:
-
 * a public IPv4 address;
 * ports 80 and 443 open;
 * amd64 or arm64 CPU;
 * enough RAM and disk for the apps you want to run.
 
 You can get a small VPS from providers like **Contabo, Hostinger, IONOS, Hetzner, DigitalOcean**, and many others.
-
 For simple apps, plans often start at around **$5–$6/month**.
-
 A small VPS is enough to try HalfCloud.
-
-### Which AI model should I use?
-
+#### Which AI model should I use?
 You do not need the most expensive model.
-
 For most deployments, a small model with good coding and tool-use capabilities is enough.
-
 We currently recommend **GPT-5.6 Luna** as a great default. In our tests, it can deploy real apps while costing only a few cents per operation.
-
 For harder debugging or unusual projects, you can switch to a stronger model.
-
-### Do I have to use OpenAI?
-
+#### Do I have to use OpenAI?
 No.
-
 HalfCloud supports multiple AI providers. Pick the provider and model you prefer.
-
-### How much does the AI cost?
-
+#### How much does the AI cost?
 Usually cents.
-
 In real HalfCloud tests using GPT-5.6 Luna:
-
 * n8n deployment: about **$0.005**
 * WordPress deployment: about **$0.009**
 * GitHub app deployment: about **$0.024**
-
 The exact price depends on the model and what HalfCloud has to do.
-
-### Does AI have full access to my server?
-
+#### Does AI have full access to my server?
 No.
-
 The AI does not get an unrestricted SSH shell.
-
 Instead, it works through tools provided by HalfCloud. Those tools define what the AI can inspect and change.
-
-### Does my data leave the server?
-
+#### Does my data leave the server?
 HalfCloud itself runs on your server.
-
 When AI is needed, the information required for that task may be sent to the AI provider you configured.
-
 HalfCloud is designed to avoid sending secrets and unnecessary server data to the model.
-
-### Can the AI read my passwords and secrets?
-
+#### Can the AI read my passwords and secrets?
 HalfCloud can keep sensitive environment variables hidden from the AI.
-
 If the model does not need a secret to complete a task, it should not see it.
-
 Anything you type directly into the chat should still be treated as information that may be sent to your AI provider.
-
-### Is it safe?
-
+#### Is it safe?
 HalfCloud is designed to be much safer than giving an AI agent unrestricted SSH access to your server.
-
 The model works through a limited set of HalfCloud tools instead of running arbitrary commands directly.
-
 That said, HalfCloud is still under active development and is not recommended for important production systems yet.
-
-### Is HalfCloud a hosting provider?
-
+#### Is HalfCloud a hosting provider?
 No.
-
 You bring your own server.
-
 HalfCloud runs on it and helps you deploy and manage your apps.
-
-### What if I stop using HalfCloud?
-
+#### What if I stop using HalfCloud?
 Your apps still run on your server.
-
 HalfCloud is only the management layer. Your infrastructure and data remain yours.
+
+## Where HalfCloud is going
+
+HalfCloud is built by [Michal Bukovy](https://www.linkedin.com/in/mbukovy/) — a developer who has spent far too much of the last 15 years dealing with DevOps.
+The goal is simple: **make running applications on your own infrastructure feel as easy as using a managed platform — without giving up control, flexibility, or cost efficiency.**
+HalfCloud is still early, but the direction is clear.
+
+### Coming next
+
+* **Notifications and outgoing webhooks**
+  Know when deployments succeed, fail, or need your attention — or forward those events to tools like n8n and build your own workflows.
+
+* **Webhook-triggered actions**
+  Let external tools trigger HalfCloud actions through simple webhooks — deploy, restart, rollback, investigate a problem with AI, or run other operations. Sensitive actions can require human confirmation before anything changes.
+
+* **Development and production environments**
+  Run separate environments for the same application and move a tested version to production with a simple **Promote to production** action.
+
+* **Branch deployments**
+  Deploy a specific Git branch into its own environment for testing, previews, or experiments.
+
+* **Disposable test environments**
+  Quickly create an isolated environment, try something, and remove it when you are done.
+
+### Longer-term vision
+
+Today, HalfCloud manages applications running on a single server.
+Eventually, it should be able to treat **multiple VPS servers as one simple pool of infrastructure**.
+Add another inexpensive VPS and HalfCloud could decide where applications should run based on available CPU, memory, storage, and workload.
+From there, the same philosophy can extend to:
+
+* moving workloads between servers
+* shared or replicated storage
+* simple load balancing
+* redundancy and failover
+* better resource utilization across multiple machines
+* scaling applications beyond a single VPS
+
+The important part is what should **not** change:
+**No Kubernetes degree required. No cloud architecture certification. No weeks of DevOps setup.**
+You add servers. You deploy applications. HalfCloud handles the complexity underneath.
