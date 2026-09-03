@@ -89,7 +89,9 @@ It can inspect repositories, build applications, run supporting services, config
 
 ### See it in action
 
-<!-- Demo video / GIF goes here -->
+Deploy n8n in 40 seconds
+
+https://github.com/user-attachments/assets/6b9b38ba-f7ac-46f2-8494-502c134fe2ba
 
 ## Install
 
