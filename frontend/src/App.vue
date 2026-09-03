@@ -16,6 +16,8 @@ const authenticated = ref(false);
 const loading = ref(true);
 const accessCode = ref('');
 const loginError = ref('');
+const loginSubmitting = ref(false);
+const showLoginLoading = ref(false);
 const settings = ref<PublicSettings | null>(null);
 const providers = ref<ProviderMetadata[]>([]);
 const settingsForm = reactive({ provider: '' as LlmProvider | '', endpoint: '', apiKey: '', model: '', customModel: '' });
@@ -66,6 +68,13 @@ const mobileTab = ref<'operator' | 'apps' | 'server'>('operator');
 let refreshTimer: number | undefined;
 let activityTimer: number | undefined;
 let debugCopyTimer: number | undefined;
+let loginLoadingTimer: number | undefined;
+
+const instanceHostname = window.location.hostname || 'This server';
+const instanceIp = computed(() => {
+  const match = instanceHostname.match(/^halfcloud\.(\d{1,3}(?:\.\d{1,3}){3})\.nip\.io$/);
+  return match?.[1] ?? '';
+});
 
 const authenticatedFetch: typeof fetch = async (input, init) => {
   const response = await fetch(input, init);
@@ -579,15 +588,32 @@ async function bootstrap() {
 }
 
 async function login() {
+  if (loginSubmitting.value) return;
   loginError.value = '';
+  loginSubmitting.value = true;
+  loginLoadingTimer = window.setTimeout(() => { showLoginLoading.value = true; }, 300);
   try {
-    await api('/api/auth/login', { method: 'POST', body: JSON.stringify({ accessCode: accessCode.value }) });
+    await api('/api/auth/login', { method: 'POST', body: JSON.stringify({ accessCode: accessCode.value.trim() }) });
     authenticated.value = true;
     accessCode.value = '';
     await loadDashboard();
   } catch (error) {
-    loginError.value = error instanceof Error ? error.message : 'Sign in failed';
+    const message = error instanceof Error ? error.message : '';
+    loginError.value = message === 'Invalid access code'
+      ? "That access code doesn't match this HalfCloud instance."
+      : message || 'HalfCloud could not sign you in. Please try again.';
+  } finally {
+    if (loginLoadingTimer) window.clearTimeout(loginLoadingTimer);
+    loginLoadingTimer = undefined;
+    loginSubmitting.value = false;
+    showLoginLoading.value = false;
   }
+}
+
+function formatAccessCode(event: Event) {
+  const input = event.target as HTMLInputElement;
+  const normalized = input.value.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 12);
+  accessCode.value = normalized.length > 6 ? `${normalized.slice(0, 6)}-${normalized.slice(6)}` : normalized;
 }
 
 async function logout() {
@@ -946,6 +972,7 @@ onBeforeUnmount(() => {
   if (refreshTimer) window.clearInterval(refreshTimer);
   if (activityTimer) window.clearInterval(activityTimer);
   if (debugCopyTimer) window.clearTimeout(debugCopyTimer);
+  if (loginLoadingTimer) window.clearTimeout(loginLoadingTimer);
   window.removeEventListener('halfcloud:unauthorized', clearSession);
 });
 </script>
@@ -958,22 +985,102 @@ onBeforeUnmount(() => {
 
   <main v-else-if="!authenticated" class="auth-shell">
     <section class="auth-intro">
-      <p class="eyebrow">HALFCLOUD / NODE 01</p>
-      <h1>Your server,<br><em>on speaking terms.</em></h1>
-      <p class="auth-copy">A direct line to Docker on this machine. Tell it what should be running.</p>
-      <div class="auth-signal"><span></span> HTTPS connection secured</div>
+      <svg class="auth-cloud-outline" viewBox="0 0 640 360" aria-hidden="true">
+        <path d="M125 278C57 278 27 230 39 181c10-42 46-70 89-69 14-58 65-98 126-98 64 0 117 43 129 102 18-12 39-19 62-19 56 0 102 42 107 97 30 10 51 38 51 70 0 41-33 74-74 74H125c-46 0-84-27-84-60"></path>
+      </svg>
+
+      <header class="auth-brand brand">
+        <img class="brand-mark" src="/halfcloud-logo-ui.png" alt="">
+        <strong>HalfCloud</strong>
+      </header>
+
+      <div class="auth-story">
+        <h1>Your VPS.<br><span>Just tell it what to run.</span></h1>
+        <p class="auth-copy">Deploy applications, databases and Git repositories to your own server without learning Docker, reverse proxies or cloud infrastructure.</p>
+
+        <div class="product-preview" aria-label="Example HalfCloud deployment conversation">
+          <div class="preview-message preview-user">
+            <span>YOU</span>
+            <strong>Deploy WordPress</strong>
+          </div>
+          <div class="preview-message preview-halfcloud">
+            <span>HALFCLOUD</span>
+            <strong>Creating WordPress and MariaDB...</strong>
+            <ul>
+              <li>WordPress container</li>
+              <li>MariaDB database</li>
+              <li>Persistent storage</li>
+              <li>HTTPS configured</li>
+            </ul>
+            <div class="preview-url">
+              wordpress.example.nip.io
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 17 17 7M8 7h9v9"></path></svg>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <footer class="auth-benefits" aria-label="HalfCloud benefits">
+        <span>Runs on your VPS</span>
+        <span>Private by design</span>
+        <span>Standard Docker</span>
+      </footer>
     </section>
     <section class="auth-panel">
-      <div class="brand"><img class="brand-mark" src="/halfcloud-logo-ui.png" alt=""><strong>HalfCloud</strong></div>
-      <form @submit.prevent="login">
-        <p class="step-label">ADMIN ACCESS</p>
-        <h2>Sign in to this host</h2>
-        <p>Use the permanent access code printed by the installer.</p>
-        <label for="access-code">Access code</label>
-        <input id="access-code" v-model="accessCode" autofocus autocomplete="current-password" placeholder="XXXX-XXXX" required>
-        <p v-if="loginError" class="form-error">{{ loginError }}</p>
-        <button class="button primary wide" type="submit">Open HalfCloud <span>→</span></button>
-      </form>
+      <div class="auth-panel-inner">
+        <div class="auth-mobile-brand brand"><img class="brand-mark" src="/halfcloud-logo-ui.png" alt=""><strong>HalfCloud</strong></div>
+        <form @submit.prevent="login">
+          <p class="step-label">WELCOME</p>
+          <h2>Welcome to HalfCloud</h2>
+          <p>This HalfCloud instance is running on your server.</p>
+
+          <div class="instance-card">
+            <div class="instance-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="6" rx="2"></rect><rect x="4" y="14" width="16" height="6" rx="2"></rect><path d="M8 7h.01M8 17h.01"></path></svg>
+            </div>
+            <div>
+              <span>HALFCLOUD INSTANCE</span>
+              <strong>{{ instanceHostname }}</strong>
+              <small v-if="instanceIp">{{ instanceIp }}</small>
+            </div>
+            <span class="instance-status" title="Instance reachable"></span>
+          </div>
+
+          <p class="access-explanation">Enter the access code generated when HalfCloud was installed on this server.</p>
+          <label for="access-code">Access code</label>
+          <input
+            id="access-code"
+            :value="accessCode"
+            :class="{ 'input-error': loginError }"
+            autofocus
+            autocomplete="current-password"
+            autocapitalize="characters"
+            spellcheck="false"
+            inputmode="text"
+            maxlength="13"
+            placeholder="XXXXXX-XXXXXX"
+            :aria-invalid="Boolean(loginError)"
+            :aria-describedby="loginError ? 'access-code-error' : undefined"
+            required
+            @input="formatAccessCode"
+          >
+          <p v-if="loginError" id="access-code-error" class="form-error" role="alert">{{ loginError }}</p>
+          <button class="button primary wide auth-submit" type="submit" :disabled="loginSubmitting">
+            <span>{{ showLoginLoading ? 'Opening HalfCloud...' : 'Open HalfCloud' }}</span>
+            <span v-if="showLoginLoading" class="login-spinner" aria-hidden="true"></span>
+            <svg v-else viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14m-5-5 5 5-5 5"></path></svg>
+          </button>
+        </form>
+
+        <div class="auth-help">
+          <p><strong>Lost your access code?</strong><br>SSH into the server and read:</p>
+          <code>/home/halfcloudrunner/.halfcloud/secrets/access-code</code>
+        </div>
+        <p class="auth-trust">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 5 6v5c0 4.6 2.8 8.2 7 10 4.2-1.8 7-5.4 7-10V6l-7-3Z"></path><path d="m9 12 2 2 4-4"></path></svg>
+          Authentication stays on this server.
+        </p>
+      </div>
     </section>
   </main>
 
