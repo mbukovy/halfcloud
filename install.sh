@@ -148,6 +148,7 @@ curl -fsSL https://dl.cloudsmith.io/public/caddy/stable/gpg.key | gpg --dearmor 
 curl -fsSL https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt -o /etc/apt/sources.list.d/caddy-stable.list
 apt-get update -qq
 apt-get install -y -qq caddy
+install -d -m 755 /etc/caddy
 cat > /etc/caddy/Caddyfile <<EOF
 {
   admin 127.0.0.1:2019
