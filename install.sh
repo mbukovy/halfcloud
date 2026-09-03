@@ -5,12 +5,20 @@ readonly HALFCLOUD_USER="halfcloudrunner"
 readonly HALFCLOUD_HOME="/home/${HALFCLOUD_USER}"
 readonly INSTALL_DIR="${HALFCLOUD_HOME}/halfcloud"
 readonly DATA_DIR="${HALFCLOUD_HOME}/.halfcloud"
-readonly REPOSITORY="mbukovy/halfcloud"
-readonly SOURCE_URL="https://github.com/${REPOSITORY}/archive/refs/heads/main.tar.gz"
+readonly SOURCE_URL="https://github.com/mbukovy/halfcloud/archive/refs/heads/main.tar.gz"
 
 info() { printf '%s\n' "$1"; }
 success() { printf '✓ %s\n' "$1"; }
 fail() { printf 'Error: %s\n' "$1" >&2; exit 1; }
+wait_for() {
+  local attempts="$1" delay="$2" i
+  shift 2
+  for ((i = 0; i < attempts; i++)); do
+    "$@" >/dev/null 2>&1 && return 0
+    sleep "${delay}"
+  done
+  return 1
+}
 run_user() {
   runuser -u "${HALFCLOUD_USER}" -- env \
     HOME="${HALFCLOUD_HOME}" \
@@ -22,61 +30,60 @@ run_user() {
     "$@"
 }
 
-[[ "$(uname -s)" == "Linux" ]] || fail "HalfCloud 0.1 supports Linux only."
 [[ "${EUID}" -eq 0 ]] || fail "Run the installer as root (for example: curl ... | sudo bash)."
 [[ -r /etc/os-release ]] || fail "Cannot identify this Linux distribution. Ubuntu 22.04 or newer is required."
 # shellcheck disable=SC1091
 source /etc/os-release
 [[ "${ID:-}" == "ubuntu" ]] || fail "HalfCloud 0.1 supports Ubuntu only (detected ${PRETTY_NAME:-unknown})."
-major_version="${VERSION_ID%%.*}"
-[[ "${major_version}" =~ ^[0-9]+$ ]] && (( major_version >= 22 )) || fail "Ubuntu 22.04 or newer is required (detected ${VERSION_ID:-unknown})."
-[[ "$(uname -m)" == "x86_64" || "$(uname -m)" == "aarch64" ]] || fail "HalfCloud supports amd64 and arm64 servers only."
+[[ "${VERSION_ID%%.*}" =~ ^[0-9]+$ ]] && (( ${VERSION_ID%%.*} >= 22 )) || fail "Ubuntu 22.04 or newer is required (detected ${VERSION_ID:-unknown})."
+architecture="$(uname -m)"
+[[ "${architecture}" == "x86_64" || "${architecture}" == "aarch64" ]] || fail "HalfCloud supports amd64 and arm64 servers only."
 [[ -d /run/systemd/system ]] || fail "HalfCloud requires systemd."
 [[ ! -S /var/run/docker.sock ]] || fail "A host Docker daemon is active. HalfCloud 0.1 requires a clean installation."
 
 info "Installing HalfCloud with rootless Docker..."
 export DEBIAN_FRONTEND=noninteractive
+temporary_dir="$(mktemp -d)"
+trap 'rm -rf "${temporary_dir}"' EXIT
+export GNUPGHOME="${temporary_dir}/gnupg"
+install -d -m 700 "${GNUPGHOME}"
 apt-get update -qq
 apt-get install -y -qq ca-certificates curl dbus-user-session git uidmap slirp4netns fuse-overlayfs jq openssl gnupg
 
-if ! id "${HALFCLOUD_USER}" >/dev/null 2>&1; then
+if id "${HALFCLOUD_USER}" >/dev/null 2>&1; then
+  [[ -f /etc/systemd/system/halfcloud.service && -d "${INSTALL_DIR}" && -d "${DATA_DIR}" ]] || fail "An incomplete ${HALFCLOUD_USER} installation exists. Run the uninstaller before installing again."
+else
   useradd --create-home --shell /bin/bash "${HALFCLOUD_USER}"
 fi
 runtime_uid="$(id -u "${HALFCLOUD_USER}")"
 runtime_dir="/run/user/${runtime_uid}"
 docker_socket="${runtime_dir}/docker.sock"
-if ! grep -q "^${HALFCLOUD_USER}:" /etc/subuid; then printf '%s:100000:65536\n' "${HALFCLOUD_USER}" >> /etc/subuid; fi
-if ! grep -q "^${HALFCLOUD_USER}:" /etc/subgid; then printf '%s:100000:65536\n' "${HALFCLOUD_USER}" >> /etc/subgid; fi
+grep -q "^${HALFCLOUD_USER}:" /etc/subuid || printf '%s:100000:65536\n' "${HALFCLOUD_USER}" >> /etc/subuid
+grep -q "^${HALFCLOUD_USER}:" /etc/subgid || printf '%s:100000:65536\n' "${HALFCLOUD_USER}" >> /etc/subgid
 loginctl enable-linger "${HALFCLOUD_USER}"
 systemctl start "user@${runtime_uid}.service"
 success "Dedicated ${HALFCLOUD_USER} user configured"
 
 if ! command -v dockerd-rootless-setuptool.sh >/dev/null 2>&1; then
-  curl -fsSL https://get.docker.com | sh
+  curl -fsSL https://get.docker.com | sh -s -- --no-autostart
 fi
 apt-get install -y -qq docker-ce-rootless-extras docker-compose-plugin
 systemctl disable --now docker.service docker.socket >/dev/null 2>&1 || true
 rm -f /var/run/docker.sock
 run_user dockerd-rootless-setuptool.sh install --force
 run_user systemctl --user enable --now docker.service
-for _ in {1..30}; do
-  [[ -S "${docker_socket}" ]] && run_user docker info >/dev/null 2>&1 && break
-  sleep 1
-done
-[[ -S "${docker_socket}" ]] || fail "Rootless Docker did not create ${docker_socket}."
+wait_for 30 1 run_user docker info || fail "Rootless Docker did not become ready."
 [[ "$(stat -c %U "${docker_socket}")" == "${HALFCLOUD_USER}" ]] || fail "The Docker socket is not owned by ${HALFCLOUD_USER}."
 run_user docker info --format '{{json .SecurityOptions}}' | grep -q rootless || fail "Docker did not report rootless mode."
 success "Rootless Docker is running"
 
 node_major="0"
-if command -v node >/dev/null 2>&1; then node_major="$(node --version | tr -d v | cut -d. -f1)"; fi
+if [[ -x /usr/bin/node ]]; then node_major="$(/usr/bin/node --version | tr -d v | cut -d. -f1)"; fi
 if (( node_major < 22 )); then
   curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
   apt-get install -y -qq nodejs
 fi
 
-temporary_dir="$(mktemp -d)"
-trap 'rm -rf "${temporary_dir}"' EXIT
 curl -fsSL "${SOURCE_URL}" -o "${temporary_dir}/source.tar.gz"
 tar -xzf "${temporary_dir}/source.tar.gz" -C "${temporary_dir}"
 rm -rf "${INSTALL_DIR}"
@@ -168,29 +175,25 @@ if ! systemctl restart caddy; then
 fi
 systemctl is-active --quiet caddy || { journalctl -u caddy --no-pager -n 50 >&2; fail "Caddy stopped immediately after startup."; }
 systemctl enable halfcloud
-systemctl start halfcloud
+systemctl restart halfcloud
 success "HalfCloud and Caddy services installed"
 
 test_name="halfcloud-install-test"
 run_user docker rm -f "${test_name}" >/dev/null 2>&1 || true
 run_user docker run -d --name "${test_name}" -p 127.0.0.1:19999:80 nginx:alpine >/dev/null
-for _ in {1..30}; do curl -fsS --max-time 2 http://127.0.0.1:19999/ >/dev/null 2>&1 && break; sleep 1; done
-curl -fsS --max-time 2 http://127.0.0.1:19999/ >/dev/null || fail "Rootless Docker could not expose a localhost test port."
+wait_for 30 1 curl -fsS --max-time 2 http://127.0.0.1:19999/ || fail "Rootless Docker could not expose a localhost test port."
 run_user docker rm -f "${test_name}" >/dev/null
 success "Rootless test container passed"
 
-for _ in {1..60}; do curl -fsS --max-time 2 http://127.0.0.1:9000/api/health >/dev/null 2>&1 && break; sleep 2; done
-curl -fsS --max-time 2 http://127.0.0.1:9000/api/health >/dev/null || { journalctl -u halfcloud --no-pager -n 50 >&2; fail "HalfCloud did not become healthy."; }
+if ! wait_for 60 2 curl -fsS --max-time 2 http://127.0.0.1:9000/api/health; then
+  journalctl -u halfcloud --no-pager -n 50 >&2
+  fail "HalfCloud did not become healthy."
+fi
 systemctl is-active --quiet caddy || fail "Caddy is not running."
 if id -nG "${HALFCLOUD_USER}" | tr ' ' '\n' | grep -Eq '^(sudo|docker)$'; then fail "The ${HALFCLOUD_USER} user received a prohibited privileged group."; fi
 success "Runtime identity and service checks passed"
 
-https_ready=false
-for _ in {1..60}; do
-  if curl -fsS --max-time 5 "https://${hostname}/api/health" >/dev/null 2>&1; then https_ready=true; break; fi
-  sleep 2
-done
-[[ "${https_ready}" == "true" ]] || fail "HTTPS did not become available. Verify that inbound ports 80 and 443 are open, then rerun the installer."
+wait_for 60 2 curl -fsS --max-time 5 "https://${hostname}/api/health" || fail "HTTPS did not become available. Verify that inbound ports 80 and 443 are open, then rerun the installer."
 success "HTTPS configured"
 
 info ""

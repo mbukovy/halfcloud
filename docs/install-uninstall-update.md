@@ -118,7 +118,9 @@ An interactive terminal is required. The script displays the deletion scope and 
 UNINSTALL HALFCLOUD
 ```
 
-The operation cannot be undone. Back up and verify everything you need before confirming. Shared prerequisite packages that may be used by other software are left installed, but the listed Docker, Caddy, and Node.js packages are purged.
+The operation cannot be undone. Back up and verify everything you need before confirming. Shared prerequisite packages that may be used by other software are left installed, but the listed Docker, Caddy, and Node.js packages are purged. Before reporting success, the uninstaller verifies that the managed account, services, packages, repositories, and data directories are gone, so the server is ready for a clean reinstall.
+
+Shared host audit records, including the system journal and APT/dpkg history, are retained. Private GitHub deploy keys are deleted from the server, but any corresponding public deploy keys registered on GitHub must be removed there separately.
 
 ## Service commands
 

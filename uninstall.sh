@@ -8,6 +8,7 @@ readonly HALFCLOUD_HOME="/home/${HALFCLOUD_USER}"
 info() { printf '%s\n' "$1"; }
 success() { printf '✓ %s\n' "$1"; }
 warning() { printf 'Warning: %s\n' "$1" >&2; }
+fail() { printf 'Error: %s\n' "$1" >&2; exit 1; }
 
 if [[ "${EUID}" -ne 0 ]]; then
   printf 'Error: Run the uninstaller as root (for example: sudo ./uninstall.sh).\n' >&2
@@ -32,6 +33,7 @@ WARNING: This will completely uninstall HalfCloud from this server.
 
 All HalfCloud applications, containers, images, volumes, configuration,
 credentials, logs, and data will be permanently deleted.
+Shared host audit logs, such as the system journal and APT history, are retained.
 
 The dedicated halfcloudrunner user and its home directory will be deleted.
 Docker, Caddy, Node.js, their package repositories, and all host
@@ -58,6 +60,8 @@ fi
 info "Stopping HalfCloud services..."
 systemctl disable --now halfcloud.service >/dev/null 2>&1 || true
 rm -f /etc/systemd/system/halfcloud.service
+rm -f /etc/systemd/system/multi-user.target.wants/halfcloud.service
+rm -f /run/lock/halfcloud-update.lock
 systemctl daemon-reload
 systemctl reset-failed halfcloud.service >/dev/null 2>&1 || true
 
@@ -78,7 +82,7 @@ if id "${HALFCLOUD_USER}" >/dev/null 2>&1; then
   pkill -TERM -u "${runtime_uid}" >/dev/null 2>&1 || true
   sleep 1
   pkill -KILL -u "${runtime_uid}" >/dev/null 2>&1 || true
-  userdel --remove "${HALFCLOUD_USER}" >/dev/null 2>&1 || true
+  userdel --force --remove "${HALFCLOUD_USER}" >/dev/null 2>&1 || true
 fi
 
 rm -rf -- "${HALFCLOUD_HOME}"
@@ -99,7 +103,7 @@ fi
 info "Removing Docker and container state..."
 systemctl disable --now docker.service docker.socket containerd.service >/dev/null 2>&1 || true
 rm -f /var/run/docker.sock /run/docker.sock
-rm -rf -- /var/lib/docker /var/lib/containerd /etc/docker /run/docker /run/containerd
+rm -rf -- /var/lib/docker /var/lib/containerd /etc/docker /etc/containerd /run/docker /run/containerd
 
 info "Removing Caddy configuration and state..."
 systemctl disable --now caddy.service >/dev/null 2>&1 || true
@@ -114,6 +118,8 @@ packages=(
   docker-ce-cli
   docker-ce-rootless-extras
   docker-compose-plugin
+  docker-model-plugin
+  docker-scan-plugin
   nodejs
 )
 installed_packages=()
@@ -136,29 +142,51 @@ if getent group docker >/dev/null 2>&1; then
 fi
 
 info "Removing package repositories..."
-rm -f \
-  /etc/apt/sources.list.d/caddy-stable.list \
-  /etc/apt/sources.list.d/caddy-stable.list.save \
-  /etc/apt/sources.list.d/docker.list \
-  /etc/apt/sources.list.d/docker.list.save \
-  /etc/apt/sources.list.d/docker.sources \
-  /etc/apt/sources.list.d/nodesource.list \
-  /etc/apt/sources.list.d/nodesource.list.save \
-  /etc/apt/sources.list.d/nodesource.sources \
-  /etc/apt/keyrings/docker.asc \
-  /etc/apt/keyrings/docker.gpg \
-  /usr/share/keyrings/caddy-stable-archive-keyring.gpg \
-  /usr/share/keyrings/nodesource.gpg \
+repository_files=(
+  /etc/apt/sources.list.d/caddy-stable.list
+  /etc/apt/sources.list.d/caddy-stable.list.save
+  /etc/apt/sources.list.d/caddy-stable.sources
+  /etc/apt/sources.list.d/docker.list
+  /etc/apt/sources.list.d/docker.list.save
+  /etc/apt/sources.list.d/docker.sources
+  /etc/apt/sources.list.d/nodesource.list
+  /etc/apt/sources.list.d/nodesource.list.save
+  /etc/apt/sources.list.d/nodesource.sources
+  /etc/apt/keyrings/docker.asc
+  /etc/apt/keyrings/docker.gpg
+  /etc/apt/preferences.d/nodejs
+  /etc/apt/preferences.d/nsolid
+  /etc/apt/keyrings/caddy-stable-archive-keyring.gpg
+  /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+  /usr/share/keyrings/nodesource.gpg
   /usr/share/keyrings/nodesource-repo.gpg
+)
+rm -f "${repository_files[@]}"
+apt-get update -qq || warning "APT package metadata could not be refreshed."
 
 systemctl daemon-reload
 systemctl reset-failed >/dev/null 2>&1 || true
 
-if id "${HALFCLOUD_USER}" >/dev/null 2>&1; then
-  warning "Most HalfCloud state was removed, but the ${HALFCLOUD_USER} account is still present."
-  warning "Reboot the server and run this uninstaller again."
-  exit 1
-fi
+cleanup_failed=false
+id "${HALFCLOUD_USER}" >/dev/null 2>&1 && { warning "The ${HALFCLOUD_USER} account is still present."; cleanup_failed=true; }
+getent group "${HALFCLOUD_USER}" >/dev/null 2>&1 && { warning "The ${HALFCLOUD_USER} group is still present."; cleanup_failed=true; }
+[[ -e "${HALFCLOUD_HOME}" ]] && { warning "${HALFCLOUD_HOME} is still present."; cleanup_failed=true; }
+[[ -e /etc/systemd/system/halfcloud.service || -L /etc/systemd/system/multi-user.target.wants/halfcloud.service ]] && { warning "halfcloud.service was not completely removed."; cleanup_failed=true; }
+for package in "${packages[@]}"; do
+  if dpkg-query -W -f='${db:Status-Status}' "${package}" 2>/dev/null | grep -q '^installed$'; then
+    warning "Package ${package} is still installed."
+    cleanup_failed=true
+  fi
+done
+for path in "${repository_files[@]}" /etc/caddy /var/lib/caddy /var/lib/docker /var/lib/containerd /etc/docker /etc/containerd; do
+  [[ ! -e "${path}" ]] || { warning "${path} is still present."; cleanup_failed=true; }
+done
+for service in halfcloud.service caddy.service docker.service docker.socket containerd.service; do
+  systemctl is-active --quiet "${service}" || continue
+  warning "${service} is still active."
+  cleanup_failed=true
+done
+[[ "${cleanup_failed}" == "false" ]] || fail "Uninstall was incomplete. Resolve the warnings above, then run the uninstaller again."
 
 success "HalfCloud and its data have been removed."
 info "The shared prerequisite packages installed by apt were left in place because other system software may use them."
