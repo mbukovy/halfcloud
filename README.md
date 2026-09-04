@@ -182,20 +182,17 @@ HalfCloud is still early, but the direction is clear.
 
 ### Coming next
 
-* **Notifications and outgoing webhooks**
-  Know when deployments succeed, fail, or need your attention — or forward those events to tools like n8n and build your own workflows.
+* **Automatic deployments**: Connect a branch once and let HalfCloud handle the rest. Every push can automatically build, deploy, verify, and switch to the new version.
 
-* **Webhook-triggered actions**
-  Let external tools trigger HalfCloud actions through simple webhooks — deploy, restart, rollback, investigate a problem with AI, or run other operations. Sensitive actions can require human confirmation before anything changes.
+* **Notifications and outgoing webhooks**: Know when deployments succeed, fail, or need your attention — or forward those events to tools like n8n and build your own workflows.
 
-* **Development and production environments**
-  Run separate environments for the same application and move a tested version to production with a simple **Promote to production** action.
+* **Webhook-triggered actions**: Let external tools trigger HalfCloud actions through simple webhooks — deploy, restart, rollback, investigate a problem with AI, or run other operations. Sensitive actions can require human confirmation before anything changes.
 
-* **Branch deployments**
-  Deploy a specific Git branch into its own environment for testing, previews, or experiments.
+* **Development and production environments**: Run separate environments for the same application and move a tested version to production with a simple **Promote to production** action.
 
-* **Disposable test environments**
-  Quickly create an isolated environment, try something, and remove it when you are done.
+* **Branch deployments**: Deploy a specific Git branch into its own environment for testing, previews, or experiments.
+
+* **Disposable test environments**: Quickly create an isolated environment, try something, and remove it when you are done.
 
 ### Longer-term vision
 
