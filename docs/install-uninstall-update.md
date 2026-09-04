@@ -43,7 +43,7 @@ The installer:
 5. installs Node.js 22 when needed;
 6. downloads, builds, and prunes the HalfCloud application;
 7. creates private configuration, data, application, log, and secret directories;
-8. detects the public IPv4 address and creates `nip.io` hostnames;
+8. detects the public IPv4 address and creates a randomized `halfcloud-<letters><digits>.<ip>.nip.io` control-plane hostname;
 9. generates an access code and session secret;
 10. installs `halfcloud.service` with systemd hardening;
 11. installs Caddy and configures HTTPS;

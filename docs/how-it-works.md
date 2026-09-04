@@ -80,7 +80,7 @@ Containers, networks, and volumes carry `halfcloud.managed=true` plus App and Se
 
 ## HTTPS and domains
 
-The installer detects the public IPv4 address and sets the base domain to `<ip>.nip.io`. The control plane uses `halfcloud.<ip>.nip.io`; public Apps receive a generated hostname derived from the App name.
+The installer detects the public IPv4 address and sets the base domain to `<ip>.nip.io`. The control plane uses a randomized `halfcloud-<two letters><two digits>.<ip>.nip.io` hostname; public Apps receive a generated hostname derived from the App name.
 
 Caddy's admin API listens on `127.0.0.1:2019`. HalfCloud sends it a complete generated Caddyfile whenever managed App state changes. Only running Services with a hostname and published TCP port receive a route.
 
