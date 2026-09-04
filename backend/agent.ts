@@ -79,6 +79,15 @@ export function sanitizeAgentMessages(messages: UIMessage[]): UIMessage[] {
       const type = typeof record.type === 'string' ? record.type : '';
       const name = type === 'dynamic-tool' ? record.toolName : type.startsWith('tool-') ? type.slice(5) : undefined;
 
+      // An aborted stream can leave a tool call without a result. Keep it in the persisted UI,
+      // but never send an orphaned call back to a provider as historical context.
+      if (name && (
+        record.state === 'input-streaming'
+        || record.state === 'input-available'
+        || record.state === 'approval-requested'
+        || (record.state === 'output-available' && record.preliminary === true)
+      )) return [];
+
       if (name === 'createGitApp' || name === 'getRepositoryDeployKey' || name === 'resumePrivateGitApp') {
         const input = record.input as Record<string, unknown> | undefined;
         const output = record.output as Record<string, unknown> | undefined;

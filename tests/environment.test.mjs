@@ -240,6 +240,26 @@ test('provider-bound history excludes environment mutation values', () => {
   assert.equal(sanitized[0].parts.find((part) => part.type === 'text').text, 'Deployment complete.');
 });
 
+test('provider-bound history excludes tool calls left incomplete by an interrupted stream', () => {
+  const messages = [{
+    id: 'message',
+    role: 'assistant',
+    parts: [
+      { type: 'text', text: 'I started inspecting the App.' },
+      { type: 'tool-getApp', toolCallId: 'pending', state: 'input-available', input: { appId: 'app_one' } },
+      { type: 'tool-listApps', toolCallId: 'partial', state: 'input-streaming', input: {} },
+      { type: 'tool-getHostStatus', toolCallId: 'preliminary', state: 'output-available', preliminary: true, input: {}, output: {} },
+      { type: 'tool-getServerStats', toolCallId: 'complete', state: 'output-available', input: {}, output: { cpuPercent: 10 } },
+    ],
+  }];
+
+  const sanitized = sanitizeAgentMessages(messages);
+
+  assert.deepEqual(sanitized[0].parts.map((part) => part.type), ['text', 'tool-getServerStats']);
+  assert.equal(sanitized[0].parts[0].text, 'I started inspecting the App.');
+  assert.equal(sanitized[0].parts[1].state, 'output-available');
+});
+
 test('provider-bound history strips credentials from Basic Auth widget records', () => {
   const messages = [{
     id: 'message',
