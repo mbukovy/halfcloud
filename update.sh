@@ -75,10 +75,12 @@ tar -xzf "${temporary_dir}/source.tar.gz" --strip-components=1 -C "${staging_dir
 [[ -f "${staging_dir}/package.json" && -f "${staging_dir}/backend/server.ts" ]] || fail "Downloaded release is incomplete."
 chown -R "${HALFCLOUD_USER}:${HALFCLOUD_USER}" "${staging_dir}"
 
-info "Installing dependencies and building the update..."
-run_user npm --prefix "${staging_dir}" ci
+info "Installing dependencies..."
+run_user npm --prefix "${staging_dir}" ci --ignore-scripts --prefer-offline --no-audit --no-fund
+info "Building the update..."
 run_user npm --prefix "${staging_dir}" run build
-run_user npm --prefix "${staging_dir}" prune --omit=dev
+info "Removing development dependencies..."
+run_user npm --prefix "${staging_dir}" prune --omit=dev --ignore-scripts --no-audit --no-fund
 [[ -f "${staging_dir}/dist/backend/server.js" && -f "${staging_dir}/dist/public/index.html" ]] || fail "The updated release did not build correctly."
 success "Update built while the current HalfCloud release remained online"
 

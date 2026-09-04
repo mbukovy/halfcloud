@@ -93,9 +93,9 @@ rm -rf "${INSTALL_DIR}"
 install -d -o "${HALFCLOUD_USER}" -g "${HALFCLOUD_USER}" -m 755 "${INSTALL_DIR}"
 cp -a "${temporary_dir}/halfcloud-main/." "${INSTALL_DIR}/"
 chown -R "${HALFCLOUD_USER}:${HALFCLOUD_USER}" "${INSTALL_DIR}"
-run_user npm --prefix "${INSTALL_DIR}" ci
+run_user npm --prefix "${INSTALL_DIR}" ci --ignore-scripts --prefer-offline --no-audit --no-fund
 run_user npm --prefix "${INSTALL_DIR}" run build
-run_user npm --prefix "${INSTALL_DIR}" prune --omit=dev
+run_user npm --prefix "${INSTALL_DIR}" prune --omit=dev --ignore-scripts --no-audit --no-fund
 install -d -o "${HALFCLOUD_USER}" -g "${HALFCLOUD_USER}" -m 700 \
   "${DATA_DIR}/config" "${DATA_DIR}/data" "${DATA_DIR}/apps" "${DATA_DIR}/repositories" "${DATA_DIR}/logs" "${DATA_DIR}/secrets"
 
