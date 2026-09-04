@@ -15,11 +15,13 @@ import { getServerStats } from './metrics.js';
 import { credentialsSchema, llmProviderSchema } from './llm/types.js';
 import { listModels, providerMetadata, testModel } from './llm/index.js';
 import type { LlmCredentials } from './llm/types.js';
+import { ConversationStore, conversationMessagesSchema } from './conversations.js';
 
 const app = express();
 const port = Number(process.env.PORT ?? 9000);
 const auth = await AuthService.create();
 const settings = new SettingsStore();
+const conversations = new ConversationStore();
 const docker = new ApplicationService(new DockerService());
 await docker.assertRootless();
 await docker.syncRoutes();
@@ -201,6 +203,24 @@ app.put('/api/routes/:routeId/basic-auth-requests/:requestId', async (request, r
   ));
 });
 
+app.get('/api/conversations', (request, response) => {
+  const limit = z.coerce.number().int().min(1).max(50).default(10).parse(request.query.limit);
+  response.json(conversations.list(limit));
+});
+app.get('/api/conversations/:conversationId', (request, response) => {
+  const conversation = conversations.get(z.string().min(1).max(128).parse(request.params.conversationId));
+  if (!conversation) {
+    response.status(404).json({ error: 'Conversation not found' });
+    return;
+  }
+  response.json(conversation);
+});
+app.put('/api/conversations/:conversationId', (request, response) => {
+  const id = z.string().regex(/^conversation_[a-f0-9-]{36}$/).parse(request.params.conversationId);
+  const { messages: _messages, ...summary } = conversations.save(id, conversationMessagesSchema.parse(request.body?.messages));
+  response.json(summary);
+});
+
 app.post('/api/chat', async (request, response) => {
   const requestId = randomUUID();
   response.setHeader('x-request-id', requestId);
@@ -209,7 +229,7 @@ app.post('/api/chat', async (request, response) => {
     response.status(409).json({ error: 'Configure an AI provider before using chat' });
     return;
   }
-  const messages = z.array(z.object({ id: z.string(), role: z.enum(['system', 'user', 'assistant']), parts: z.array(z.any()) }).passthrough()).max(100).parse(request.body?.messages);
+  const messages = conversationMessagesSchema.parse(request.body?.messages);
   const abortController = new AbortController();
   request.once('aborted', () => abortController.abort());
   response.once('close', () => {

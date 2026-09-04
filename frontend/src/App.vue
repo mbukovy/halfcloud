@@ -60,6 +60,12 @@ type AgentStatus = { phase: 'pulling-image'; image: string } | { phase: 'activit
 type AgentErrorDetails = { requestId: string; provider: string; model: string; details: string };
 type TokenUsage = { input: number; output: number; thinking: number; cacheRead: number; cacheWrite: number };
 type HalfCloudMessage = UIMessage<{ tokenUsage: TokenUsage }, { agentStatus: AgentStatus; agentError: AgentErrorDetails }>;
+type ConversationSummary = { id: string; title: string; createdAt: string; updatedAt: string };
+type ConversationRecord = ConversationSummary & { messages: HalfCloudMessage[] };
+const activeConversationId = ref('');
+const recentConversations = ref<ConversationSummary[]>([]);
+const historyMenu = ref<HTMLDetailsElement>();
+const historyLoading = ref(false);
 const agentStatus = ref<AgentStatus | null>(null);
 const agentErrorDetails = ref<AgentErrorDetails | null>(null);
 const activityElapsedSeconds = ref(0);
@@ -69,6 +75,7 @@ let refreshTimer: number | undefined;
 let activityTimer: number | undefined;
 let debugCopyTimer: number | undefined;
 let loginLoadingTimer: number | undefined;
+let persistenceQueue = Promise.resolve();
 
 const instanceHostname = window.location.hostname || 'This server';
 const instanceIp = computed(() => {
@@ -155,6 +162,84 @@ function formatCompactTokens(tokens: number) {
 
 function formatTokenCount(tokens: number) {
   return tokens.toLocaleString('en-US');
+}
+
+function relativeTime(timestamp: string) {
+  const seconds = Math.max(0, Math.floor((Date.now() - Date.parse(timestamp)) / 1000));
+  if (seconds < 60) return 'now';
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m`;
+  if (seconds < 86400) return `${Math.floor(seconds / 3600)}h`;
+  if (seconds < 604800) return `${Math.floor(seconds / 86400)}d`;
+  return new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric' }).format(new Date(timestamp));
+}
+
+function conversationId() {
+  return `conversation_${crypto.randomUUID()}`;
+}
+
+function updateRecentConversation(summary: ConversationSummary) {
+  recentConversations.value = [summary, ...recentConversations.value.filter((conversation) => conversation.id !== summary.id)].slice(0, 10);
+}
+
+function persistConversation(conversationIdToSave = activeConversationId.value, conversationMessages = messages.value) {
+  if (!conversationIdToSave || !conversationMessages.some((message) => message.role === 'user')) return Promise.resolve();
+  const body = JSON.stringify({ messages: conversationMessages });
+  persistenceQueue = persistenceQueue.then(async () => {
+    const summary = await api<ConversationSummary>(`/api/conversations/${encodeURIComponent(conversationIdToSave)}`, { method: 'PUT', body });
+    updateRecentConversation(summary);
+  }).catch((error: unknown) => {
+    dashboardError.value = error instanceof Error ? `Conversation could not be saved: ${error.message}` : 'Conversation could not be saved';
+  });
+  return persistenceQueue;
+}
+
+async function refreshConversationHistory() {
+  historyLoading.value = true;
+  try {
+    recentConversations.value = await api<ConversationSummary[]>('/api/conversations?limit=10');
+  } catch (error) {
+    dashboardError.value = error instanceof Error ? `Conversation history could not be loaded: ${error.message}` : 'Conversation history could not be loaded';
+  } finally {
+    historyLoading.value = false;
+  }
+}
+
+async function restoreRecentConversation() {
+  await refreshConversationHistory();
+  const mostRecent = recentConversations.value[0];
+  if (!mostRecent) return;
+  const conversation = await api<ConversationRecord>(`/api/conversations/${encodeURIComponent(mostRecent.id)}`);
+  activeConversationId.value = conversation.id;
+  messages.value = conversation.messages;
+}
+
+async function loadConversation(id: string) {
+  if (chatBusy.value) await stop();
+  await persistConversation();
+  try {
+    const conversation = await api<ConversationRecord>(`/api/conversations/${encodeURIComponent(id)}`);
+    activeConversationId.value = conversation.id;
+    messages.value = conversation.messages;
+    prompt.value = '';
+    clearError();
+    agentStatus.value = null;
+    agentErrorDetails.value = null;
+    continuedRequestIds.clear();
+    historyMenu.value?.removeAttribute('open');
+    await nextTick();
+    transcript.value?.scrollTo({ top: transcript.value.scrollHeight });
+    composerInput.value?.focus();
+  } catch (error) {
+    dashboardError.value = error instanceof Error ? `Conversation could not be loaded: ${error.message}` : 'Conversation could not be loaded';
+  }
+}
+
+function handleHistoryToggle(event: Event) {
+  if ((event.currentTarget as HTMLDetailsElement).open) void refreshConversationHistory();
+}
+
+function closeHistoryOutside(event: PointerEvent) {
+  if (historyMenu.value?.open && !historyMenu.value.contains(event.target as Node)) historyMenu.value.removeAttribute('open');
 }
 
 async function copyConversationDebug() {
@@ -632,6 +717,8 @@ function clearSession() {
   closeEnvironmentDialog();
   prompt.value = '';
   messages.value = [];
+  activeConversationId.value = '';
+  recentConversations.value = [];
   continuedRequestIds.clear();
   agentErrorDetails.value = null;
   if (refreshTimer) window.clearInterval(refreshTimer);
@@ -732,6 +819,7 @@ async function loadDashboard() {
     if (!newSettings.configured) settingsOpen.value = true;
     if (refreshTimer) window.clearInterval(refreshTimer);
     refreshTimer = window.setInterval(refreshDashboard, 7000);
+    await restoreRecentConversation();
   } catch (error) {
     dashboardError.value = error instanceof Error ? error.message : 'Could not load server state';
   }
@@ -817,11 +905,14 @@ async function submitPrompt() {
   agentStatus.value = null;
   agentErrorDetails.value = null;
   prompt.value = '';
+  if (!activeConversationId.value) activeConversationId.value = conversationId();
   await sendMessage({ text });
 }
 
 async function newConversation() {
   await stop();
+  await persistConversation();
+  activeConversationId.value = '';
   messages.value = [];
   prompt.value = '';
   clearError();
@@ -957,6 +1048,8 @@ watch(status, (current, previous) => {
     void refreshDashboard();
     void nextTick(() => composerInput.value?.focus());
   }
+  if (current === 'submitted' && previous !== 'submitted') void persistConversation();
+  if ((current === 'ready' || current === 'error') && (previous === 'submitted' || previous === 'streaming')) void persistConversation();
 });
 watch(agentActivityLabel, (current, previous) => {
   if (current !== previous) activityElapsedSeconds.value = 0;
@@ -970,12 +1063,14 @@ watch(agentActivityLabel, (current, previous) => {
 watch(messages, () => nextTick(() => transcript.value?.scrollTo({ top: transcript.value.scrollHeight, behavior: 'smooth' })), { deep: true });
 onMounted(bootstrap);
 onMounted(() => window.addEventListener('halfcloud:unauthorized', clearSession));
+onMounted(() => document.addEventListener('pointerdown', closeHistoryOutside));
 onBeforeUnmount(() => {
   if (refreshTimer) window.clearInterval(refreshTimer);
   if (activityTimer) window.clearInterval(activityTimer);
   if (debugCopyTimer) window.clearTimeout(debugCopyTimer);
   if (loginLoadingTimer) window.clearTimeout(loginLoadingTimer);
   window.removeEventListener('halfcloud:unauthorized', clearSession);
+  document.removeEventListener('pointerdown', closeHistoryOutside);
 });
 </script>
 
@@ -1148,7 +1243,30 @@ onBeforeUnmount(() => {
                   <svg v-else viewBox="0 0 24 24" aria-hidden="true"><path d="M8 2v2m8-2v2M9 9h6m-7 4h8m-4-9a6 6 0 0 1 6 6v5a6 6 0 0 1-12 0v-5a6 6 0 0 1 6-6Zm-6 7H3m3 5H3m15-5h3m-3 5h3"></path></svg>
                 </button>
               </div>
-              <button class="new-conversation-button" type="button" @click="newConversation">New conversation</button>
+              <div class="conversation-navigation">
+                <button class="new-conversation-button" type="button" @click="newConversation">New conversation</button>
+                <details ref="historyMenu" class="history-menu" @toggle="handleHistoryToggle">
+                  <summary title="Conversation history" aria-label="Conversation history">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"></path><path d="M3 3v5h5M12 7v5l3 2"></path></svg>
+                  </summary>
+                  <div class="history-dropdown">
+                    <strong>Recent conversations</strong>
+                    <p v-if="historyLoading && recentConversations.length === 0">Loading...</p>
+                    <p v-else-if="recentConversations.length === 0">No conversations yet.</p>
+                    <button
+                      v-for="conversation in recentConversations"
+                      v-else
+                      :key="conversation.id"
+                      type="button"
+                      :class="{ active: conversation.id === activeConversationId }"
+                      @click="loadConversation(conversation.id)"
+                    >
+                      <span>{{ conversation.title }}</span>
+                      <time :datetime="conversation.updatedAt">{{ relativeTime(conversation.updatedAt) }}</time>
+                    </button>
+                  </div>
+                </details>
+              </div>
             </div>
         </div>
         <div ref="transcript" class="transcript">

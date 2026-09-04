@@ -153,6 +153,21 @@ input:focus, textarea:focus { border-color: var(--ink); box-shadow: 0 0 0 3px #1
 .conversation-debug-button svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
 .new-conversation-button { border: 1px solid var(--line); background: transparent; border-radius: 3px; padding: 7px 10px; color: #59615c; font: 10px 'DM Mono', monospace; cursor: pointer; }
 .new-conversation-button:hover { border-color: #8c908b; color: var(--ink); background: #fff; }
+.conversation-navigation { display: flex; align-items: center; gap: 5px; }
+.history-menu { position: relative; }
+.history-menu summary { display: grid; width: 30px; height: 30px; place-items: center; border: 1px solid var(--line); border-radius: 3px; color: #59615c; cursor: pointer; list-style: none; }
+.history-menu summary::-webkit-details-marker { display: none; }
+.history-menu summary:hover, .history-menu[open] summary { border-color: #8c908b; background: #fff; color: var(--ink); }
+.history-menu summary:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
+.history-menu summary svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+.history-dropdown { position: absolute; z-index: 8; top: calc(100% + 7px); right: 0; width: min(310px, calc(100vw - 36px)); padding: 6px; border: 1px solid #cbc8bf; border-radius: 4px; background: #fffefb; box-shadow: 0 14px 35px #19231f24; }
+.history-dropdown > strong { display: block; padding: 8px 9px 7px; color: var(--muted); font: 500 9px 'DM Mono', monospace; letter-spacing: .08em; text-transform: uppercase; }
+.history-dropdown > p { margin: 4px; padding: 15px 8px; color: var(--muted); font-size: 11px; text-align: center; }
+.history-dropdown > button { display: grid; width: 100%; grid-template-columns: minmax(0, 1fr) auto; gap: 12px; padding: 10px 9px; border: 0; border-radius: 2px; background: transparent; color: var(--ink); text-align: left; cursor: pointer; }
+.history-dropdown > button:hover, .history-dropdown > button:focus-visible { background: #f2f0e9; outline: none; }
+.history-dropdown > button.active { background: #f8eee8; }
+.history-dropdown > button span { overflow: hidden; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.history-dropdown > button time { color: var(--muted); font: 9px 'DM Mono', monospace; }
 .transcript { min-height: 0; overflow-y: auto; padding: 10px 30px 24px; scroll-behavior: smooth; }
 .empty-chat { max-width: 490px; margin: 8vh auto 0; text-align: center; }
 .empty-chat-logo { display: block; width: 86px; height: auto; margin: auto; }

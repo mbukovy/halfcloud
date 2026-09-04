@@ -78,8 +78,11 @@ run_user docker info --format '{{json .SecurityOptions}}' | grep -q rootless || 
 success "Rootless Docker is running"
 
 node_major="0"
-if [[ -x /usr/bin/node ]]; then node_major="$(/usr/bin/node --version | tr -d v | cut -d. -f1)"; fi
-if (( node_major < 22 )); then
+node_minor="0"
+if [[ -x /usr/bin/node ]]; then
+  IFS='.' read -r node_major node_minor _ <<< "$(/usr/bin/node --version | tr -d v)"
+fi
+if (( node_major < 22 || (node_major == 22 && node_minor < 5) )); then
   curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
   apt-get install -y -qq nodejs
 fi
