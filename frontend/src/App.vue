@@ -1170,8 +1170,8 @@ onBeforeUnmount(() => {
         </form>
 
         <div class="auth-help">
-          <p><strong>Lost your access code?</strong><br>SSH into the server and read:</p>
-          <code>/home/halfcloudrunner/.halfcloud/secrets/access-code</code>
+          <p><strong>Lost your access code?</strong><br>SSH into the server and run:</p>
+          <code>cat /home/halfcloudrunner/.halfcloud/secrets/access-code</code>
         </div>
         <p class="auth-trust">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 5 6v5c0 4.6 2.8 8.2 7 10 4.2-1.8 7-5.4 7-10V6l-7-3Z"></path><path d="m9 12 2 2 4-4"></path></svg>
