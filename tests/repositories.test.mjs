@@ -206,6 +206,48 @@ test('prepares a bounded Docker context without Git metadata or likely secret fi
   assert.equal((await apps.get(app.id)).deployment.buildAttempts, 1);
 });
 
+test('opens another bounded build cycle after three failed attempts without replacing the App', async (t) => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'halfcloud-build-retry-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const data = path.join(directory, 'data');
+  const repositories = path.join(directory, 'repositories');
+  const apps = new AppStore(data);
+  const commit = 'e'.repeat(40);
+  const app = await apps.create('Retry Project', {
+    source: { type: 'git', url: 'https://example.com/project.git', branch: 'main', resolvedCommit: commit },
+    deployment: { status: 'failed', stage: 'failed', errorCode: 'build_failed', buildAttempts: 3, image: 'halfcloud/app:failed', updatedAt: new Date().toISOString() },
+  });
+  const checkout = path.join(repositories, app.id, 'repository');
+  await mkdir(checkout, { recursive: true });
+  await writeFile(path.join(checkout, 'Dockerfile.halfcloud'), 'FROM scratch\n');
+  const service = new RepositoryService(apps, repositories);
+
+  await assert.rejects(service.buildContext(app.id, '.', 'Dockerfile.halfcloud'), /Build retry limit reached/);
+  const reset = await service.retryBuild(app.id);
+  const context = await service.buildContext(app.id, '.', 'Dockerfile.halfcloud');
+
+  assert.equal(reset.id, app.id);
+  assert.equal(reset.deployment.buildAttempts, 0);
+  assert.equal(reset.deployment.stage, 'preparing');
+  assert.equal(reset.deployment.image, undefined);
+  assert.match(context.image, /-1$/);
+  assert.equal((await apps.get(app.id)).deployment.buildAttempts, 1);
+});
+
+test('does not reset build attempts before the bounded cycle is exhausted', async (t) => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'halfcloud-build-retry-guard-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const apps = new AppStore(path.join(directory, 'data'));
+  const app = await apps.create('Active Build', {
+    source: { type: 'git', url: 'https://example.com/project.git', branch: 'main', resolvedCommit: 'f'.repeat(40) },
+    deployment: { status: 'failed', stage: 'failed', errorCode: 'build_failed', buildAttempts: 2, updatedAt: new Date().toISOString() },
+  });
+  const service = new RepositoryService(apps, path.join(directory, 'repositories'));
+
+  await assert.rejects(service.retryBuild(app.id), /only after three failed build attempts/);
+  assert.equal((await apps.get(app.id)).deployment.buildAttempts, 2);
+});
+
 test('persists and selects a generated Dockerfile in the build context before building', async (t) => {
   const directory = await mkdtemp(path.join(tmpdir(), 'halfcloud-generated-build-context-'));
   t.after(() => rm(directory, { recursive: true, force: true }));

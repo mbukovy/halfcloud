@@ -143,6 +143,7 @@ export class ApplicationService {
   listRepositoryDirectory(appIdOrName: string, repositoryPath?: string) { return this.repositories.listDirectory(appIdOrName, repositoryPath); }
   readRepositoryFile(appIdOrName: string, repositoryPath: string) { return this.repositories.readFile(appIdOrName, repositoryPath); }
   writeRepositoryDeploymentFile(appIdOrName: string, repositoryPath: string, content: string) { return this.repositories.writeDeploymentFile(appIdOrName, repositoryPath, content); }
+  retryRepositoryBuild(appIdOrName: string) { return this.repositories.retryBuild(appIdOrName); }
 
   async buildRepositoryImage(
     appIdOrName: string,

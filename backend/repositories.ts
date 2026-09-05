@@ -623,6 +623,14 @@ export class RepositoryService {
     return this.setStage(app.id, 'deploying', 'Deploying application services', { image });
   }
 
+  async retryBuild(appIdOrName: string) {
+    const app = await this.gitApp(appIdOrName);
+    if (app.deployment?.status !== 'failed' || app.deployment.errorCode !== 'build_failed' || (app.deployment.buildAttempts ?? 0) < 3) {
+      throw new Error('Another build cycle is available only after three failed build attempts');
+    }
+    return this.setStage(app.id, 'preparing', 'Preparing another build cycle', { buildAttempts: 0, image: undefined });
+  }
+
   async fail(appIdOrName: string, failedStage: RepositoryDeploymentStage, error: unknown) {
     const app = await this.apps.get(appIdOrName);
     const message = error instanceof Error ? error.message : 'Deployment failed';
