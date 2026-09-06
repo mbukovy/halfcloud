@@ -112,6 +112,25 @@ Open the address, enter the code, connect your AI provider, and tell HalfCloud w
 
 > Before using a server that contains anything important, read [Install, uninstall, and update](docs/install-uninstall-update.md). The current uninstaller permanently removes HalfCloud, its applications, and its server data.
 
+## Is HalfCloud good for my app?
+
+Probably — if your app doesn't need high-availability infrastructure.
+
+HalfCloud is a great fit for:
+
+- SaaS products and MVPs
+- Internal tools and dashboards
+- APIs and backend services
+- WordPress, CMSs and self-hosted apps
+- AI apps, automations and side projects
+- Small to medium production workloads
+
+What matters isn't how complex your codebase is. It is how much infrastructure your business actually requires.
+
+If your app needs multi-region failover, active-active redundancy, strict uptime SLAs or large-scale distributed infrastructure, HalfCloud may not be the right choice yet.
+
+Otherwise, start simple. One good VPS can run a lot more than most people think — and you can add complexity when you actually need it.
+
 ## Learn more
 
 - [What HalfCloud can do](docs/capabilities.md)
