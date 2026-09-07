@@ -44,6 +44,18 @@ Using `latest` is convenient but makes later recreation less predictable because
 
 An App has an immutable internal ID and an editable display name. Renaming **Customer API** to **Acme API** changes only what HalfCloud displays. It does not rename or recreate runtime resources. Service names are operational identifiers and are not exposed as simple cosmetic renames.
 
+## Updating Git Apps
+
+```text
+Deploy latest changes from git for Customer API.
+```
+
+HalfCloud fetches the latest commit from the App's configured branch using its existing repository access, inspects and builds the updated code, then replaces the existing application Service's runtime container. The App and Service identities, domains and route protection, environment values, ports, and persistent storage are retained. Supporting databases and caches are left alone. Local deployment files are preserved; refresh refuses conflicting local edits instead of discarding them.
+
+Existing environment values take precedence over defaults in the new image. If an update requires changing one of those values, configure it explicitly rather than relying on a changed Dockerfile `ENV` default.
+
+Running application Services briefly restart during replacement; this is not a rolling update. Fetch or build failures leave the running version untouched. Replacement attempts to restore the previous container if creation or startup fails, but there is no automatic rollback after a later health-check failure. HalfCloud records the new deployed commit only after verification succeeds. Restart and Recreate alone do not fetch or build Git changes.
+
 ## Private networking
 
 Each App receives its own private Docker bridge network. Services in that App resolve one another by Service name:

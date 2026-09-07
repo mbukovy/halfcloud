@@ -1,6 +1,7 @@
 import net from 'node:net';
 import { lstat, mkdir, realpath, writeFile } from 'node:fs/promises';
 import path from 'node:path';
+import { isDeepStrictEqual } from 'node:util';
 import Docker from 'dockerode';
 
 export type PortMap = Record<string, string>;
@@ -792,13 +793,62 @@ export class DockerService {
     for (const key of Object.keys(nextEnvironment)) {
       if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) throw new Error(`Invalid environment variable name ${key}`);
     }
+    return this.replaceContainer(id, { environment: nextEnvironment });
+  }
+
+  async replaceContainerImage(id: string, image: string) {
+    image = image.trim();
+    if (!image || image.length > 255) throw new Error('Invalid image name');
+    return this.replaceContainer(id, { image });
+  }
+
+  private async replaceContainer(id: string, changes: { environment?: Record<string, string>; image?: string }) {
     const container = await this.managedContainer(id);
     const inspection = await container.inspect();
+    // Keep existing environment values, even if they match image defaults: they may be intentional secrets or overrides.
+    const config: Docker.ContainerCreateOptions = { ...inspection.Config };
+    if (changes.image !== undefined) {
+      const nextImage = await this.docker.getImage(changes.image).inspect();
+      // The original tag may already point at the newly built image.
+      const previousImage = await this.docker.getImage(inspection.Image).inspect();
+      config.Image = changes.image;
+      for (const key of ['Cmd', 'Entrypoint', 'User', 'WorkingDir', 'Healthcheck'] as const) {
+        if (isDeepStrictEqual(config[key] ?? null, previousImage.Config[key] ?? null)) {
+          Object.assign(config, { [key]: nextImage.Config[key] });
+        } else if (key === 'Entrypoint' && !config.Entrypoint?.length) {
+          // Docker uses [""] to explicitly disable an image's entrypoint.
+          config.Entrypoint = [''];
+        }
+      }
+    }
+    if (changes.environment !== undefined) {
+      config.Env = Object.entries(changes.environment).map(([key, value]) => `${key}=${value}`);
+    }
     const name = inspection.Name.replace(/^\//, '');
     const appId = inspection.Config.Labels?.['halfcloud.app.id'];
     if (!appId) throw new Error('Managed service is missing its App ID');
     const networkName = appNetworkName(appId);
     await createOrReuseAppNetwork(this.docker, appId);
+    const hostConfig = { ...inspection.HostConfig };
+    // Image-declared and anonymous volumes must reuse their existing data, not allocate fresh volumes.
+    for (const mount of inspection.Mounts) {
+      if (mount.Type !== 'volume' || !mount.Name) continue;
+      const configured = hostConfig.Mounts?.find((candidate) => candidate.Target === mount.Destination);
+      if (configured?.Source || hostConfig.Binds?.some((bind) => bind.split(':')[1] === mount.Destination)) continue;
+      if (hostConfig.Binds?.includes(mount.Destination)) {
+        hostConfig.Binds = hostConfig.Binds.map((bind) => bind === mount.Destination ? `${mount.Name}:${mount.Destination}` : bind);
+        continue;
+      }
+      hostConfig.Mounts = [
+        ...(hostConfig.Mounts ?? []).filter((candidate) => candidate.Target !== mount.Destination),
+        { ...configured, Type: 'volume', Source: mount.Name, Target: mount.Destination, ReadOnly: !mount.RW },
+      ];
+    }
+    const endpoints: Docker.EndpointsConfig = Object.fromEntries(Object.entries(inspection.NetworkSettings.Networks).map(([network, endpoint]) => [
+      network,
+      { IPAMConfig: endpoint.IPAMConfig, Links: endpoint.Links, Aliases: endpoint.Aliases, DriverOpts: (endpoint as Docker.EndpointSettings).DriverOpts },
+    ]));
+    endpoints[networkName] ??= { Aliases: [inspection.Config.Labels?.['halfcloud.service.name'] ?? name] };
     const backupName = `${name}-halfcloud-backup-${Date.now()}`;
     const wasRunning = inspection.State.Running;
     if (wasRunning) await container.stop({ t: 10 });
@@ -806,35 +856,20 @@ export class DockerService {
     let replacement: Docker.Container | undefined;
     try {
       replacement = await this.docker.createContainer({
+        ...config,
         name,
-        Image: inspection.Config.Image,
-        Cmd: inspection.Config.Cmd,
-        Entrypoint: inspection.Config.Entrypoint,
-        WorkingDir: inspection.Config.WorkingDir,
-        User: inspection.Config.User,
-        Env: Object.entries(nextEnvironment).map(([key, value]) => `${key}=${value}`),
-        Labels: inspection.Config.Labels,
-        ExposedPorts: inspection.Config.ExposedPorts,
-        Healthcheck: inspection.Config.Healthcheck,
-        HostConfig: {
-          NetworkMode: networkName,
-          PortBindings: inspection.HostConfig.PortBindings,
-          Binds: inspection.HostConfig.Binds,
-          RestartPolicy: inspection.HostConfig.RestartPolicy,
-          LogConfig: inspection.HostConfig.LogConfig,
-          SecurityOpt: inspection.HostConfig.SecurityOpt,
-          PidsLimit: inspection.HostConfig.PidsLimit,
-          Mounts: inspection.HostConfig.Mounts,
-        },
-        NetworkingConfig: { EndpointsConfig: { [networkName]: { Aliases: [inspection.Config.Labels?.['halfcloud.service.name'] ?? name] } } },
+        HostConfig: hostConfig,
+        NetworkingConfig: { EndpointsConfig: endpoints },
       });
       if (wasRunning) await replacement.start();
-      const appDir = path.join(this.appsDir, appId);
-      await writeFile(path.join(appDir, '.env'), `${Object.entries(nextEnvironment).map(([key, value]) => `${key}=${value.replace(/\n/g, '\\n')}`).join('\n')}${Object.keys(nextEnvironment).length ? '\n' : ''}`, { mode: 0o600 });
+      if (changes.environment !== undefined) {
+        const appDir = path.join(this.appsDir, appId);
+        await writeFile(path.join(appDir, '.env'), `${Object.entries(changes.environment).map(([key, value]) => `${key}=${value.replace(/\n/g, '\\n')}`).join('\n')}${Object.keys(changes.environment).length ? '\n' : ''}`, { mode: 0o600 });
+      }
       await container.remove({ force: true, v: false });
       return { containerId: replacement.id, name, state: wasRunning ? 'running' : 'exited' };
     } catch (error) {
-      if (replacement) await replacement.remove({ force: true }).catch(() => undefined);
+      if (replacement) await replacement.remove({ force: true, v: false }).catch(() => undefined);
       await container.rename({ name });
       if (wasRunning) await container.start().catch(() => undefined);
       throw error;

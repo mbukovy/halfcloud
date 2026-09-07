@@ -310,6 +310,7 @@ export class RepositoryService {
     private readonly apps = new AppStore(),
     repositoriesDir = process.env.HALFCLOUD_REPOSITORIES_DIR ?? `${process.env.HOME ?? '/home/halfcloudrunner'}/.halfcloud/repositories`,
     private readonly resolveHost: (hostname: string) => Promise<Array<{ address: string }>> = async (hostname) => lookup(hostname, { all: true, verbatim: true }),
+    private readonly git = runGit,
   ) {
     this.repositoriesDir = path.resolve(repositoriesDir);
   }
@@ -500,6 +501,46 @@ export class RepositoryService {
     }
   }
 
+  async refresh(appIdOrName: string) {
+    const app = await this.gitApp(appIdOrName);
+    const branch = validateBranch(app.source!.branch);
+    if (!branch || !app.source!.resolvedCommit) throw new Error('Clone the repository before refreshing it');
+    const checkout = await this.checkout(app.id);
+    const privateAccess = app.source!.authentication === 'ssh-deploy-key';
+    const url = privateAccess
+      ? normalizeRepositoryUrl((await this.privateMetadata(app.id)).originalUrl).gitUrl
+      : validatePublicGitUrl(app.source!.url);
+    const options = [
+      '-c', 'protocol.file.allow=never', '-c', 'protocol.ext.allow=never',
+      '-c', 'core.hooksPath=/dev/null', '-c', 'http.followRedirects=false',
+      '-c', `remote.origin.url=${url}`,
+    ];
+    if (!privateAccess) {
+      const parsed = new URL(url);
+      const addresses = await this.resolveHost(parsed.hostname).catch(() => { throw new GitRepositoryError('dns_failure', 'Could not resolve the Git repository host'); });
+      if (!addresses.length || addresses.some(({ address }) => !publicAddress(address))) throw new GitRepositoryError('not_public', 'Git repository URL must resolve only to public network addresses');
+      const address = addresses[0]!.address;
+      options.push('-c', `http.curloptResolve=${parsed.hostname}:${parsed.port || '443'}:${address.includes(':') ? `[${address}]` : address}`);
+    }
+    const git = (args: string[]) => privateAccess
+      ? this.runPrivateGit(app.id, [...options, ...args], checkout, checkout)
+      : this.git([...options, ...args], checkout, 120_000, checkout);
+    await git(['fetch', '--depth=1', '--no-filter', '--no-tags', '--no-recurse-submodules', url, `refs/heads/${branch}`]);
+    const { stdout } = await git(['rev-parse', 'FETCH_HEAD']);
+    const resolvedCommit = stdout.trim().toLowerCase();
+    if (!/^[a-f0-9]{40}$/.test(resolvedCommit)) throw new Error('Git repository did not provide a commit');
+    const usage = await directoryUsage(checkout);
+    if (usage.bytes > maxBuildBytes || usage.files > maxBuildFiles) throw new Error('Repository checkout exceeds HalfCloud safety limits');
+    // Do not reset or clean: retain generated build files and refuse conflicting local edits.
+    await git(['checkout', '--no-overwrite-ignore', '--no-recurse-submodules', '-B', branch, resolvedCommit]);
+    const changed = resolvedCommit !== app.source!.resolvedCommit;
+    const updated = changed ? await this.apps.update(app.id, {
+      source: { ...app.source!, resolvedCommit },
+      deployment: { status: 'in_progress', stage: 'inspecting', message: 'Refreshed repository', buildAttempts: 0, updatedAt: new Date().toISOString() },
+    }) : app;
+    return { appId: app.id, appName: app.name, source: updated.source, changed };
+  }
+
   async inspect(appIdOrName: string): Promise<RepositoryInspection> {
     const app = await this.gitApp(appIdOrName);
     await this.setStage(app.id, 'inspecting', 'Inspecting repository');
@@ -614,7 +655,7 @@ export class RepositoryService {
     const attempts = (app.deployment?.buildAttempts ?? 0) + 1;
     if (attempts > 3) throw new Error('Build retry limit reached; inspect the last failure before starting a new deployment');
     const image = `halfcloud/app-${app.id.slice(4).replaceAll('-', '')}:${app.source.resolvedCommit.slice(0, 12)}-${attempts}`;
-    await this.setStage(app.id, 'building', `Building application (attempt ${attempts} of 3)`, { buildAttempts: attempts, image });
+    await this.setStage(app.id, 'building', `Building application (attempt ${attempts} of 3)`, { buildAttempts: attempts, image: undefined });
     return { context, dockerfile: dockerfileRelative, entries, image, commit: app.source.resolvedCommit };
   }
 
@@ -713,7 +754,7 @@ export class RepositoryService {
       '  StrictHostKeyChecking yes', '  ForwardAgent no', '  ClearAllForwardings yes', '',
     ].join('\n'), { mode: 0o600 });
     const quotedConfig = `'${config.replaceAll("'", "'\\''")}'`;
-    return runGit(args, cwd ?? root, 120_000, limitedCheckout, { GIT_SSH_COMMAND: `ssh -F ${quotedConfig}`, GIT_SSH_VARIANT: 'ssh', SSH_AUTH_SOCK: '' });
+    return this.git(args, cwd ?? root, 120_000, limitedCheckout, { GIT_SSH_COMMAND: `ssh -F ${quotedConfig}`, GIT_SSH_VARIANT: 'ssh', SSH_AUTH_SOCK: '' });
   }
 
   private async gitApp(idOrName: string) {

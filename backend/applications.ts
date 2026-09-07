@@ -1,5 +1,5 @@
 import { randomBytes, randomUUID } from 'node:crypto';
-import { AppStore } from './apps.js';
+import { AppStore, type AppRecord } from './apps.js';
 import { CaddyService } from './caddy.js';
 import { DockerService, type CreateContainerInput, type DeploymentProgress, type ManagedVolumeFilter, type SearchContainerImagesInput, type ServiceCommandNetworkMode } from './docker.js';
 import { DomainStore, normalizeHostname, type ServiceDomain } from './domains.js';
@@ -8,6 +8,8 @@ import { RouteAccessRequestStore, assertBasicAuthPassword, assertBasicAuthUserna
 import { GitRepositoryError, RepositoryService, normalizeRepositoryUrl } from './repositories.js';
 
 export class ApplicationService {
+  private readonly repositoryOperations = new Set<string>();
+
   constructor(
     private readonly docker: DockerService,
     private readonly caddy = new CaddyService(),
@@ -133,17 +135,58 @@ export class ApplicationService {
   }
 
   async inspectRepository(appIdOrName: string) {
+    return this.withRepositoryOperation(appIdOrName, async (app) => {
+      try {
+        return await this.repositories.inspect(app.id);
+      } catch (error) {
+        await this.repositories.fail(app.id, 'inspecting', error).catch(() => undefined);
+        throw error;
+      }
+    });
+  }
+  async refreshGitRepository(appIdOrName: string, onProgress?: (progress: DeploymentProgress) => void) {
+    return this.withRepositoryOperation(appIdOrName, async (app) => {
+      onProgress?.({ phase: 'activity', label: 'Fetching latest Git changes' });
+      return this.repositories.refresh(app.id);
+    });
+  }
+
+  async deployRepositoryImage(appIdOrName: string, serviceIdOrName: string, image: string) {
+    return this.withRepositoryOperation(appIdOrName, async (app) => {
+      if (!app.deployment?.image || app.deployment.image !== image) throw new Error('Use the latest successfully built image for this App');
+      const service = await this.service(app.id, serviceIdOrName);
+      try {
+        await this.repositories.setStage(app.id, 'deploying', `Updating ${service.name}`);
+        const result = await this.docker.replaceContainerImage(service.id, image);
+        await this.syncRoutes();
+        return { appId: app.id, serviceId: service.serviceId, image, ...result };
+      } catch (error) {
+        await this.repositories.fail(app.id, 'deploying', error);
+        await this.syncRoutes().catch(() => undefined);
+        throw error;
+      }
+    });
+  }
+
+  private async withRepositoryOperation<T>(appIdOrName: string, operation: (app: AppRecord) => Promise<T>): Promise<T> {
+    const app = await this.apps.get(appIdOrName);
+    if (app.source?.type !== 'git') throw new Error('This App is not backed by a Git repository');
+    if (this.repositoryOperations.has(app.id)) throw new Error('Another repository operation is in progress for this App; wait for it to finish');
+    this.repositoryOperations.add(app.id);
     try {
-      return await this.repositories.inspect(appIdOrName);
-    } catch (error) {
-      await this.repositories.fail(appIdOrName, 'inspecting', error).catch(() => undefined);
-      throw error;
+      return await operation(await this.apps.get(app.id));
+    } finally {
+      this.repositoryOperations.delete(app.id);
     }
   }
   listRepositoryDirectory(appIdOrName: string, repositoryPath?: string) { return this.repositories.listDirectory(appIdOrName, repositoryPath); }
   readRepositoryFile(appIdOrName: string, repositoryPath: string) { return this.repositories.readFile(appIdOrName, repositoryPath); }
-  writeRepositoryDeploymentFile(appIdOrName: string, repositoryPath: string, content: string) { return this.repositories.writeDeploymentFile(appIdOrName, repositoryPath, content); }
-  retryRepositoryBuild(appIdOrName: string) { return this.repositories.retryBuild(appIdOrName); }
+  writeRepositoryDeploymentFile(appIdOrName: string, repositoryPath: string, content: string) {
+    return this.withRepositoryOperation(appIdOrName, (app) => this.repositories.writeDeploymentFile(app.id, repositoryPath, content));
+  }
+  retryRepositoryBuild(appIdOrName: string) {
+    return this.withRepositoryOperation(appIdOrName, (app) => this.repositories.retryBuild(app.id));
+  }
 
   async buildRepositoryImage(
     appIdOrName: string,
@@ -152,18 +195,20 @@ export class ApplicationService {
     onProgress?: (progress: DeploymentProgress) => void,
     generatedFiles?: { dockerfileContent: string; dockerignoreContent: string },
   ) {
-    try {
-      const build = generatedFiles
-        ? await this.repositories.prepareGeneratedBuildContext(appIdOrName, contextPath, generatedFiles.dockerfileContent, generatedFiles.dockerignoreContent)
-        : await this.repositories.buildContext(appIdOrName, contextPath, dockerfilePath);
-      onProgress?.({ phase: 'activity', label: 'Building application' });
-      const result = await this.docker.buildImage(build);
-      await this.repositories.buildSucceeded(appIdOrName, result.image);
-      return { appId: (await this.apps.get(appIdOrName)).id, commit: build.commit, ...result };
-    } catch (error) {
-      await this.repositories.fail(appIdOrName, 'building', error);
-      throw error;
-    }
+    return this.withRepositoryOperation(appIdOrName, async () => {
+      try {
+        const build = generatedFiles
+          ? await this.repositories.prepareGeneratedBuildContext(appIdOrName, contextPath, generatedFiles.dockerfileContent, generatedFiles.dockerignoreContent)
+          : await this.repositories.buildContext(appIdOrName, contextPath, dockerfilePath);
+        onProgress?.({ phase: 'activity', label: 'Building application' });
+        const result = await this.docker.buildImage(build);
+        await this.repositories.buildSucceeded(appIdOrName, result.image);
+        return { appId: (await this.apps.get(appIdOrName)).id, commit: build.commit, ...result };
+      } catch (error) {
+        await this.repositories.fail(appIdOrName, 'building', error);
+        throw error;
+      }
+    });
   }
 
   async addService(appIdOrName: string, input: Omit<CreateContainerInput, 'appId' | 'serviceId' | 'serviceName' | 'publicName' | 'name' | 'start'> & { name: string }, onProgress?: (progress: DeploymentProgress) => void) {
@@ -275,37 +320,41 @@ export class ApplicationService {
   }
 
   async verifyGitDeployment(appIdOrName: string, serviceIdOrName?: string, healthPath = '/') {
-    const appRecord = await this.apps.get(appIdOrName);
-    if (appRecord.source?.type !== 'git') throw new Error('Only Git-backed Apps have a source deployment to verify');
-    if (!healthPath.startsWith('/') || healthPath.includes('\0') || healthPath.length > 500) throw new Error('Health path must be a bounded absolute URL path');
-    await this.repositories.setStage(appRecord.id, 'verifying', 'Verifying application');
-    try {
-      const app = await this.getApp(appRecord.id, false);
-      if (!app.services.length) throw new Error('Deployment has no Services');
-      if (app.services.some((service) => service.state !== 'running')) throw new Error('Every Service must be running before deployment can complete');
-      const builtImage = appRecord.deployment?.image;
-      if (!builtImage) throw new Error('Deployment does not have a successfully built repository image');
-      const builtServices = app.services.filter((service) => service.image === builtImage);
-      if (!builtServices.length) throw new Error('No deployed Service uses the image built from this repository commit');
-      const target = serviceIdOrName ? await this.service(app.id, serviceIdOrName) : builtServices.find((service) => service.ports.some((port) => port.protocol === 'tcp'));
-      let publicUrl: string | undefined;
-      if (target) {
-        if (target.image !== builtImage) throw new Error('The verified web Service does not use the image built from this repository commit');
-        const port = target.ports.find((candidate) => candidate.protocol === 'tcp');
-        if (!port) throw new Error(`${target.name} does not publish an HTTP port`);
-        await this.checkTcpPort(port.host);
-        const domain = target.domains.find((candidate) => candidate.managed) ?? target.domains.find((candidate) => candidate.primary) ?? target.domains[0];
-        if (!domain) throw new Error(`${target.name} does not have a public domain`);
-        publicUrl = `https://${domain.hostname}${healthPath}`;
-        const response = await fetch(publicUrl, { redirect: 'manual', signal: AbortSignal.timeout(10_000) });
-        if (response.status >= 500) throw new Error(`Application health check returned HTTP ${response.status}`);
+    return this.withRepositoryOperation(appIdOrName, async (appRecord) => {
+      if (!healthPath.startsWith('/') || healthPath.includes('\0') || healthPath.length > 500) throw new Error('Health path must be a bounded absolute URL path');
+      await this.repositories.setStage(appRecord.id, 'verifying', 'Verifying application');
+      try {
+        const app = await this.getApp(appRecord.id, false);
+        if (!app.services.length) throw new Error('Deployment has no Services');
+        if (app.services.some((service) => service.state !== 'running')) throw new Error('Every Service must be running before deployment can complete');
+        const builtImage = appRecord.deployment?.image;
+        if (!builtImage) throw new Error('Deployment does not have a successfully built repository image');
+        const builtServices = app.services.filter((service) => service.image === builtImage);
+        if (!builtServices.length) throw new Error('No deployed Service uses the image built from this repository commit');
+        const repositoryImagePrefix = `halfcloud/app-${app.id.slice(4).replaceAll('-', '')}:`;
+        if (app.services.some((service) => service.image.startsWith(repositoryImagePrefix) && service.image !== builtImage)) {
+          throw new Error('Update every Service using this repository before completing deployment');
+        }
+        const target = serviceIdOrName ? await this.service(app.id, serviceIdOrName) : builtServices.find((service) => service.ports.some((port) => port.protocol === 'tcp'));
+        let publicUrl: string | undefined;
+        if (target) {
+          if (target.image !== builtImage) throw new Error('The verified web Service does not use the image built from this repository commit');
+          const port = target.ports.find((candidate) => candidate.protocol === 'tcp');
+          if (!port) throw new Error(`${target.name} does not publish an HTTP port`);
+          await this.checkTcpPort(port.host);
+          const domain = target.domains.find((candidate) => candidate.managed) ?? target.domains.find((candidate) => candidate.primary) ?? target.domains[0];
+          if (!domain) throw new Error(`${target.name} does not have a public domain`);
+          publicUrl = `https://${domain.hostname}${healthPath}`;
+          const response = await fetch(publicUrl, { redirect: 'manual', signal: AbortSignal.timeout(10_000) });
+          if (response.status >= 500) throw new Error(`Application health check returned HTTP ${response.status}`);
+        }
+        const updated = await this.repositories.markDeployed(app.id);
+        return { appId: app.id, commit: updated.source?.currentCommit, verified: true, ...(publicUrl ? { publicUrl } : {}) };
+      } catch (error) {
+        await this.repositories.fail(appRecord.id, 'verifying', error);
+        throw error;
       }
-      const updated = await this.repositories.markDeployed(app.id);
-      return { appId: app.id, commit: updated.source?.currentCommit, verified: true, ...(publicUrl ? { publicUrl } : {}) };
-    } catch (error) {
-      await this.repositories.fail(appRecord.id, 'verifying', error);
-      throw error;
-    }
+    });
   }
   listManagedVolumes(filter?: ManagedVolumeFilter) { return this.docker.listManagedVolumes(filter); }
   listDockerVolumes(unusedOnly?: boolean) { return this.docker.listDockerVolumes(unusedOnly); }

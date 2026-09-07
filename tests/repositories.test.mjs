@@ -11,6 +11,145 @@ import { RepositoryService, normalizeRepositoryUrl, validatePublicGitUrl } from 
 
 const exec = promisify(execFile);
 
+async function refreshFixture(t, privateAccess = false) {
+  const directory = await mkdtemp(path.join(tmpdir(), 'halfcloud-git-refresh-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const remote = path.join(directory, 'remote');
+  await mkdir(remote);
+  await exec('git', ['init', '-b', 'main'], { cwd: remote });
+  const commit = async (content) => {
+    await writeFile(path.join(remote, 'README.md'), content);
+    await exec('git', ['add', '.'], { cwd: remote });
+    await exec('git', ['-c', 'user.email=test@example.com', '-c', 'user.name=Test', 'commit', '-m', content], { cwd: remote });
+    return (await exec('git', ['rev-parse', 'HEAD'], { cwd: remote })).stdout.trim();
+  };
+  const previousCommit = await commit('Initial');
+  const apps = new AppStore(path.join(directory, 'data'));
+  const app = await apps.create('Existing Git App', {
+    source: { type: 'git', url: 'https://github.com/example/project.git', branch: 'main', resolvedCommit: previousCommit, currentCommit: previousCommit },
+    deployment: { status: 'running', stage: 'running', buildAttempts: 2, image: 'halfcloud/app:old', updatedAt: new Date().toISOString() },
+  });
+  const repositories = path.join(directory, 'repositories');
+  const root = path.join(repositories, app.id);
+  const checkout = path.join(root, 'repository');
+  await mkdir(root, { recursive: true });
+  await exec('git', ['clone', remote, checkout]);
+  const calls = [];
+  const service = new RepositoryService(apps, repositories, async () => [{ address: '140.82.112.3' }], async (args, cwd, timeout, limitedCheckout, environment) => {
+    calls.push({ args, cwd, timeout, limitedCheckout, environment });
+    const actual = [...args];
+    const fetch = actual.indexOf('fetch');
+    if (fetch !== -1) {
+      // Substitute only the transport in tests; checkout and fetch still use real Git.
+      actual[actual.length - 2] = remote;
+      actual.splice(fetch, 0, '-c', 'protocol.file.allow=always');
+    }
+    return exec('git', actual, { cwd, env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' } });
+  });
+  if (privateAccess) {
+    await service.preparePrivateAccess(app.id);
+    const prepared = await apps.get(app.id);
+    await apps.update(app.id, { source: { ...prepared.source, ...app.source, authentication: 'ssh-deploy-key' }, deployment: app.deployment });
+  }
+  return { apps, app, service, commit, remote, root, checkout, calls, previousCommit, repositories };
+}
+
+test('refreshes the tracked public branch in place while retaining deployment files and deployed commit', async (t) => {
+  const { apps, app, service, commit, remote, checkout, calls, previousCommit } = await refreshFixture(t);
+  await service.writeDeploymentFile(app.id, 'Dockerfile.halfcloud', 'FROM scratch\n');
+  await service.writeDeploymentFile(app.id, '.dockerignore', '.git\n');
+  const latest = await commit('Latest main');
+  await exec('git', ['checkout', '-b', 'different-default'], { cwd: remote });
+  await commit('Do not deploy this branch');
+
+  const result = await service.refresh(app.id);
+
+  assert.equal(result.appId, app.id);
+  assert.equal(result.changed, true);
+  assert.equal(result.source.branch, 'main');
+  assert.equal(result.source.resolvedCommit, latest);
+  assert.equal(result.source.currentCommit, previousCommit);
+  assert.equal((await exec('git', ['symbolic-ref', '--short', 'HEAD'], { cwd: checkout })).stdout.trim(), 'main');
+  assert.equal(await readFile(path.join(checkout, 'README.md'), 'utf8'), 'Latest main');
+  assert.equal(await readFile(path.join(checkout, 'Dockerfile.halfcloud'), 'utf8'), 'FROM scratch\n');
+  assert.equal(await readFile(path.join(checkout, '.dockerignore'), 'utf8'), '.git\n');
+  const updated = await apps.get(app.id);
+  assert.equal(updated.deployment.buildAttempts, 0);
+  assert.equal(updated.deployment.image, undefined);
+  assert.equal(updated.deployment.stage, 'inspecting');
+  const fetch = calls.find(({ args }) => args.includes('fetch'));
+  assert.deepEqual(fetch.args.slice(-2), [app.source.url, 'refs/heads/main']);
+  assert.ok(fetch.args.includes('http.curloptResolve=github.com:443:140.82.112.3'));
+  assert.ok(fetch.args.includes('protocol.file.allow=never'));
+  assert.ok(fetch.args.includes('core.hooksPath=/dev/null'));
+  assert.ok(fetch.args.includes('--no-recurse-submodules'));
+  assert.equal(fetch.limitedCheckout, checkout);
+
+  await apps.update(app.id, { deployment: { ...updated.deployment, buildAttempts: 3, status: 'failed', stage: 'failed', errorCode: 'build_failed' } });
+  const unchanged = await apps.get(app.id);
+  assert.equal((await service.refresh(app.id)).changed, false);
+  assert.deepEqual(await apps.get(app.id), unchanged, 'refreshing the same commit must not reset retry limits');
+});
+
+test('refreshes private repositories with the existing deploy key and pinned host identity', async (t) => {
+  const { apps, app, service, commit, root, calls } = await refreshFixture(t, true);
+  const key = await readFile(path.join(root, 'id_ed25519'), 'utf8');
+  const latest = await commit('Private update');
+  const result = await service.refresh(app.id);
+  assert.equal(result.source.resolvedCommit, latest);
+  assert.equal(result.source.authentication, 'ssh-deploy-key');
+  assert.equal(await readFile(path.join(root, 'id_ed25519'), 'utf8'), key);
+  assert.ok(calls.every(({ environment }) => environment.GIT_SSH_COMMAND.includes('ssh -F')));
+  assert.ok(calls.every(({ environment }) => environment.SSH_AUTH_SOCK === ''));
+  assert.deepEqual(calls.find(({ args }) => args.includes('fetch')).args.slice(-2), ['git@github.com:example/project.git', 'refs/heads/main']);
+  assert.match(await readFile(path.join(root, 'ssh_config'), 'utf8'), /StrictHostKeyChecking yes/);
+  assert.equal(JSON.stringify(result).includes(key), false);
+  assert.equal((await apps.get(app.id)).source.currentCommit, app.source.currentCommit);
+});
+
+test('refreshes to the exact remote branch tip even after its history was replaced', async (t) => {
+  const { app, service, commit, remote, checkout } = await refreshFixture(t);
+  await exec('git', ['checkout', '--orphan', 'replacement'], { cwd: remote });
+  const latest = await commit('Replaced history');
+  await exec('git', ['branch', '-M', 'main'], { cwd: remote });
+  assert.equal((await service.refresh(app.id)).source.resolvedCommit, latest);
+  assert.equal((await exec('git', ['rev-parse', 'HEAD'], { cwd: checkout })).stdout.trim(), latest);
+});
+
+test('refuses conflicting local changes and missing branches without advancing deployment state', async (t) => {
+  const { apps, app, service, commit, checkout, previousCommit } = await refreshFixture(t);
+  await writeFile(path.join(checkout, 'README.md'), 'Local changes');
+  await commit('Conflicting remote change');
+  await assert.rejects(service.refresh(app.id), /overwritten|commit your changes|Aborting/i);
+  assert.equal(await readFile(path.join(checkout, 'README.md'), 'utf8'), 'Local changes');
+  assert.equal((await exec('git', ['rev-parse', 'HEAD'], { cwd: checkout })).stdout.trim(), previousCommit);
+  assert.deepEqual(await apps.get(app.id), app);
+
+  const missing = await apps.update(app.id, { source: { ...app.source, branch: 'missing' } });
+  await assert.rejects(service.refresh(app.id), /remote ref/);
+  assert.deepEqual(await apps.get(app.id), missing);
+});
+
+test('revalidates public DNS on refresh and never contacts a private address', async (t) => {
+  const { apps, app, repositories } = await refreshFixture(t);
+  const service = new RepositoryService(apps, repositories, async () => [{ address: '127.0.0.1' }], async () => assert.fail('Git must not run'));
+  await assert.rejects(service.refresh(app.id), (error) => error.code === 'not_public');
+  assert.deepEqual(await apps.get(app.id), app);
+});
+
+test('does not overwrite an ignored local deployment file introduced by the remote', async (t) => {
+  const { apps, app, service, commit, remote, checkout } = await refreshFixture(t);
+  await writeFile(path.join(checkout, '.git', 'info', 'exclude'), 'Dockerfile.halfcloud\n');
+  await service.writeDeploymentFile(app.id, 'Dockerfile.halfcloud', 'FROM local-image\n');
+  const before = await apps.get(app.id);
+  await writeFile(path.join(remote, 'Dockerfile.halfcloud'), 'FROM upstream-image\n');
+  await commit('Add upstream Dockerfile');
+
+  await assert.rejects(service.refresh(app.id), /overwritten|Aborting/i);
+  assert.equal(await readFile(path.join(checkout, 'Dockerfile.halfcloud'), 'utf8'), 'FROM local-image\n');
+  assert.deepEqual(await apps.get(app.id), before);
+});
+
 test('accepts public HTTPS Git URLs and rejects local or credential-bearing forms', () => {
   assert.equal(validatePublicGitUrl('https://github.com/example/project.git'), 'https://github.com/example/project.git');
   assert.throws(() => validatePublicGitUrl('git@github.com:example/project.git'), /Invalid Git repository URL/);
