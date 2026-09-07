@@ -175,6 +175,10 @@ function relativeTime(timestamp: string) {
   return new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric' }).format(new Date(timestamp));
 }
 
+function deploymentDate(timestamp: string) {
+  return new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(timestamp));
+}
+
 function conversationId() {
   return `conversation_${crypto.randomUUID()}`;
 }
@@ -1560,7 +1564,13 @@ onBeforeUnmount(() => {
             <div><span>CPU</span><strong>{{ app.cpuPercent.toFixed(2) }}%</strong></div>
             <div><span>RAM</span><strong>{{ formatBytes(app.memoryUsed) }}</strong></div>
             </div>
-            <p v-if="app.source" class="single-service-image">{{ app.deployment?.message || 'Git repository deployment' }} · {{ app.source.url }}</p>
+            <p v-if="app.source" class="single-service-image">
+              {{ app.deployment?.message || 'Git repository deployment' }}
+              <template v-if="app.source.provider === 'github' && app.source.authentication === 'ssh-deploy-key' && app.deployment?.message === 'Update complete'">
+                · <time :datetime="app.deployment.updatedAt">{{ deploymentDate(app.deployment.updatedAt) }}</time>
+              </template>
+              · {{ app.source.url }}
+            </p>
             <div class="app-services" :class="{ single: app.services.length === 1 }">
             <section v-for="service in app.services" :key="service.serviceId" class="service-card">
               <div v-if="app.services.length > 1" class="container-title service-title">
