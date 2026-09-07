@@ -335,13 +335,13 @@ function toolGroupDetails(parts: Record<string, unknown>[]) {
 
 function toolLabel(part: Record<string, unknown>) {
   const name = toolName(part);
-  if ((name === 'createApp' || name === 'addService' || name === 'createGitApp' || name === 'buildRepositoryImage') && toolState(part) === 'working') {
+  if ((name === 'createApp' || name === 'addService' || name === 'createGitApp' || name === 'buildRepositoryImage' || name === 'updateGitApp') && toolState(part) === 'working') {
     if (agentStatus.value?.phase === 'pulling-image') return `Pulling ${agentStatus.value.image}`;
     if (agentStatus.value?.phase === 'activity') return agentStatus.value.label;
   }
   const labels: Record<string, string> = {
     searchContainerImages: 'Finding the right software',
-    refreshGitRepository: 'Fetching latest Git changes', deployRepositoryImage: 'Updating Service',
+    updateGitApp: 'Updating App', refreshGitRepository: 'Fetching latest Git changes', deployRepositoryImage: 'Updating Service',
     listApps: 'Inspecting Apps', createApp: 'Creating App', createGitApp: 'Cloning repository', inspectRepository: 'Inspecting repository', listRepositoryDirectory: 'Browsing repository', readRepositoryFile: 'Reading project file', writeRepositoryDeploymentFile: 'Preparing Docker configuration', buildRepositoryImage: 'Building application', addService: 'Adding Service', renameApp: 'Renaming App',
     startApp: 'Starting App', stopApp: 'Stopping App', restartApp: 'Restarting App', recreateApp: 'Recreating App', startService: 'Starting Service', stopService: 'Stopping Service', restartService: 'Restarting Service', recreateService: 'Recreating Service', removeService: 'Removing Service', deleteApp: 'Deleting App',
     getAppLogs: 'Reading App logs', getServiceLogs: 'Reading Service logs', runServiceInitializationCommand: 'Initializing Service', verifyGitDeployment: 'Verifying application', getApp: 'Inspecting App', getHostStatus: 'Inspecting host',

@@ -50,11 +50,31 @@ An App has an immutable internal ID and an editable display name. Renaming **Cus
 Deploy latest changes from git for Customer API.
 ```
 
-HalfCloud fetches the latest commit from the App's configured branch using its existing repository access, inspects and builds the updated code, then replaces the existing application Service's runtime container. The App and Service identities, domains and route protection, environment values, ports, and persistent storage are retained. Supporting databases and caches are left alone. Local deployment files are preserved; refresh refuses conflicting local edits instead of discarding them.
+The first verified deployment saves a dedicated `Dockerfile.update`, ignore rules, build context, image identity, and health path for **each repository-built Service**, outside the Git checkout. Services may use different Dockerfiles and images. These saved recipes are not regenerated during an update.
+
+During preparation, `verifyGitDeployment` accepts `serviceHealthPaths` keyed by Service ID or name, so multiple APIs can each save their own readiness endpoint. Docker health-check startup timing is respected within a bounded five-minute readiness window.
+
+An update is one deterministic backend operation, not an AI deployment conversation. HalfCloud fetches the configured branch once and builds each Service from the latest source and its saved recipe in an isolated build context. All candidate images are built before any running container is stopped. Supporting databases and caches are left alone. The App and Service identities, domains and route protection, environment values, ports, and persistent storage are retained.
+
+HalfCloud checks the actual image identity, running/health status, and saved HTTP/HTTPS readiness path repeatedly before accepting the update. If a build fails, the running App is untouched. If replacement or readiness fails, all replaced Services are restored from retained containers. A durable App-wide decision lets server startup finish a committed update or roll back an interrupted one. It does not automatically rewrite a failing Dockerfile or retry builds indefinitely.
 
 Existing environment values take precedence over defaults in the new image. If an update requires changing one of those values, configure it explicitly rather than relying on a changed Dockerfile `ENV` default.
 
-Running application Services briefly restart during replacement; this is not a rolling update. Fetch or build failures leave the running version untouched. Replacement attempts to restore the previous container if creation or startup fails, but there is no automatic rollback after a later health-check failure. HalfCloud records the new deployed commit only after verification succeeds. Restart and Recreate alone do not fetch or build Git changes.
+Running application Services briefly restart during replacement; this is not a rolling update. Updates require the existing Services to be running. Container rollback does not undo writes to shared storage or databases. The updater never runs initialization commands or migrations; changes needing new configuration or data migrations require explicit preparation. Saved recipes give a fixed procedure, not bit-for-bit reproducible output: pin base-image digests and dependency versions where reproducibility is required.
+
+Apps created before recipe persistence need one explicit preparation/build and verified deployment before deterministic updates are available. HalfCloud refuses to guess a missing recipe or recreate the App. Existing local checkout conflicts also fail safely. Restart and Recreate alone do not fetch or build Git changes.
+
+### Updating without AI
+
+The authenticated `POST /api/apps/:appId/update` endpoint runs exactly the same updater, even when no AI provider is configured. Send an empty JSON object and an authenticated HalfCloud session. The response reports the deployed commit, changed Services, or that the App is already current. The request waits for completion; closing the client does not cancel the server-owned update.
+
+From an installed checkout after building HalfCloud:
+
+```bash
+npm run update:app -- "Customer API"
+```
+
+Set `HALFCLOUD_ACCESS_CODE` through your process environment or secret manager. Optionally set `HALFCLOUD_URL` to the HTTPS control-plane address; the default is `http://127.0.0.1:9000`. The CLI authenticates and calls the API, never invokes an LLM, and exits nonzero on failure. Scheduling this command is possible, but push-triggered deployment is not enabled automatically.
 
 ## Private networking
 

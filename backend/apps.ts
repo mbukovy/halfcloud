@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { mkdir, open, readFile, rename, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { z } from 'zod';
 
@@ -127,8 +127,14 @@ export class AppStore {
   private async write(document: { version: 1; apps: AppRecord[] }) {
     await mkdir(path.dirname(this.filePath), { recursive: true, mode: 0o700 });
     const temporary = `${this.filePath}.${randomUUID()}.tmp`;
-    await writeFile(temporary, `${JSON.stringify(documentSchema.parse(document), null, 2)}\n`, { mode: 0o600 });
+    await writeFile(temporary, `${JSON.stringify(documentSchema.parse(document), null, 2)}\n`, { mode: 0o600, flush: true });
     await rename(temporary, this.filePath);
+    const directory = await open(path.dirname(this.filePath), 'r');
+    try {
+      await directory.sync();
+    } finally {
+      await directory.close();
+    }
   }
 
   private async mutate<T>(change: (document: { version: 1; apps: AppRecord[] }) => Promise<T>) {

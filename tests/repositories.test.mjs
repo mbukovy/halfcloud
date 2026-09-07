@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { mkdir, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, readdir, rm, stat, symlink, truncate, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -10,6 +10,29 @@ import { AppStore } from '../dist/backend/apps.js';
 import { RepositoryService, normalizeRepositoryUrl, validatePublicGitUrl } from '../dist/backend/repositories.js';
 
 const exec = promisify(execFile);
+const uuidTag = /:[a-f0-9]{12}-[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/;
+const imageId = `sha256:${'a'.repeat(64)}`;
+
+async function recipeFixture(t) {
+  const directory = await mkdtemp(path.join(tmpdir(), 'halfcloud-recipes-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const data = path.join(directory, 'data');
+  const apps = new AppStore(data);
+  const app = await apps.create('Recipe App', {
+    source: { type: 'git', url: 'https://example.com/project.git', branch: 'main', resolvedCommit: 'a'.repeat(40) },
+    deployment: { status: 'in_progress', stage: 'planning', buildAttempts: 0, updatedAt: new Date().toISOString() },
+  });
+  const repositories = path.join(directory, 'repositories');
+  const root = path.join(repositories, app.id);
+  const checkout = path.join(root, 'repository');
+  await mkdir(path.join(checkout, 'web', 'docker'), { recursive: true });
+  await writeFile(path.join(checkout, 'web', 'docker', 'Dockerfile'), 'FROM scratch\nCOPY . /app\n');
+  await writeFile(path.join(checkout, 'web', '.dockerignore'), 'root-only.txt\n');
+  await writeFile(path.join(checkout, 'web', 'docker', 'Dockerfile.dockerignore'), 'specific-only.txt\n');
+  await writeFile(path.join(checkout, 'web', 'app.txt'), 'old source\n');
+  const service = new RepositoryService(apps, repositories);
+  return { directory, data, apps, app, repositories, root, checkout, service };
+}
 
 async function refreshFixture(t, privateAccess = false) {
   const directory = await mkdtemp(path.join(tmpdir(), 'halfcloud-git-refresh-'));
@@ -156,6 +179,20 @@ test('accepts public HTTPS Git URLs and rejects local or credential-bearing form
   assert.throws(() => validatePublicGitUrl('file:///tmp/project'), /must use an HTTPS URL/);
   assert.throws(() => validatePublicGitUrl('https://user:secret@example.com/project.git'), /cannot contain credentials/);
   assert.throws(() => validatePublicGitUrl('https://localhost/project.git'), /public host/);
+});
+
+test('successful Service builds do not exhaust the retry budget for later Services', async (t) => {
+  const { apps, app, service, checkout } = await refreshFixture(t);
+  await writeFile(path.join(checkout, 'Dockerfile'), 'FROM scratch\n');
+  for (let index = 0; index < 4; index++) {
+    const build = await service.buildContext(app.id);
+    try {
+      await service.buildSucceeded(app.id, build.image);
+      assert.equal((await apps.get(app.id)).deployment.buildAttempts, 0);
+    } finally {
+      await build.cleanup();
+    }
+  }
 });
 
 test('normalizes common GitHub repository URLs and builds provider setup metadata', () => {
@@ -339,10 +376,18 @@ test('prepares a bounded Docker context without Git metadata or likely secret fi
 
   const context = await service.buildContext(app.id, '.', 'Dockerfile.halfcloud');
   assert.equal(context.commit, commit);
-  assert.match(context.image, /^halfcloud\/app-[a-f0-9]+:c{12}-1$/);
-  assert.deepEqual(context.entries.sort(), ['Dockerfile.halfcloud', 'app.txt']);
+  assert.match(context.image, /^halfcloud\/app-[a-f0-9]+:c{12}-/);
+  assert.match(context.image, uuidTag);
+  assert.deepEqual(context.recipe, { contextPath: '.', dockerfilePath: 'Dockerfile.halfcloud', dockerfileContent: 'FROM scratch\n', dockerignoreContent: '' });
+  assert.notEqual(context.context, checkout);
+  assert.deepEqual(context.entries.sort(), ['.dockerignore', 'Dockerfile.halfcloud', 'app.txt']);
+  assert.equal(await readFile(path.join(context.context, '.dockerignore'), 'utf8'), '');
+  await assert.rejects(stat(path.join(checkout, '.dockerignore')), { code: 'ENOENT' });
   assert.equal((await apps.get(app.id)).deployment.stage, 'building');
   assert.equal((await apps.get(app.id)).deployment.buildAttempts, 1);
+  assert.equal((await apps.get(app.id)).deployment.message, 'Building application (attempt 1 of 3)');
+  await context.cleanup();
+  await assert.rejects(stat(context.context), { code: 'ENOENT' });
 });
 
 test('opens another bounded build cycle after three failed attempts without replacing the App', async (t) => {
@@ -369,8 +414,9 @@ test('opens another bounded build cycle after three failed attempts without repl
   assert.equal(reset.deployment.buildAttempts, 0);
   assert.equal(reset.deployment.stage, 'preparing');
   assert.equal(reset.deployment.image, undefined);
-  assert.match(context.image, /-1$/);
+  assert.match(context.image, uuidTag);
   assert.equal((await apps.get(app.id)).deployment.buildAttempts, 1);
+  await context.cleanup();
 });
 
 test('does not reset build attempts before the bounded cycle is exhausted', async (t) => {
@@ -410,9 +456,427 @@ test('persists and selects a generated Dockerfile in the build context before bu
     'node_modules\n',
   );
 
-  assert.equal(context.context, path.join(checkout, 'web'));
+  assert.notEqual(context.context, path.join(checkout, 'web'));
+  assert.equal(context.context.endsWith('/repository/web'), true);
   assert.equal(context.dockerfile, 'Dockerfile.halfcloud');
   assert.deepEqual(context.entries.sort(), ['.dockerignore', 'Dockerfile.halfcloud', 'package.json']);
+  assert.equal(await readFile(path.join(context.context, context.dockerfile), 'utf8'), context.recipe.dockerfileContent);
+  assert.equal(await readFile(path.join(context.context, '.dockerignore'), 'utf8'), 'node_modules\n');
+  await context.cleanup();
+  await assert.rejects(stat(context.context), { code: 'ENOENT' });
   assert.match(await readFile(path.join(checkout, 'web', 'Dockerfile.halfcloud'), 'utf8'), /^FROM node:24-alpine/);
   assert.equal(await readFile(path.join(checkout, 'web', '.dockerignore'), 'utf8'), 'node_modules\n');
+});
+
+test('initial and saved builds present identical archive inputs when root and Dockerfile-specific ignores disagree', async (t) => {
+  const { app, root, checkout, service } = await recipeFixture(t);
+  const source = path.join(checkout, 'web');
+  await writeFile(path.join(source, '.dockerignore'), 'app.txt\n');
+  await writeFile(path.join(source, 'specific-only.txt'), 'excluded by the effective ignore\n');
+  const initial = await service.buildContext(app.id, 'web', 'docker/Dockerfile');
+  const saved = await service.prepareSavedBuild(app.id, initial.recipe);
+  try {
+    assert.notEqual(initial.context, saved.context);
+    const inputs = [];
+    for (const build of [initial, saved]) {
+      assert.notEqual(build.context, source);
+      assert.equal(build.dockerfile, 'docker/Dockerfile');
+      assert.deepEqual(build.entries, ['.dockerignore', 'app.txt', 'docker/Dockerfile', 'specific-only.txt']);
+      const files = Object.fromEntries(await Promise.all(build.entries.map(async (entry) => [entry, await readFile(path.join(build.context, entry), 'utf8')])));
+      assert.equal(files['.dockerignore'], 'specific-only.txt\n', 'Dockerode must filter using the effective ignore, not the checkout root ignore');
+      assert.equal(files['app.txt'], 'old source\n');
+      await assert.rejects(stat(path.join(build.context, 'docker', 'Dockerfile.dockerignore')), { code: 'ENOENT' });
+      inputs.push({ dockerfile: build.dockerfile, entries: build.entries, files });
+    }
+    assert.deepEqual(inputs[0], inputs[1]);
+    assert.equal(await readFile(path.join(source, '.dockerignore'), 'utf8'), 'app.txt\n', 'preparation must not rewrite the checkout root ignore');
+    await writeFile(path.join(source, '.dockerignore'), '*\n');
+    await writeFile(path.join(source, 'docker', 'Dockerfile.dockerignore'), '*\n');
+    await writeFile(path.join(source, 'docker', 'Dockerfile'), 'FROM changed\n');
+    await writeFile(path.join(source, 'app.txt'), 'changed source\n');
+    for (const build of [initial, saved]) {
+      assert.equal(await readFile(path.join(build.context, build.dockerfile), 'utf8'), initial.recipe.dockerfileContent);
+      assert.equal(await readFile(path.join(build.context, '.dockerignore'), 'utf8'), initial.recipe.dockerignoreContent);
+      assert.equal(await readFile(path.join(build.context, 'app.txt'), 'utf8'), 'old source\n');
+    }
+  } finally {
+    await initial.cleanup();
+    await saved.cleanup();
+  }
+  await assert.rejects(stat(initial.context), { code: 'ENOENT' });
+  await assert.rejects(stat(saved.context), { code: 'ENOENT' });
+  assert.equal((await readdir(root)).some((name) => name.startsWith('build-context-')), false);
+});
+
+test('records exact successful build snapshots and persists independent per-Service update recipes across restart', async (t) => {
+  const { data, apps, app, repositories, root, checkout, service } = await recipeFixture(t);
+  assert.deepEqual(await service.getServiceUpdates(app.id), [], 'legacy Apps must not infer a recipe from checkout files');
+  const first = await service.buildContext(app.id, 'web', 'docker/Dockerfile');
+  assert.equal(await service.getBuild(app.id, first.image), undefined, 'preparation alone must not record a successful build');
+  assert.deepEqual(first.recipe, {
+    contextPath: 'web', dockerfilePath: 'docker/Dockerfile',
+    dockerfileContent: 'FROM scratch\nCOPY . /app\n', dockerignoreContent: 'specific-only.txt\n',
+  });
+  await writeFile(path.join(checkout, 'web', 'docker', 'Dockerfile'), 'FROM busybox\nCOPY app.txt /worker.txt\n');
+  await writeFile(path.join(checkout, 'web', 'docker', 'Dockerfile.dockerignore'), 'worker-only.txt\n');
+  await service.recordBuild(app.id, first, imageId);
+  await first.cleanup();
+  const second = await service.buildContext(app.id, 'web', 'docker/Dockerfile');
+  await service.recordBuild(app.id, second, `sha256:${'b'.repeat(64)}`);
+  await second.cleanup();
+  assert.notEqual(first.image, second.image);
+  assert.match(first.image, uuidTag);
+  assert.match(second.image, uuidTag);
+
+  const entries = [
+    { ...await service.getBuild(app.id, first.image), serviceId: 'service_web', healthPath: '/health' },
+    { ...await service.getBuild(app.id, second.image), serviceId: 'service_worker', healthPath: null },
+  ];
+  const before = await apps.get(app.id);
+  await service.saveServiceUpdates(app.id, entries);
+  assert.deepEqual(await apps.get(app.id), before, 'recipe persistence is internal, not App/agent metadata');
+  const restarted = new RepositoryService(new AppStore(data), repositories);
+  assert.deepEqual(await restarted.getServiceUpdates(app.id), entries);
+  assert.deepEqual((await restarted.getBuild(app.id, first.image)).recipe, first.recipe);
+  const planPath = path.join(root, 'service-updates.json');
+  const plan = JSON.parse(await readFile(planPath, 'utf8'));
+  assert.equal((await stat(planPath)).mode & 0o777, 0o600);
+  for (const entry of entries) {
+    const folder = path.join(root, `service-updates-${plan.generation}`, entry.serviceId);
+    assert.equal(folder.startsWith(`${checkout}/`), false);
+    assert.equal((await stat(folder)).mode & 0o777, 0o700);
+    for (const [name, content] of [['Dockerfile.update', entry.recipe.dockerfileContent], ['.dockerignore', entry.recipe.dockerignoreContent]]) {
+      assert.equal(await readFile(path.join(folder, name), 'utf8'), content);
+      assert.equal((await stat(path.join(folder, name))).mode & 0o777, 0o600);
+    }
+  }
+  for (const name of (await readdir(root)).filter((name) => /^build-.*\.json$/.test(name))) {
+    assert.equal((await stat(path.join(root, name))).mode & 0o777, 0o600);
+  }
+  await restarted.saveServiceUpdates(app.id, entries.slice(1));
+  assert.deepEqual(await service.getServiceUpdates(app.id), entries.slice(1), 'saves replace the whole plan');
+  await restarted.saveServiceUpdates(app.id, []);
+  assert.deepEqual(await service.getServiceUpdates(app.id), []);
+});
+
+test('stages the latest source with the pinned nested Dockerfile and ignore, independently of global retry limits', async (t) => {
+  const { apps, app, root, checkout, service } = await recipeFixture(t);
+  const initial = await service.buildContext(app.id, 'web', 'docker/Dockerfile');
+  await writeFile(path.join(checkout, 'web', 'app.txt'), 'latest source\n');
+  await writeFile(path.join(checkout, 'web', 'docker', 'Dockerfile'), 'FROM malicious-checkout\n');
+  await writeFile(path.join(checkout, 'web', '.dockerignore'), '*\n');
+  await writeFile(path.join(checkout, 'web', 'docker', 'Dockerfile.dockerignore'), '*\n');
+  await writeFile(path.join(checkout, 'web', 'Dockerfile.other.dockerignore'), '*\n');
+  assert.equal(await readFile(path.join(initial.context, 'app.txt'), 'utf8'), 'old source\n');
+  await initial.cleanup();
+  await mkdir(path.join(checkout, 'web', 'nested'));
+  await writeFile(path.join(checkout, 'web', 'nested', '.dockerignore'), '*\n');
+  await mkdir(path.join(checkout, 'web', '.git'));
+  for (const name of ['.git/config', '.git-credentials', '.gitconfig', '.netrc', 'id_ed25519', '.env', 'private.key']) {
+    await writeFile(path.join(checkout, 'web', name), 'secret\n');
+  }
+  await writeFile(path.join(root, 'id_ed25519'), 'outside checkout deploy key\n');
+  await apps.update(app.id, {
+    source: { ...app.source, resolvedCommit: 'b'.repeat(40) },
+    deployment: { ...(await apps.get(app.id)).deployment, buildAttempts: 3 },
+  });
+
+  const images = new Set([initial.image]);
+  for (let index = 0; index < 4; index += 1) {
+    const staged = await service.prepareSavedBuild(app.id, initial.recipe);
+    assert.notEqual(staged.context, path.join(checkout, 'web'));
+    assert.equal(staged.context.endsWith('/repository/web'), true);
+    assert.equal(staged.dockerfile, 'docker/Dockerfile');
+    assert.equal(staged.commit, 'b'.repeat(40));
+    assert.match(staged.image, uuidTag);
+    images.add(staged.image);
+    assert.deepEqual(staged.recipe, initial.recipe);
+    assert.deepEqual(staged.entries, ['.dockerignore', 'app.txt', 'docker/Dockerfile']);
+    assert.equal(await readFile(path.join(staged.context, staged.dockerfile), 'utf8'), initial.recipe.dockerfileContent);
+    assert.equal(await readFile(path.join(staged.context, '.dockerignore'), 'utf8'), initial.recipe.dockerignoreContent);
+    assert.equal(await readFile(path.join(staged.context, 'app.txt'), 'utf8'), 'latest source\n');
+    await assert.rejects(stat(path.join(staged.context, 'docker', 'Dockerfile.dockerignore')), { code: 'ENOENT' });
+    await assert.rejects(stat(path.join(staged.context, '.git')), { code: 'ENOENT' });
+    await writeFile(path.join(staged.context, 'app.txt'), 'staging-only change');
+    assert.equal(await readFile(path.join(checkout, 'web', 'app.txt'), 'utf8'), 'latest source\n');
+    await staged.cleanup();
+    await staged.cleanup();
+    await assert.rejects(stat(staged.context), { code: 'ENOENT' });
+  }
+  assert.equal(images.size, 5);
+  assert.equal((await apps.get(app.id)).deployment.buildAttempts, 3);
+  assert.equal(await readFile(path.join(checkout, 'web', '.dockerignore'), 'utf8'), '*\n');
+  assert.equal((await readdir(root)).some((name) => name.startsWith('build-context-')), false);
+});
+
+test('saved recipes do not require the original Dockerfile or ignore files to still exist', async (t) => {
+  const { app, checkout, service } = await recipeFixture(t);
+  const initial = await service.buildContext(app.id, 'web', 'docker/Dockerfile');
+  const { recipe } = initial;
+  await initial.cleanup();
+  await rm(path.join(checkout, 'web', 'docker'), { recursive: true });
+  await rm(path.join(checkout, 'web', '.dockerignore'));
+  const staged = await service.prepareSavedBuild(app.id, recipe);
+  try {
+    assert.equal(await readFile(path.join(staged.context, staged.dockerfile), 'utf8'), recipe.dockerfileContent);
+    assert.equal(await readFile(path.join(staged.context, '.dockerignore'), 'utf8'), recipe.dockerignoreContent);
+  } finally {
+    await staged.cleanup();
+  }
+  await mkdir(path.join(checkout, 'web', 'docker'));
+  await symlink('/unreadable-checkout-dockerfile', path.join(checkout, 'web', 'docker', 'Dockerfile'));
+  await symlink('/unreadable-checkout-ignore', path.join(checkout, 'web', 'docker', 'Dockerfile.dockerignore'));
+  await symlink('/unreadable-root-ignore', path.join(checkout, 'web', '.dockerignore'));
+  const withLinks = await service.prepareSavedBuild(app.id, recipe);
+  assert.deepEqual(withLinks.recipe, recipe);
+  await withLinks.cleanup();
+});
+
+test('validates both generated inputs before any write, rejects blank Dockerfiles, and accepts empty ignores', async (t) => {
+  const { apps, app, checkout, service } = await recipeFixture(t);
+  const dockerfile = path.join(checkout, 'web', 'Dockerfile.halfcloud');
+  const ignore = path.join(checkout, 'web', '.dockerignore');
+  await writeFile(dockerfile, 'FROM original\n');
+  const before = await apps.get(app.id);
+  for (const [dockerfileContent, dockerignoreContent] of [
+    ['', ''], [' \n\t', 'valid'], ['FROM valid\n', '\0'], ['FROM valid\n', 'x'.repeat(128 * 1024 + 1)],
+    ['FROM invalid\0', ''], ['x'.repeat(128 * 1024 + 1), ''],
+  ]) {
+    await assert.rejects(service.prepareGeneratedBuildContext(app.id, 'web', dockerfileContent, dockerignoreContent));
+    assert.equal(await readFile(dockerfile, 'utf8'), 'FROM original\n');
+    assert.equal(await readFile(ignore, 'utf8'), 'root-only.txt\n');
+    assert.deepEqual(await apps.get(app.id), before);
+  }
+  await assert.rejects(service.writeDeploymentFile(app.id, 'web/Dockerfile.halfcloud', '\n '), /must not be empty/);
+  assert.equal(await readFile(dockerfile, 'utf8'), 'FROM original\n');
+  const generated = await service.prepareGeneratedBuildContext(app.id, 'web', 'FROM scratch\n', '');
+  assert.equal(generated.recipe.dockerignoreContent, '');
+  assert.equal(await readFile(ignore, 'utf8'), '');
+  await generated.cleanup();
+});
+
+test('captures empty Dockerfile-specific ignore rather than falling back and validates checked-in recipe contents', async (t) => {
+  const { apps, app, checkout, service } = await recipeFixture(t);
+  const dockerfile = path.join(checkout, 'web', 'docker', 'Dockerfile');
+  const specific = `${dockerfile}.dockerignore`;
+  await writeFile(specific, '');
+  const first = await service.buildContext(app.id, 'web', 'docker/Dockerfile');
+  assert.equal(first.recipe.dockerignoreContent, '');
+  await first.cleanup();
+  await rm(specific);
+  const second = await service.buildContext(app.id, 'web', 'docker/Dockerfile');
+  assert.equal(second.recipe.dockerignoreContent, 'root-only.txt\n');
+  await second.cleanup();
+  const before = await apps.get(app.id);
+  for (const content of ['', ' \n', 'FROM scratch\0', 'x'.repeat(128 * 1024 + 1), Buffer.from([0xff])]) {
+    await writeFile(dockerfile, content);
+    await assert.rejects(service.buildContext(app.id, 'web', 'docker/Dockerfile'));
+    assert.deepEqual(await apps.get(app.id), before);
+  }
+  await writeFile(dockerfile, 'FROM scratch\n');
+  await writeFile(specific, 'x'.repeat(128 * 1024 + 1));
+  await assert.rejects(service.buildContext(app.id, 'web', 'docker/Dockerfile'), /safety limits/);
+});
+
+test('confines recipe paths, rejects source symlinks and oversize contexts, and cleans up failed staging', async (t) => {
+  const { directory, apps, app, root, checkout, service } = await recipeFixture(t);
+  const initial = await service.buildContext(app.id, 'web', 'docker/Dockerfile');
+  const { recipe } = initial;
+  await initial.cleanup();
+  const before = await apps.get(app.id);
+  for (const invalid of ['../outside', '/tmp/outside', 'C:\\outside', '.git/config', 'a/../../b', 'a\0b', 'a\nb', 'x'.repeat(1025)]) {
+    await assert.rejects(service.prepareSavedBuild(app.id, { ...recipe, contextPath: invalid }));
+    await assert.rejects(service.prepareSavedBuild(app.id, { ...recipe, dockerfilePath: invalid }));
+  }
+  await assert.rejects(service.prepareSavedBuild(app.id, { ...recipe, dockerfilePath: '.dockerignore' }));
+  await assert.rejects(service.prepareSavedBuild(app.id, { ...recipe, dockerfilePath: '.env/Dockerfile' }));
+  await symlink(directory, path.join(checkout, 'escape'));
+  await assert.rejects(service.prepareSavedBuild(app.id, { ...recipe, contextPath: 'escape' }), /escapes/);
+  await symlink(path.join(checkout, 'web'), path.join(checkout, 'alias'));
+  await assert.rejects(service.prepareSavedBuild(app.id, { ...recipe, contextPath: 'alias' }), /symbolic links/);
+  const link = path.join(checkout, 'web', 'source-link');
+  await symlink(path.join(checkout, 'web', 'app.txt'), link);
+  await assert.rejects(service.prepareSavedBuild(app.id, recipe), /symbolic links/);
+  await assert.rejects(service.buildContext(app.id, 'web', 'docker/Dockerfile'), /symbolic links/);
+  assert.deepEqual(await apps.get(app.id), before, 'failed initial staging must not consume an attempt or change deployment state');
+  await rm(link);
+  const large = path.join(checkout, 'web', 'large');
+  await writeFile(large, '');
+  await truncate(large, 1024 * 1024 * 1024 + 1);
+  await assert.rejects(service.prepareSavedBuild(app.id, recipe), /safety limits/);
+  await assert.rejects(service.buildContext(app.id, 'web', 'docker/Dockerfile'), /safety limits/);
+  assert.deepEqual(await apps.get(app.id), before);
+  await rm(large);
+  assert.equal((await readdir(root)).some((name) => name.startsWith('build-context-')), false);
+  assert.equal(await readFile(path.join(checkout, 'web', 'app.txt'), 'utf8'), 'old source\n');
+});
+
+test('bounds directory enumeration even when entries would be excluded from staging', async (t) => {
+  const { app, root, checkout, service } = await recipeFixture(t);
+  const initial = await service.buildContext(app.id, 'web', 'docker/Dockerfile');
+  const { recipe } = initial;
+  await initial.cleanup();
+  for (let start = 0; start < 20_000; start += 100) {
+    await Promise.all(Array.from({ length: 100 }, (_, index) => mkdir(path.join(checkout, 'web', `.env.${start + index}`))));
+  }
+  await assert.rejects(service.prepareSavedBuild(app.id, recipe), /safety limits/);
+  assert.equal((await readdir(root)).some((name) => name.startsWith('build-context-')), false);
+});
+
+test('keeps the previous complete plan visible when publishing the next generation fails', async (t) => {
+  const { app, root, service } = await recipeFixture(t);
+  const build = await service.buildContext(app.id, 'web', 'docker/Dockerfile');
+  await service.recordBuild(app.id, build, imageId);
+  await build.cleanup();
+  const entry = { ...await service.getBuild(app.id, build.image), serviceId: 'service_web', healthPath: '/' };
+  await service.saveServiceUpdates(app.id, [entry]);
+  const files = await readdir(root);
+  service.writeRecipeJson = async (_root, _file, _plan, durable) => {
+    assert.equal(durable, true);
+    assert.deepEqual(await service.getServiceUpdates(app.id), [entry], 'unpublished files must not change the active plan');
+    throw new Error('Injected publication failure');
+  };
+  await assert.rejects(service.saveServiceUpdates(app.id, [{ ...entry, healthPath: '/new' }]), /publication failure/);
+  assert.deepEqual(await service.getServiceUpdates(app.id), [entry]);
+  const retained = (await readdir(root)).filter((name) => !files.includes(name));
+  assert.equal(retained.length, 1, 'publication failures conservatively retain the immutable generation');
+  assert.match(retained[0], /^service-updates-/);
+  assert.equal(await readFile(path.join(root, retained[0], entry.serviceId, 'Dockerfile.update'), 'utf8'), entry.recipe.dockerfileContent);
+});
+
+test('retains the published generation when durable plan publication fails after rename', async (t) => {
+  const { data, app, repositories, root, service } = await recipeFixture(t);
+  const writes = t.mock.method(service, 'writeRecipeJson');
+  const build = await service.buildContext(app.id, 'web', 'docker/Dockerfile');
+  await service.recordBuild(app.id, build, imageId);
+  await build.cleanup();
+  const entry = { ...await service.getBuild(app.id, build.image), serviceId: 'service_web', healthPath: '/' };
+  await service.saveServiceUpdates(app.id, [entry]);
+  const previous = JSON.parse(await readFile(path.join(root, 'service-updates.json'), 'utf8'));
+  const updates = [
+    { ...entry, healthPath: '/new', recipe: { ...entry.recipe, dockerfileContent: 'FROM busybox\n' } },
+    { ...entry, serviceId: 'service_worker', healthPath: null },
+  ];
+  const synced = [];
+  const syncDirectory = service.syncRecipeDirectory.bind(service);
+  t.mock.method(service, 'syncRecipeDirectory', async (directory) => {
+    synced.push(directory);
+    if (directory === root) {
+      const published = JSON.parse(await readFile(path.join(root, 'service-updates.json'), 'utf8'));
+      assert.deepEqual(published.entries, updates, 'the real atomic rename must happen before the injected sync failure');
+      throw new Error('Injected post-publish directory sync failure');
+    }
+    await syncDirectory(directory);
+  });
+
+  await assert.rejects(service.saveServiceUpdates(app.id, updates), /post-publish directory sync failure/);
+  const published = JSON.parse(await readFile(path.join(root, 'service-updates.json'), 'utf8'));
+  const generation = path.join(root, `service-updates-${published.generation}`);
+  assert.deepEqual(synced, [...updates.map(({ serviceId }) => path.join(generation, serviceId)), generation, root]);
+  assert.equal(writes.mock.calls.length, 3);
+  assert.ok(writes.mock.calls.every((call) => call.arguments[3] === true), 'build records and both plan publications must request durable writes');
+  const restarted = new RepositoryService(new AppStore(data), repositories);
+  assert.deepEqual(await restarted.getServiceUpdates(app.id), updates, 'a failed sync must not delete files referenced by the live plan');
+  assert.equal(await readFile(path.join(root, `service-updates-${previous.generation}`, entry.serviceId, 'Dockerfile.update'), 'utf8'), entry.recipe.dockerfileContent);
+  assert.equal((await readdir(root)).some((name) => name.endsWith('.tmp')), false);
+});
+
+test('validates entire plans before publishing and refuses corrupt or symlinked persisted data', async (t) => {
+  const { app, root, service } = await recipeFixture(t);
+  const build = await service.buildContext(app.id, 'web', 'docker/Dockerfile');
+  await service.recordBuild(app.id, build, imageId);
+  await build.cleanup();
+  const entry = { ...await service.getBuild(app.id, build.image), serviceId: 'service_web', healthPath: '/' };
+  await service.saveServiceUpdates(app.id, [entry]);
+  const planFile = path.join(root, 'service-updates.json');
+  const original = await readFile(planFile, 'utf8');
+  const files = await readdir(root);
+  for (const invalid of [
+    [entry, entry], [{ ...entry, serviceId: '../escape' }], [{ ...entry, imageId: 'not-an-image-id' }],
+    [{ ...entry, healthPath: 'https://example.com' }], [{ ...entry, recipe: { ...entry.recipe, dockerfileContent: '' } }],
+    Array.from({ length: 101 }, (_, index) => ({ ...entry, serviceId: `service_${index}` })),
+    Array.from({ length: 40 }, (_, index) => ({ ...entry, serviceId: `service_${index}`, recipe: { ...entry.recipe, dockerfileContent: 'x'.repeat(128 * 1024), dockerignoreContent: 'x'.repeat(128 * 1024) } })),
+  ]) {
+    await assert.rejects(service.saveServiceUpdates(app.id, invalid));
+    assert.equal(await readFile(planFile, 'utf8'), original);
+    assert.deepEqual(await readdir(root), files);
+  }
+  await writeFile(planFile, '{broken');
+  await assert.rejects(service.getServiceUpdates(app.id));
+  await writeFile(planFile, JSON.stringify({ ...JSON.parse(original), generation: '../repository' }));
+  await assert.rejects(service.getServiceUpdates(app.id));
+  await writeFile(planFile, original);
+  const { generation } = JSON.parse(original);
+  const savedFile = path.join(root, `service-updates-${generation}`, entry.serviceId, 'Dockerfile.update');
+  await writeFile(savedFile, 'FROM tampered\n');
+  await assert.rejects(service.getServiceUpdates(app.id), /do not match/);
+  await rm(savedFile);
+  await symlink(path.join(root, 'repository', 'web', 'docker', 'Dockerfile'), savedFile);
+  await assert.rejects(service.getServiceUpdates(app.id), /symbolic links/);
+  const buildFile = path.join(root, (await readdir(root)).find((name) => /^build-.*\.json$/.test(name)));
+  await writeFile(buildFile, '');
+  await truncate(buildFile, 8 * 1024 * 1024 + 1);
+  await assert.rejects(service.getBuild(app.id, build.image), /text file|safety limits/);
+});
+
+test('persists the complete applying and committed update journal across restart and clears it idempotently', async (t) => {
+  const { data, apps, app, repositories, root, service } = await recipeFixture(t);
+  assert.equal(await service.getUpdateRun(app.id), undefined);
+  const build = await service.buildContext(app.id, 'web', 'docker/Dockerfile');
+  await build.cleanup();
+  const previous = { image: build.image, imageId, commit: build.commit, recipe: build.recipe, serviceId: 'service_web', healthPath: '/' };
+  const commit = 'b'.repeat(40);
+  const run = {
+    phase: 'applying', commit, previousUpdates: [previous],
+    updates: [{ ...previous, image: 'halfcloud/app:candidate', imageId: `sha256:${'b'.repeat(64)}`, commit, recipe: { ...previous.recipe, dockerfileContent: 'FROM busybox\n' } }],
+  };
+  const before = await apps.get(app.id);
+  await service.saveUpdateRun(app.id, run);
+  const restarted = new RepositoryService(new AppStore(data), repositories);
+  assert.deepEqual(await restarted.getUpdateRun(app.id), run);
+  const file = path.join(root, 'update-run.json');
+  assert.equal((await stat(file)).mode & 0o777, 0o600);
+  assert.deepEqual(JSON.parse(await readFile(file, 'utf8')), { version: 1, run });
+  await restarted.saveUpdateRun(app.id, { ...run, phase: 'committed' });
+  assert.deepEqual(await service.getUpdateRun(app.id), { ...run, phase: 'committed' });
+  assert.deepEqual(await apps.get(app.id), before, 'the journal alone must not advance deployment state');
+  assert.deepEqual(await service.getServiceUpdates(app.id), [], 'the journal alone must not publish the candidate plan');
+  await restarted.clearUpdateRun(app.id);
+  await service.clearUpdateRun(app.id);
+  assert.equal(await service.getUpdateRun(app.id), undefined);
+  await rm(root, { recursive: true });
+  assert.equal(await restarted.getUpdateRun(app.id), undefined, 'legacy Apps may have no repository storage');
+  await restarted.clearUpdateRun(app.id);
+  await assert.rejects(stat(root), { code: 'ENOENT' });
+});
+
+test('rejects invalid, oversized, corrupt, or symlinked update journals without overwriting a valid decision', async (t) => {
+  const { app, root, service } = await recipeFixture(t);
+  const run = { phase: 'committed', commit: app.source.resolvedCommit, previousUpdates: [], updates: [] };
+  await service.saveUpdateRun(app.id, run);
+  const file = path.join(root, 'update-run.json');
+  const original = await readFile(file, 'utf8');
+  const entry = {
+    image: 'halfcloud/app:candidate', imageId, commit: run.commit, serviceId: 'service_web', healthPath: null,
+    recipe: { contextPath: '.', dockerfilePath: 'Dockerfile', dockerfileContent: 'x'.repeat(128 * 1024), dockerignoreContent: 'x'.repeat(128 * 1024) },
+  };
+  for (const invalid of [
+    { ...run, phase: 'unknown' }, { ...run, commit: 'invalid' },
+    { ...run, previousUpdates: [{ ...entry, serviceId: '../escape' }] },
+    { ...run, updates: [entry, entry] },
+    { ...run, updates: Array.from({ length: 40 }, (_, index) => ({ ...entry, serviceId: `service_${index}` })) },
+  ]) {
+    await assert.rejects(service.saveUpdateRun(app.id, invalid));
+    assert.equal(await readFile(file, 'utf8'), original);
+  }
+  for (const content of ['{broken', JSON.stringify({ version: 1, run: { ...run, phase: 'unknown' } }), ' '.repeat(8 * 1024 * 1024 + 1)]) {
+    await writeFile(file, content);
+    await assert.rejects(service.getUpdateRun(app.id));
+  }
+  await rm(file);
+  await symlink(path.join(root, 'missing-journal'), file);
+  await assert.rejects(service.getUpdateRun(app.id), { code: 'ENOENT' }, 'a dangling symlink is corrupt, not a missing legacy journal');
+  await service.clearUpdateRun(app.id);
+  assert.equal(await service.getUpdateRun(app.id), undefined);
+  assert.equal((await readdir(root)).some((name) => name.endsWith('.tmp')), false);
 });

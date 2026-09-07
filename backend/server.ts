@@ -24,6 +24,7 @@ const settings = new SettingsStore();
 const conversations = new ConversationStore();
 const docker = new ApplicationService(new DockerService());
 await docker.assertRootless();
+await docker.recoverUpdates();
 await docker.syncRoutes();
 const loginAttempts = new Map<string, { count: number; resetAt: number }>();
 
@@ -121,13 +122,13 @@ app.get('/api/apps/:appId', async (request, response) => response.json(await doc
 app.patch('/api/apps/:appId', async (request, response) => response.json(await docker.renameApp(request.params.appId, z.string().min(1).max(128).parse(request.body?.name))));
 app.get('/api/apps/:appId/logs', async (request, response) => response.json(await docker.getAppLogs(request.params.appId, Number(request.query.tail ?? 200))));
 app.post('/api/apps/:appId/:action', async (request, response) => {
-  const action = z.enum(['start', 'stop', 'restart', 'recreate', 'delete']).parse(request.params.action);
+  const action = z.enum(['start', 'stop', 'restart', 'recreate', 'update', 'delete']).parse(request.params.action);
   if (action === 'delete') {
     if (request.body?.confirmed !== true) return response.status(400).json({ error: 'Deletion requires confirmation' });
     response.json(await docker.deleteApp(request.params.appId, request.body?.deleteData === true));
     return;
   }
-  const methods = { start: docker.startApp.bind(docker), stop: docker.stopApp.bind(docker), restart: docker.restartApp.bind(docker), recreate: docker.recreateApp.bind(docker) };
+  const methods = { start: docker.startApp.bind(docker), stop: docker.stopApp.bind(docker), restart: docker.restartApp.bind(docker), recreate: docker.recreateApp.bind(docker), update: docker.updateGitApp.bind(docker) };
   response.json(await methods[action](request.params.appId));
 });
 app.post('/api/apps/:appId/repository/verify', async (request, response) => {

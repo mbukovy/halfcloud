@@ -1,9 +1,11 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { lookup } from 'node:dns/promises';
-import { chmod, lstat, mkdir, open, readFile, readdir, realpath, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { constants } from 'node:fs';
+import { chmod, lstat, mkdir, mkdtemp, open, opendir, readFile, readdir, realpath, rename, rm, stat, writeFile } from 'node:fs/promises';
 import net from 'node:net';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
+import { z } from 'zod';
 import type { AppRecord } from './apps.js';
 import { AppStore } from './apps.js';
 
@@ -39,6 +41,7 @@ const maxReadBytes = 128 * 1024;
 const maxTreeEntries = 250;
 const maxBuildFiles = 20_000;
 const maxBuildBytes = 1024 * 1024 * 1024;
+const maxRecipeJsonBytes = 8 * 1024 * 1024;
 const blockedAddresses = new net.BlockList();
 for (const [network, prefix] of [
   ['0.0.0.0', 8], ['10.0.0.0', 8], ['100.64.0.0', 10], ['127.0.0.0', 8], ['169.254.0.0', 16], ['172.16.0.0', 12],
@@ -58,13 +61,68 @@ export interface RepositoryInspection {
   limits: { treeDepth: number; treeEntries: number; fileBytes: number; totalBytes: number };
 }
 
+export interface RepositoryBuildRecipe {
+  contextPath: string;
+  dockerfilePath: string;
+  dockerfileContent: string;
+  dockerignoreContent: string;
+}
+
+export interface SavedRepositoryBuild {
+  image: string;
+  imageId: string;
+  commit: string;
+  recipe: RepositoryBuildRecipe;
+}
+
+export interface ServiceUpdateRecipe extends SavedRepositoryBuild {
+  serviceId: string;
+  healthPath: string | null;
+}
+
+export interface RepositoryUpdateRun {
+  phase: 'applying' | 'committed';
+  commit: string;
+  previousUpdates: ServiceUpdateRecipe[];
+  updates: ServiceUpdateRecipe[];
+}
+
 export interface RepositoryBuildContext {
   context: string;
   dockerfile: string;
   entries: string[];
   image: string;
   commit: string;
+  recipe: RepositoryBuildRecipe;
+  cleanup?: () => Promise<void>;
 }
+
+const recipeContentSchema = z.string().refine((value) => Buffer.byteLength(value) <= maxReadBytes && !value.includes('\0'), 'Deployment file is too large or is not text');
+const dockerfileContentSchema = recipeContentSchema.refine((value) => value.trim().length > 0, 'Dockerfile must not be empty');
+const recipeSchema = z.object({
+  contextPath: z.string().transform((value) => recipePath(value, true)),
+  dockerfilePath: z.string().transform((value) => recipePath(value)),
+  dockerfileContent: dockerfileContentSchema,
+  dockerignoreContent: recipeContentSchema,
+}).strict();
+const savedBuildSchema = z.object({
+  image: z.string().min(1).max(256).regex(/^[A-Za-z0-9][A-Za-z0-9/@_.:-]*$/),
+  imageId: z.string().regex(/^sha256:[a-f0-9]{64}$/),
+  commit: z.string().regex(/^[a-f0-9]{40}$/),
+  recipe: recipeSchema,
+}).strict();
+const serviceUpdatesSchema = z.array(savedBuildSchema.extend({
+  serviceId: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/),
+  healthPath: z.string().max(500).regex(/^\/[^\x00-\x1f\x7f]*$/).nullable(),
+}).strict()).max(100).refine((entries) => new Set(entries.map((entry) => entry.serviceId)).size === entries.length, 'Duplicate Service update recipe');
+const servicePlanSchema = z.object({ version: z.literal(1), generation: z.uuid(), entries: serviceUpdatesSchema }).strict();
+const updateRunSchema = z.object({
+  phase: z.enum(['applying', 'committed']),
+  commit: savedBuildSchema.shape.commit,
+  previousUpdates: serviceUpdatesSchema,
+  updates: serviceUpdatesSchema,
+}).strict();
+const updateRunFileSchema = z.object({ version: z.literal(1), run: updateRunSchema }).strict();
 
 const githubEd25519HostKey = 'github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl';
 
@@ -189,10 +247,20 @@ function safeRelativePath(value: string, allowRoot = false) {
   return normalized;
 }
 
+function recipePath(value: string, allowRoot = false) {
+  if (value.length > 1024 || /[\x00-\x1f\x7f:]/.test(value)) throw new Error('Invalid repository recipe path');
+  const relative = safeRelativePath(value, allowRoot);
+  if (relative.split('/').length > 64 || relative.split('/').some((part) => part.toLowerCase() === '.git' || isSensitiveBuildPath(part)) || (!allowRoot && relative.endsWith('.dockerignore'))) {
+    throw new Error('Repository recipe path is excluded from the build context');
+  }
+  return relative;
+}
+
 function isSensitiveBuildPath(relativePath: string) {
   const basename = path.posix.basename(relativePath).toLowerCase();
   if (basename === '.env.example' || basename === '.env.sample' || basename === 'example.env') return false;
-  return basename === '.env' || basename.startsWith('.env.') || /\.(pem|key|p12|pfx)$/.test(basename);
+  return basename === '.env' || basename.startsWith('.env.') || /\.(pem|key|p12|pfx)$/.test(basename)
+    || ['.git-credentials', '.gitconfig', '.netrc', '.ssh', 'id_rsa', 'id_dsa', 'id_ecdsa', 'id_ed25519'].includes(basename);
 }
 
 function gitFailure(stderr: string) {
@@ -597,7 +665,7 @@ export class RepositoryService {
     if (!(basename === '.dockerignore' || /^Dockerfile(?:\.[A-Za-z0-9._-]+)?$/.test(basename))) {
       throw new Error('The deployment agent may write only Dockerfile variants and .dockerignore files');
     }
-    if (Buffer.byteLength(content) > maxReadBytes || content.includes('\0')) throw new Error('Generated deployment file is too large or is not text');
+    (basename === '.dockerignore' || basename.endsWith('.dockerignore') ? recipeContentSchema : dockerfileContentSchema).parse(content);
     const parent = await this.existingPath(checkout, path.posix.dirname(relative));
     if (!(await stat(parent)).isDirectory()) throw new Error('Deployment file parent must be an existing repository directory');
     const destination = path.join(parent, basename);
@@ -614,9 +682,12 @@ export class RepositoryService {
   }
 
   async prepareGeneratedBuildContext(appIdOrName: string, contextPath: string, dockerfileContent: string, dockerignoreContent: string) {
+    // Validate both inputs before changing either existing deployment file.
+    dockerfileContentSchema.parse(dockerfileContent);
+    recipeContentSchema.parse(dockerignoreContent);
     const app = await this.gitApp(appIdOrName);
     const checkout = await this.checkout(app.id);
-    const contextRelative = safeRelativePath(contextPath, true);
+    const contextRelative = recipePath(contextPath, true);
     const context = await this.existingPath(checkout, contextRelative);
     if (!(await stat(context)).isDirectory()) throw new Error('Docker build context must be a repository directory');
     const repositoryPrefix = contextRelative === '.' ? '' : `${contextRelative}/`;
@@ -629,39 +700,149 @@ export class RepositoryService {
     const app = await this.gitApp(appIdOrName);
     if (!app.source?.resolvedCommit) throw new Error('Repository does not have a resolved commit');
     const checkout = await this.checkout(app.id);
-    const contextRelative = safeRelativePath(contextPath, true);
+    const contextRelative = recipePath(contextPath, true);
     const context = await this.existingPath(checkout, contextRelative);
     if (!(await stat(context)).isDirectory()) throw new Error('Docker build context must be a repository directory');
-    const dockerfileRelative = safeRelativePath(dockerfilePath);
+    const dockerfileRelative = recipePath(dockerfilePath);
     const dockerfile = await this.existingPath(context, dockerfileRelative);
     if (!(await stat(dockerfile)).isFile()) throw new Error('Dockerfile path must identify a regular file inside the build context');
-    const entries: string[] = [];
-    let bytes = 0;
-    const collect = async (directory: string, prefix = ''): Promise<void> => {
-      for (const entry of await readdir(directory, { withFileTypes: true })) {
-        const relative = prefix ? `${prefix}/${entry.name}` : entry.name;
-        if (entry.name === '.git' || isSensitiveBuildPath(relative)) continue;
-        const absolute = path.join(directory, entry.name);
-        if (entry.isDirectory()) await collect(absolute, relative);
-        else {
-          entries.push(relative);
-          if (entry.isFile()) bytes += (await stat(absolute)).size;
-          if (entries.length > maxBuildFiles || bytes > maxBuildBytes) throw new Error('Repository build context exceeds HalfCloud safety limits');
-        }
+    const dockerfileContent = await this.readRecipeText(context, dockerfileRelative);
+    let dockerignoreContent = '';
+    for (const ignorePath of [`${dockerfileRelative}.dockerignore`, '.dockerignore']) {
+      // A dangling symlink is not an absent ignore file and must not trigger fallback.
+      try {
+        await lstat(path.join(context, ignorePath));
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue;
+        throw error;
       }
-    };
-    await collect(context);
-    if (!entries.includes(dockerfileRelative)) throw new Error('Dockerfile cannot be excluded from the build context');
+      dockerignoreContent = await this.readRecipeText(context, ignorePath);
+      break;
+    }
+    const recipe = recipeSchema.parse({ contextPath: contextRelative, dockerfilePath: dockerfileRelative, dockerfileContent, dockerignoreContent });
     const attempts = (app.deployment?.buildAttempts ?? 0) + 1;
     if (attempts > 3) throw new Error('Build retry limit reached; inspect the last failure before starting a new deployment');
-    const image = `halfcloud/app-${app.id.slice(4).replaceAll('-', '')}:${app.source.resolvedCommit.slice(0, 12)}-${attempts}`;
-    await this.setStage(app.id, 'building', `Building application (attempt ${attempts} of 3)`, { buildAttempts: attempts, image: undefined });
-    return { context, dockerfile: dockerfileRelative, entries, image, commit: app.source.resolvedCommit };
+    const build = await this.prepareSavedBuild(app.id, recipe);
+    try {
+      await this.setStage(app.id, 'building', `Building application (attempt ${attempts} of 3)`, { buildAttempts: attempts, image: undefined });
+      return build;
+    } catch (error) {
+      await build.cleanup?.();
+      throw error;
+    }
+  }
+
+  async recordBuild(appId: string, build: RepositoryBuildContext, imageId: string): Promise<void> {
+    const saved = savedBuildSchema.parse({ image: build.image, imageId, commit: build.commit, recipe: build.recipe });
+    const app = await this.gitApp(appId);
+    const root = await this.appRoot(app.id, true);
+    const file = `build-${createHash('sha256').update(saved.image).digest('hex')}.json`;
+    await this.writeRecipeJson(root, file, { version: 1, build: saved }, true);
+  }
+
+  async getBuild(appId: string, image: string): Promise<SavedRepositoryBuild | undefined> {
+    const app = await this.gitApp(appId);
+    savedBuildSchema.shape.image.parse(image);
+    const root = await this.appRoot(app.id, true);
+    const value = await this.readRecipeJson(root, `build-${createHash('sha256').update(image).digest('hex')}.json`);
+    if (value === undefined) return undefined;
+    const saved = z.object({ version: z.literal(1), build: savedBuildSchema }).strict().parse(value).build;
+    if (saved.image !== image) throw new Error('Saved build image does not match its storage key');
+    return saved;
+  }
+
+  async getServiceUpdates(appId: string): Promise<ServiceUpdateRecipe[]> {
+    const app = await this.gitApp(appId);
+    const root = await this.appRoot(app.id, true);
+    const value = await this.readRecipeJson(root, 'service-updates.json');
+    if (value === undefined) return [];
+    const plan = servicePlanSchema.parse(value);
+    for (const entry of plan.entries) {
+      const directory = `service-updates-${plan.generation}/${entry.serviceId}`;
+      const dockerfile = await this.readRecipeText(root, `${directory}/Dockerfile.update`);
+      const ignore = await this.readRecipeText(root, `${directory}/.dockerignore`);
+      if (dockerfile !== entry.recipe.dockerfileContent || ignore !== entry.recipe.dockerignoreContent) throw new Error('Saved Service recipe files do not match the update plan');
+    }
+    return plan.entries;
+  }
+
+  async saveServiceUpdates(appId: string, entries: ServiceUpdateRecipe[]): Promise<void> {
+    const plan = servicePlanSchema.parse({ version: 1, generation: randomUUID(), entries });
+    if (Buffer.byteLength(JSON.stringify(plan)) > maxRecipeJsonBytes) throw new Error('Saved repository recipes exceed safety limits');
+    const app = await this.gitApp(appId);
+    const root = await this.appRoot(app.id, true);
+    const directory = path.join(root, `service-updates-${plan.generation}`);
+    await mkdir(directory, { mode: 0o700 });
+    for (const entry of plan.entries) {
+      const serviceDirectory = path.join(directory, entry.serviceId);
+      await mkdir(serviceDirectory, { mode: 0o700 });
+      await writeFile(path.join(serviceDirectory, 'Dockerfile.update'), entry.recipe.dockerfileContent, { mode: 0o600, flag: 'wx', flush: true });
+      await writeFile(path.join(serviceDirectory, '.dockerignore'), entry.recipe.dockerignoreContent, { mode: 0o600, flag: 'wx', flush: true });
+      await this.syncRecipeDirectory(serviceDirectory);
+    }
+    await this.syncRecipeDirectory(directory);
+    // Retain generations even on failure: rename may publish the plan before directory sync throws.
+    await this.writeRecipeJson(root, 'service-updates.json', plan, true);
+  }
+
+  async getUpdateRun(appId: string): Promise<RepositoryUpdateRun | undefined> {
+    const app = await this.gitApp(appId);
+    const root = await this.appRoot(app.id).catch((error: NodeJS.ErrnoException) => {
+      if (error.code !== 'ENOENT') throw error;
+      return undefined;
+    });
+    if (!root) return undefined;
+    const value = await this.readRecipeJson(root, 'update-run.json');
+    return value === undefined ? undefined : updateRunFileSchema.parse(value).run;
+  }
+
+  async saveUpdateRun(appId: string, run: RepositoryUpdateRun): Promise<void> {
+    const value = updateRunFileSchema.parse({ version: 1, run });
+    const app = await this.gitApp(appId);
+    await this.writeRecipeJson(await this.appRoot(app.id, true), 'update-run.json', value, true);
+  }
+
+  async clearUpdateRun(appId: string): Promise<void> {
+    const app = await this.gitApp(appId);
+    const root = await this.appRoot(app.id).catch((error: NodeJS.ErrnoException) => {
+      if (error.code !== 'ENOENT') throw error;
+      return undefined;
+    });
+    if (!root) return;
+    await rm(path.join(root, 'update-run.json'), { force: true });
+    await this.syncRecipeDirectory(root);
+  }
+
+  async prepareSavedBuild(appId: string, input: RepositoryBuildRecipe): Promise<RepositoryBuildContext> {
+    const recipe = recipeSchema.parse(input);
+    const app = await this.gitApp(appId);
+    if (!app.source?.resolvedCommit) throw new Error('Repository does not have a resolved commit');
+    const checkout = await this.checkout(app.id);
+    const source = await this.existingPath(checkout, recipe.contextPath);
+    if (!(await stat(source)).isDirectory()) throw new Error('Docker build context must be a repository directory');
+    const staging = await mkdtemp(path.join(await this.appRoot(app.id), 'build-context-'));
+    const cleanup = () => rm(staging, { recursive: true, force: true });
+    try {
+      const context = path.join(staging, 'repository', recipe.contextPath);
+      await mkdir(context, { recursive: true, mode: 0o700 });
+      const entries = await this.collectBuildFiles(source, { context, recipe });
+      await mkdir(path.dirname(path.join(context, recipe.dockerfilePath)), { recursive: true, mode: 0o700 });
+      await writeFile(path.join(context, recipe.dockerfilePath), recipe.dockerfileContent, { mode: 0o600, flag: 'wx' });
+      await writeFile(path.join(context, '.dockerignore'), recipe.dockerignoreContent, { mode: 0o600, flag: 'wx' });
+      entries.push(recipe.dockerfilePath, '.dockerignore');
+      const image = `halfcloud/app-${app.id.slice(4).replaceAll('-', '')}:${app.source.resolvedCommit.slice(0, 12)}-${randomUUID()}`;
+      // Updates have one caller-controlled attempt per Service, independent of initial AI build retries.
+      await this.setStage(app.id, 'building', 'Building application from saved recipe');
+      return { context, dockerfile: recipe.dockerfilePath, entries: entries.sort(), image, commit: app.source.resolvedCommit, recipe, cleanup };
+    } catch (error) {
+      await cleanup();
+      throw error;
+    }
   }
 
   async buildSucceeded(appIdOrName: string, image: string) {
     const app = await this.gitApp(appIdOrName);
-    return this.setStage(app.id, 'deploying', 'Deploying application services', { image });
+    return this.setStage(app.id, 'deploying', 'Deploying application services', { image, buildAttempts: 0 });
   }
 
   async retryBuild(appIdOrName: string) {
@@ -708,6 +889,99 @@ export class RepositoryService {
   async delete(appId: string) {
     const appRoot = path.join(this.repositoriesDir, appId);
     if (appRoot.startsWith(`${this.repositoriesDir}${path.sep}`)) await rm(appRoot, { recursive: true, force: true });
+  }
+
+  private async readRecipeText(root: string, relative: string, limit = maxReadBytes) {
+    const result = await this.readText(root, relative, limit);
+    if (result.truncated) throw new Error('Saved repository recipe exceeds safety limits');
+    return result.content;
+  }
+
+  private async readRecipeJson(root: string, file: string): Promise<unknown> {
+    try {
+      await lstat(path.join(root, file));
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+      throw error;
+    }
+    return JSON.parse(await this.readRecipeText(root, file, maxRecipeJsonBytes));
+  }
+
+  private async writeRecipeJson(root: string, file: string, value: unknown, durable = false) {
+    const content = JSON.stringify(value);
+    if (Buffer.byteLength(content) > maxRecipeJsonBytes) throw new Error('Saved repository recipes exceed safety limits');
+    const temporary = path.join(root, `${file}.${randomUUID()}.tmp`);
+    try {
+      await writeFile(temporary, content, { mode: 0o600, flag: 'wx', flush: durable });
+      await rename(temporary, path.join(root, file));
+      if (durable) await this.syncRecipeDirectory(root);
+    } finally {
+      await rm(temporary, { force: true });
+    }
+  }
+
+  private async syncRecipeDirectory(root: string) {
+    const directory = await open(root, 'r');
+    try {
+      await directory.sync();
+    } finally {
+      await directory.close();
+    }
+  }
+
+  private async collectBuildFiles(context: string, staging: { context: string; recipe: RepositoryBuildRecipe }) {
+    const entries: string[] = [];
+    let count = 2;
+    let bytes = Buffer.byteLength(staging.recipe.dockerfileContent) + Buffer.byteLength(staging.recipe.dockerignoreContent);
+    const buffer = Buffer.alloc(64 * 1024);
+    const checkLimits = () => {
+      if (count > maxBuildFiles || bytes > maxBuildBytes) throw new Error('Repository build context exceeds HalfCloud safety limits');
+    };
+    const collect = async (directory: string, prefix = '', depth = 0): Promise<void> => {
+      if (depth > 64) throw new Error('Repository build context exceeds HalfCloud safety limits');
+      for await (const entry of await opendir(directory)) {
+        const relative = prefix ? `${prefix}/${entry.name}` : entry.name;
+        count += 1;
+        checkLimits();
+        if (entry.name.toLowerCase() === '.git' || isSensitiveBuildPath(relative)) continue;
+        // Dockerfile-specific ignore files override the root ignore, even for nested Dockerfiles.
+        if (entry.name.endsWith('.dockerignore') || relative === staging.recipe.dockerfilePath) continue;
+        if (relative.length > 1024 || /[\\\x00-\x1f\x7f:]/.test(relative)) throw new Error('Invalid repository build path');
+        const absolute = path.join(directory, entry.name);
+        const details = await lstat(absolute);
+        if (details.isSymbolicLink()) throw new Error('Repository build contexts cannot contain symbolic links');
+        if (details.isDirectory()) {
+          await this.existingPath(context, relative);
+          await mkdir(path.join(staging.context, relative), { mode: 0o700 });
+          await collect(absolute, relative, depth + 1);
+        } else {
+          if (!details.isFile()) throw new Error('Repository build contexts must contain only regular files');
+          if (bytes + details.size > maxBuildBytes) throw new Error('Repository build context exceeds HalfCloud safety limits');
+          entries.push(relative);
+          const source = await open(absolute, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+          try {
+            if (!(await source.stat()).isFile()) throw new Error('Repository build contexts must contain only regular files');
+            const target = await open(path.join(staging.context, relative), 'wx', details.mode & 0o777);
+            try {
+              for (;;) {
+                const { bytesRead } = await source.read(buffer, 0, buffer.length, null);
+                if (!bytesRead) break;
+                bytes += bytesRead;
+                checkLimits();
+                let offset = 0;
+                while (offset < bytesRead) offset += (await target.write(buffer, offset, bytesRead - offset)).bytesWritten;
+              }
+            } finally {
+              await target.close();
+            }
+          } finally {
+            await source.close();
+          }
+        }
+      }
+    };
+    await collect(context);
+    return entries.sort();
   }
 
   private publicSetup(appId: string, publicKey: string | undefined, location: RepositoryLocation, status: 'pending' | 'verified') {
@@ -786,20 +1060,26 @@ export class RepositoryService {
     const requested = relative === '.' ? root : path.join(root, ...relative.split('/'));
     const resolved = await realpath(requested);
     if (resolved !== root && !resolved.startsWith(`${root}${path.sep}`)) throw new Error('Repository path escapes the managed checkout');
+    if (resolved !== requested) throw new Error('Repository paths cannot contain symbolic links');
     return resolved;
   }
 
   private async readText(root: string, relativePath: string, limit: number) {
     const target = await this.existingPath(root, relativePath);
-    const details = await stat(target);
-    if (!details.isFile()) throw new Error(`${relativePath} is not a repository file`);
-    const handle = await open(target, 'r');
+    const handle = await open(target, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
     try {
+      const details = await handle.stat();
+      if (!details.isFile()) throw new Error(`${relativePath} is not a repository file`);
       const buffer = Buffer.alloc(Math.min(details.size, limit + 1));
-      const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+      let bytesRead = 0;
+      while (bytesRead < buffer.length) {
+        const result = await handle.read(buffer, bytesRead, buffer.length - bytesRead, bytesRead);
+        if (!result.bytesRead) break;
+        bytesRead += result.bytesRead;
+      }
       const content = buffer.subarray(0, Math.min(bytesRead, limit));
-      if (content.subarray(0, Math.min(content.length, 8192)).includes(0)) throw new Error(`${relativePath} is not a text file`);
-      return { content: content.toString('utf8'), truncated: details.size > limit, bytes: details.size };
+      if (content.includes(0)) throw new Error(`${relativePath} is not a text file`);
+      return { content: new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(content, { stream: details.size > limit }), truncated: details.size > limit, bytes: details.size };
     } finally {
       await handle.close();
     }

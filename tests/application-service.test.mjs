@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -18,6 +19,8 @@ class FakeDocker {
   initializationCommands = [];
   networksDeleted = [];
   replaced = [];
+  builds = new Map();
+  replacements = new Map();
 
   async createContainer(input) {
     this.created.push(input);
@@ -42,14 +45,39 @@ class FakeDocker {
   }
 
   async listContainers() { return this.services; }
-  async buildImage({ image }) { return { image }; }
-  async replaceContainerImage(id, image) {
+  async buildImage({ image }) {
+    const imageId = `sha256:${createHash('sha256').update(image).digest('hex')}`;
+    this.builds.set(image, imageId);
+    return { image, imageId, logs: '' };
+  }
+  async inspectContainer(id) {
+    const service = this.services.find((candidate) => candidate.id === id);
+    assert.ok(service);
+    return { ...service, imageId: this.builds.get(service.image), health: null, ports: service.ports.map((port) => ({ hostPort: port.host, target: `${port.container}/${port.protocol}` })) };
+  }
+  async beginContainerImageReplacement(id, image) {
     this.replaced.push({ id, image });
     const index = this.services.findIndex((service) => service.id === id);
     assert.notEqual(index, -1);
-    const service = { ...this.services[index], id: `${id}-replacement`, image };
+    const previous = this.services[index];
+    const service = { ...previous, id: `${id}-replacement`, image };
     this.services[index] = service;
-    return { containerId: service.id, name: service.runtimeName, state: service.state };
+    const transaction = {
+      containerId: service.id, name: service.runtimeName, state: service.state,
+      commit: async () => { this.replacements.delete(service.serviceId); },
+      rollback: async () => {
+        this.services[index] = previous;
+        this.replacements.delete(service.serviceId);
+      },
+    };
+    this.replacements.set(service.serviceId, { appId: service.appId, transaction });
+    return transaction;
+  }
+  async recoverContainerReplacements(committedApps = new Set(), appId) {
+    for (const replacement of this.replacements.values()) {
+      if (appId && replacement.appId !== appId) continue;
+      await replacement.transaction[committedApps.has(replacement.appId) ? 'commit' : 'rollback']();
+    }
   }
   async getContainerEnvironment(id) {
     const service = this.services.find((service) => service.id === id || service.serviceId === id);
@@ -188,6 +216,7 @@ async function repositoryFixture(t) {
   const environment = new EnvironmentStore(directory);
   const caddy = { sync: t.mock.fn(async () => {}) };
   const applications = new ApplicationService(runtime, caddy, domains, environment, new RouteAccessRequestStore(directory), async () => 'hash', apps, repositories);
+  t.mock.method(applications, 'waitForService', async () => {});
   await applications.addService(app.id, { name: 'worker', image: oldImage, ports: {}, environment: { API_KEY: 'protected-secret' } });
   await applications.addService(app.id, { name: 'redis', image: 'redis:7', ports: {} });
   await applications.startApp(app.id);
@@ -218,7 +247,8 @@ test('refreshes and deploys a built image only to the selected Service without r
   assert.equal((await apps.get(app.id)).deployment.image, built.image);
   assert.equal((await apps.get(app.id)).deployment.status, 'in_progress');
   assert.equal((await apps.get(app.id)).source.currentCommit, currentCommit);
-  const deployed = await applications.deployRepositoryImage(app.id, worker.serviceId, built.image);
+  const deployed = await applications.deployRepositoryImage(app.id, worker.serviceId, built.image, '/ready');
+  assert.deepEqual(applications.waitForService.mock.calls.at(-1).arguments, [app.id, worker.serviceId, built.imageId, '/ready']);
 
   assert.equal(deployed.appId, app.id);
   assert.equal(deployed.serviceId, worker.serviceId);
@@ -245,14 +275,14 @@ test('requires the recorded successful image and rejects deployment targets belo
   const { applications, apps, app, runtime, caddy, worker, oldImage, imagePrefix, nextCommit } = await repositoryFixture(t);
   const other = await applications.createApp({ name: 'Other App', services: [{ name: 'worker', image: 'busybox:latest', ports: {} }] });
   await applications.refreshGitRepository(app.id);
-  await assert.rejects(applications.deployRepositoryImage(app.id, worker.serviceId, `${imagePrefix}${nextCommit.slice(0, 12)}-1`), /latest successfully built image/);
+  await assert.rejects(applications.deployRepositoryImage(app.id, worker.serviceId, `${imagePrefix}${nextCommit.slice(0, 12)}-1`), /successfully built image for this App and commit/);
   const built = await applications.buildRepositoryImage(app.id);
   const before = await apps.get(app.id);
   const services = structuredClone(runtime.services);
   const routeSyncs = caddy.sync.mock.callCount();
 
   for (const image of [oldImage, 'nginx:latest', `${built.image}-other`]) {
-    await assert.rejects(applications.deployRepositoryImage(app.id, worker.serviceId, image), /latest successfully built image/);
+    await assert.rejects(applications.deployRepositoryImage(app.id, worker.serviceId, image), /successfully built image for this App and commit/);
   }
   for (const target of [other.services[0].serviceId, other.services[0].id]) {
     await assert.rejects(applications.deployRepositoryImage(app.id, target, built.image), /was not found in Repository App/);
@@ -272,7 +302,7 @@ test('verification rejects another Service on an old repository image and comple
   await applications.addService(app.id, { name: 'scheduler', image: oldImage, ports: {} });
   await applications.startService(app.id, 'scheduler');
 
-  await assert.rejects(applications.verifyGitDeployment(app.id), /Update every Service using this repository/);
+  await assert.rejects(applications.verifyGitDeployment(app.id), /Build and deploy every repository Service at this commit/);
   const failed = await apps.get(app.id);
   assert.equal(failed.deployment.status, 'failed');
   assert.equal(failed.deployment.errorCode, 'verification_failed');
@@ -281,7 +311,7 @@ test('verification rejects another Service on an old repository image and comple
   assert.equal((await apps.get(app.id)).source.currentCommit, currentCommit);
   assert.equal(runtime.services.every((service) => service.ports.length === 0), true);
 
-  assert.deepEqual(await applications.verifyGitDeployment(app.id), { appId: app.id, commit: nextCommit, verified: true });
+  assert.deepEqual(await applications.verifyGitDeployment(app.id), { appId: app.id, commit: nextCommit, verified: true, updateRecipesSaved: 2 });
   const verified = await apps.get(app.id);
   assert.equal(verified.deployment.status, 'running');
   assert.equal(verified.deployment.stage, 'running');
@@ -294,10 +324,11 @@ test('blocks refresh, build, deploy and verify for the same App while a build is
   await applications.refreshGitRepository(app.id);
   const entered = Promise.withResolvers();
   const release = Promise.withResolvers();
-  t.mock.method(runtime, 'buildImage', async ({ image }) => {
+  const buildImage = runtime.buildImage.bind(runtime);
+  t.mock.method(runtime, 'buildImage', async (input) => {
     entered.resolve();
     await release.promise;
-    return { image };
+    return buildImage(input);
   });
   const building = applications.buildRepositoryImage(app.id);
   try {
@@ -314,6 +345,7 @@ test('blocks refresh, build, deploy and verify for the same App while a build is
       () => applications.inspectRepository(app.name),
       () => applications.writeRepositoryDeploymentFile(app.name, 'Dockerfile', 'FROM scratch\n'),
       () => applications.retryRepositoryBuild(app.name),
+      () => applications.updateGitApp(app.name),
     ]) {
       await assert.rejects(operation(), /Another repository operation is in progress/);
     }
@@ -328,7 +360,7 @@ test('blocks refresh, build, deploy and verify for the same App while a build is
   assert.equal((await applications.refreshGitRepository(app.name)).changed, false);
 });
 
-test('a failed rebuild clears the successful image, leaves existing Services intact and releases the guard', async (t) => {
+test('a failed rebuild clears the pending image but retains recorded successful builds and existing Services', async (t) => {
   const { applications, apps, app, runtime, worker, currentCommit } = await repositoryFixture(t);
   await applications.refreshGitRepository(app.id);
   const built = await applications.buildRepositoryImage(app.id);
@@ -340,10 +372,10 @@ test('a failed rebuild clears the successful image, leaves existing Services int
   assert.equal(failed.deployment.image, undefined);
   assert.equal(failed.deployment.status, 'failed');
   assert.equal(failed.deployment.errorCode, 'build_failed');
-  assert.equal(failed.deployment.buildAttempts, 2);
+  assert.equal(failed.deployment.buildAttempts, 1);
   assert.equal(failed.source.currentCommit, currentCommit);
   assert.deepEqual((await applications.getApp(app.id)).services, services);
   assert.deepEqual(runtime.replaced, []);
-  await assert.rejects(applications.deployRepositoryImage(app.id, worker.serviceId, built.image), /latest successfully built image/);
+  assert.equal((await applications.deployRepositoryImage(app.id, worker.serviceId, built.image)).image, built.image);
   assert.equal((await applications.refreshGitRepository(app.id)).changed, false);
 });

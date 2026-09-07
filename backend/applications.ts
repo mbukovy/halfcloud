@@ -1,14 +1,16 @@
 import { randomBytes, randomUUID } from 'node:crypto';
+import { setTimeout as delay } from 'node:timers/promises';
 import { AppStore, type AppRecord } from './apps.js';
 import { CaddyService } from './caddy.js';
-import { DockerService, type CreateContainerInput, type DeploymentProgress, type ManagedVolumeFilter, type SearchContainerImagesInput, type ServiceCommandNetworkMode } from './docker.js';
+import { DockerService, type ContainerReplacement, type CreateContainerInput, type DeploymentProgress, type ManagedVolumeFilter, type SearchContainerImagesInput, type ServiceCommandNetworkMode } from './docker.js';
 import { DomainStore, normalizeHostname, type ServiceDomain } from './domains.js';
 import { EnvironmentStore, assertEnvironmentVariableName, environmentRequestTargets, serializeEnvironmentForAgent, type EnvironmentTarget, type EnvironmentVariable } from './environment.js';
 import { RouteAccessRequestStore, assertBasicAuthPassword, assertBasicAuthUsername, hashBasicAuthPassword } from './route-access.js';
-import { GitRepositoryError, RepositoryService, normalizeRepositoryUrl } from './repositories.js';
+import { GitRepositoryError, RepositoryService, normalizeRepositoryUrl, type RepositoryUpdateRun, type ServiceUpdateRecipe } from './repositories.js';
 
 export class ApplicationService {
   private readonly repositoryOperations = new Set<string>();
+  private readonly updatingApps = new Set<string>();
 
   constructor(
     private readonly docker: DockerService,
@@ -151,26 +153,174 @@ export class ApplicationService {
     });
   }
 
-  async deployRepositoryImage(appIdOrName: string, serviceIdOrName: string, image: string) {
+  async deployRepositoryImage(appIdOrName: string, serviceIdOrName: string, image: string, healthPath?: string) {
     return this.withRepositoryOperation(appIdOrName, async (app) => {
-      if (!app.deployment?.image || app.deployment.image !== image) throw new Error('Use the latest successfully built image for this App');
+      if (healthPath !== undefined && (!/^\/[^\x00-\x1f\x7f]*$/.test(healthPath) || healthPath.length > 500)) throw new Error('Invalid readiness path');
+      const build = await this.repositories.getBuild(app.id, image);
+      if (!build || build.commit !== app.source?.resolvedCommit) throw new Error('Use a successfully built image for this App and commit');
       const service = await this.service(app.id, serviceIdOrName);
+      const saved = (await this.repositories.getServiceUpdates(app.id)).find((recipe) => recipe.serviceId === service.serviceId);
+      let replacement: ContainerReplacement | undefined;
       try {
         await this.repositories.setStage(app.id, 'deploying', `Updating ${service.name}`);
-        const result = await this.docker.replaceContainerImage(service.id, image);
+        replacement = await this.docker.beginContainerImageReplacement(service.id, image);
         await this.syncRoutes();
-        return { appId: app.id, serviceId: service.serviceId, image, ...result };
+        if (replacement.state === 'running') await this.waitForService(app.id, service.serviceId!, build.imageId, service.ports.some((port) => port.protocol === 'tcp') ? healthPath ?? saved?.healthPath ?? '/' : null);
       } catch (error) {
+        if (replacement) await replacement.rollback();
         await this.repositories.fail(app.id, 'deploying', error);
         await this.syncRoutes().catch(() => undefined);
         throw error;
       }
+      await replacement.commit();
+      return { appId: app.id, serviceId: service.serviceId, image, containerId: replacement.containerId, state: replacement.state };
     });
+  }
+
+  async updateGitApp(appIdOrName: string, onProgress?: (progress: DeploymentProgress) => void) {
+    return this.withRepositoryOperation(appIdOrName, async (app) => {
+      if (await this.repositories.getUpdateRun(app.id)) throw new Error('An interrupted update needs recovery before another update can start');
+      const previousUpdates = await this.repositories.getServiceUpdates(app.id);
+      if (!previousUpdates.length) throw new Error('This App has no verified update recipes. Prepare and verify its per-Service deployment recipes once before using automatic updates. No Services were changed.');
+      const runtime = await this.getApp(app.id, false);
+      const repositoryPrefix = `halfcloud/app-${app.id.slice(4).replaceAll('-', '')}:`;
+      if (runtime.services.some((service) => service.image.startsWith(repositoryPrefix) && !previousUpdates.some((recipe) => recipe.serviceId === service.serviceId))) {
+        throw new Error('Every repository-built Service needs a verified update recipe before updating the App');
+      }
+      if (runtime.services.some((service) => service.state !== 'running')) throw new Error('All Services must be running before a deterministic update; repair or start the App first');
+      for (const recipe of previousUpdates) {
+        const service = await this.service(app.id, recipe.serviceId);
+        if ((await this.docker.inspectContainer(service.id)).imageId !== recipe.imageId) throw new Error(`The running image for ${service.name} differs from its verified update recipe`);
+      }
+      this.updatingApps.add(app.id);
+      let run: RepositoryUpdateRun | undefined;
+      let failedStage: 'cloning' | 'building' | 'deploying' | 'verifying' = 'cloning';
+      let recovered = true;
+      let commitDecisionUncertain = false;
+      const replacements: ContainerReplacement[] = [];
+      try {
+        onProgress?.({ phase: 'activity', label: 'Fetching latest Git changes' });
+        const refreshed = await this.repositories.refresh(app.id);
+        const commit = refreshed.source!.resolvedCommit!;
+        if (app.source?.currentCommit === commit && previousUpdates.every((recipe) => recipe.commit === commit)) {
+          return { appId: app.id, commit, updated: false, message: 'Already up to date' };
+        }
+        const updates: ServiceUpdateRecipe[] = [];
+        failedStage = 'building';
+        // Build every Service first. Build failures never interrupt the running App.
+        for (const recipe of previousUpdates) {
+          const service = await this.service(app.id, recipe.serviceId);
+          const label = `Building update for ${service.name}`;
+          onProgress?.({ phase: 'activity', label });
+          await this.repositories.setStage(app.id, 'building', label);
+          const build = await this.repositories.prepareSavedBuild(app.id, recipe.recipe);
+          try {
+            const result = await this.docker.buildImage(build);
+            await this.repositories.recordBuild(app.id, build, result.imageId);
+            updates.push({ ...recipe, image: result.image, imageId: result.imageId, commit });
+          } finally {
+            await build.cleanup?.();
+          }
+        }
+        run = { phase: 'applying', commit, previousUpdates, updates };
+        await this.repositories.saveUpdateRun(app.id, run);
+        failedStage = 'deploying';
+        await this.repositories.setStage(app.id, 'deploying', 'Replacing application Services');
+        onProgress?.({ phase: 'activity', label: 'Updating application Services' });
+        for (const update of updates) {
+          const service = await this.service(app.id, update.serviceId);
+          replacements.push(await this.docker.beginContainerImageReplacement(service.id, update.image));
+        }
+        await this.syncRoutes();
+        failedStage = 'verifying';
+        await this.repositories.setStage(app.id, 'verifying', 'Checking updated Services');
+        onProgress?.({ phase: 'activity', label: 'Checking the updated App' });
+        await Promise.all(updates.map((update) => this.waitForService(app.id, update.serviceId, update.imageId, update.healthPath)));
+        // Recheck the whole group: an early-ready Service may have failed while another warmed up.
+        await Promise.all(updates.map((update) => this.waitForService(app.id, update.serviceId, update.imageId, update.healthPath, true)));
+        const ready = await this.getApp(app.id, false);
+        if (ready.services.some((service) => service.state !== 'running')) throw new Error('A Service stopped during update verification');
+        // This durable App-wide decision precedes deleting ANY previous container.
+        const committed = { ...run, phase: 'committed' as const };
+        commitDecisionUncertain = true;
+        await this.repositories.saveUpdateRun(app.id, committed);
+        run = committed;
+        commitDecisionUncertain = false;
+        await this.finishUpdate(app.id, committed);
+        return { appId: app.id, commit, updated: true, services: updates.map(({ serviceId, image }) => ({ serviceId, image })) };
+      } catch (error) {
+        if (commitDecisionUncertain) {
+          try {
+            const persisted = await this.repositories.getUpdateRun(app.id);
+            if (!persisted || persisted.commit !== run?.commit) throw new Error('Could not reconcile the update decision');
+            run = persisted;
+          } catch {
+            recovered = false;
+            throw new Error('The update commit decision could not be read. Containers were retained; restart HalfCloud to recover safely.');
+          }
+        }
+        if (run?.phase === 'committed') {
+          recovered = false;
+          throw new Error('The update passed verification and was committed, but finalization is pending. Restart HalfCloud to finish recovery; do not rebuild or replace the App.');
+        }
+        try {
+          for (const replacement of replacements.reverse()) await replacement.rollback();
+          if (run) {
+            await this.docker.recoverContainerReplacements(new Set(), app.id);
+            await this.repositories.saveServiceUpdates(app.id, previousUpdates);
+          }
+          await this.syncRoutes();
+          await this.repositories.fail(app.id, failedStage, error);
+          if (run) await this.repositories.clearUpdateRun(app.id);
+        } catch (rollbackError) {
+          recovered = false;
+          throw new AggregateError([error, rollbackError], 'Update failed and recovery is incomplete. Previous containers were retained; restart HalfCloud to retry recovery.');
+        }
+        throw error;
+      } finally {
+        if (recovered) this.updatingApps.delete(app.id);
+      }
+    });
+  }
+
+  private async finishUpdate(appId: string, run: RepositoryUpdateRun) {
+    await this.repositories.saveServiceUpdates(appId, run.updates);
+    const app = await this.apps.get(appId);
+    await this.apps.update(appId, {
+      source: { ...app.source!, currentCommit: run.commit },
+      deployment: { ...app.deployment, image: undefined, status: 'running', stage: 'running', message: 'Update complete', errorCode: undefined, updatedAt: new Date().toISOString() },
+    });
+    await this.docker.recoverContainerReplacements(new Set([appId]), appId);
+    await this.syncRoutes();
+    await this.repositories.clearUpdateRun(appId);
+  }
+
+  async recoverUpdates() {
+    const runs = [];
+    for (const app of await this.apps.list()) {
+      if (app.source?.type !== 'git') continue;
+      const run = await this.repositories.getUpdateRun(app.id);
+      // A previous process may have seen a rename succeed but its directory fsync fail.
+      if (run?.phase === 'committed') await this.repositories.saveUpdateRun(app.id, run);
+      if (run) runs.push({ appId: app.id, run });
+    }
+    await this.docker.recoverContainerReplacements(new Set(runs.filter(({ run }) => run.phase === 'committed').map(({ appId }) => appId)));
+    for (const { appId, run } of runs) {
+      if (run.phase === 'committed') await this.finishUpdate(appId, run);
+      else {
+        await this.repositories.saveServiceUpdates(appId, run.previousUpdates);
+        await this.repositories.fail(appId, 'deploying', new Error('Interrupted update was rolled back to the previous containers'));
+        await this.syncRoutes();
+        await this.repositories.clearUpdateRun(appId);
+      }
+      this.updatingApps.delete(appId);
+    }
   }
 
   private async withRepositoryOperation<T>(appIdOrName: string, operation: (app: AppRecord) => Promise<T>): Promise<T> {
     const app = await this.apps.get(appIdOrName);
     if (app.source?.type !== 'git') throw new Error('This App is not backed by a Git repository');
+    this.assertAppNotUpdating(app.id);
     if (this.repositoryOperations.has(app.id)) throw new Error('Another repository operation is in progress for this App; wait for it to finish');
     this.repositoryOperations.add(app.id);
     try {
@@ -196,23 +346,28 @@ export class ApplicationService {
     generatedFiles?: { dockerfileContent: string; dockerignoreContent: string },
   ) {
     return this.withRepositoryOperation(appIdOrName, async () => {
+      let build;
       try {
-        const build = generatedFiles
+        build = generatedFiles && (generatedFiles.dockerfileContent !== '' || generatedFiles.dockerignoreContent !== '')
           ? await this.repositories.prepareGeneratedBuildContext(appIdOrName, contextPath, generatedFiles.dockerfileContent, generatedFiles.dockerignoreContent)
           : await this.repositories.buildContext(appIdOrName, contextPath, dockerfilePath);
         onProgress?.({ phase: 'activity', label: 'Building application' });
         const result = await this.docker.buildImage(build);
+        await this.repositories.recordBuild(appIdOrName, build, result.imageId);
         await this.repositories.buildSucceeded(appIdOrName, result.image);
         return { appId: (await this.apps.get(appIdOrName)).id, commit: build.commit, ...result };
       } catch (error) {
         await this.repositories.fail(appIdOrName, 'building', error);
         throw error;
+      } finally {
+        await build?.cleanup?.();
       }
     });
   }
 
   async addService(appIdOrName: string, input: Omit<CreateContainerInput, 'appId' | 'serviceId' | 'serviceName' | 'publicName' | 'name' | 'start'> & { name: string }, onProgress?: (progress: DeploymentProgress) => void) {
     const app = await this.apps.get(appIdOrName);
+    this.assertAppNotUpdating(app.id);
     const sourceDeployment = app.source?.type === 'git' && app.source.resolvedCommit !== app.source.currentCommit;
     if (sourceDeployment) await this.repositories.setStage(app.id, 'deploying', `Preparing ${input.name}`);
     try {
@@ -234,6 +389,7 @@ export class ApplicationService {
 
   async startApp(idOrName: string) {
     const app = await this.apps.get(idOrName);
+    this.assertAppNotUpdating(app.id);
     const sourceDeployment = app.source?.type === 'git' && app.source.resolvedCommit !== app.source.currentCommit;
     if (sourceDeployment) await this.repositories.setStage(app.id, 'deploying', 'Starting application');
     try {
@@ -253,6 +409,7 @@ export class ApplicationService {
 
   async deleteApp(idOrName: string, deleteData = false) {
     const app = await this.getApp(idOrName, false);
+    this.assertAppNotUpdating(app.id);
     const deployKeyRemovalUrl = app.source?.authentication === 'ssh-deploy-key' ? app.source.settingsUrl : undefined;
     for (const service of app.services) await this.docker.deleteContainer(service.id);
     await this.docker.deleteAppNetwork(app.id);
@@ -288,6 +445,7 @@ export class ApplicationService {
 
   async startService(appIdOrName: string, serviceIdOrName: string) {
     const app = await this.apps.get(appIdOrName);
+    this.assertAppNotUpdating(app.id);
     const sourceDeployment = app.source?.type === 'git' && app.source.resolvedCommit !== app.source.currentCommit;
     if (sourceDeployment) await this.repositories.setStage(app.id, 'deploying', `Starting ${serviceIdOrName}`);
     try {
@@ -300,7 +458,9 @@ export class ApplicationService {
   async stopService(appIdOrName: string, serviceIdOrName: string) { return this.stopContainer((await this.service(appIdOrName, serviceIdOrName)).id); }
   async restartService(appIdOrName: string, serviceIdOrName: string) { return this.restartContainer((await this.service(appIdOrName, serviceIdOrName)).id); }
   async recreateService(appIdOrName: string, serviceIdOrName: string) {
-    const result = await this.docker.recreateContainer((await this.service(appIdOrName, serviceIdOrName)).id);
+    const service = await this.service(appIdOrName, serviceIdOrName);
+    this.assertAppNotUpdating(service.appId!);
+    const result = await this.docker.recreateContainer(service.id);
     await this.syncRoutes();
     return result;
   }
@@ -315,46 +475,89 @@ export class ApplicationService {
   getContainerStats(id: string) { return this.docker.getContainerStats(id); }
   async runServiceInitializationCommand(appIdOrName: string, serviceIdOrName: string, command: string[], networkMode: ServiceCommandNetworkMode = 'app') {
     const app = await this.apps.get(appIdOrName);
+    this.assertAppNotUpdating(app.id);
     const service = await this.service(app.id, serviceIdOrName);
     return this.docker.runServiceInitializationCommand(service.id, command, networkMode);
   }
 
-  async verifyGitDeployment(appIdOrName: string, serviceIdOrName?: string, healthPath = '/') {
+  async verifyGitDeployment(appIdOrName: string, serviceIdOrName?: string, healthPath = '/', serviceHealthPaths: Record<string, string> = {}) {
     return this.withRepositoryOperation(appIdOrName, async (appRecord) => {
-      if (!healthPath.startsWith('/') || healthPath.includes('\0') || healthPath.length > 500) throw new Error('Health path must be a bounded absolute URL path');
+      if (!/^\/[^\x00-\x1f\x7f]*$/.test(healthPath) || healthPath.length > 500) throw new Error('Health path must be a bounded absolute URL path');
+      const paths = new Map(Object.entries(serviceHealthPaths));
+      for (const value of paths.values()) if (!/^\/[^\x00-\x1f\x7f]*$/.test(value) || value.length > 500) throw new Error('Invalid Service readiness path');
       await this.repositories.setStage(appRecord.id, 'verifying', 'Verifying application');
       try {
         const app = await this.getApp(appRecord.id, false);
         if (!app.services.length) throw new Error('Deployment has no Services');
         if (app.services.some((service) => service.state !== 'running')) throw new Error('Every Service must be running before deployment can complete');
-        const builtImage = appRecord.deployment?.image;
-        if (!builtImage) throw new Error('Deployment does not have a successfully built repository image');
-        const builtServices = app.services.filter((service) => service.image === builtImage);
-        if (!builtServices.length) throw new Error('No deployed Service uses the image built from this repository commit');
         const repositoryImagePrefix = `halfcloud/app-${app.id.slice(4).replaceAll('-', '')}:`;
-        if (app.services.some((service) => service.image.startsWith(repositoryImagePrefix) && service.image !== builtImage)) {
-          throw new Error('Update every Service using this repository before completing deployment');
+        const services = app.services.filter((service) => service.image.startsWith(repositoryImagePrefix));
+        if (!services.length) throw new Error('No Service uses a built repository image');
+        for (const key of paths.keys()) {
+          if (!services.some((service) => (service.serviceId === key || service.name === key) && service.ports.some((port) => port.protocol === 'tcp'))) throw new Error(`Readiness path does not identify a repository-built web Service: ${key}`);
         }
-        const target = serviceIdOrName ? await this.service(app.id, serviceIdOrName) : builtServices.find((service) => service.ports.some((port) => port.protocol === 'tcp'));
-        let publicUrl: string | undefined;
-        if (target) {
-          if (target.image !== builtImage) throw new Error('The verified web Service does not use the image built from this repository commit');
-          const port = target.ports.find((candidate) => candidate.protocol === 'tcp');
-          if (!port) throw new Error(`${target.name} does not publish an HTTP port`);
-          await this.checkTcpPort(port.host);
-          const domain = target.domains.find((candidate) => candidate.managed) ?? target.domains.find((candidate) => candidate.primary) ?? target.domains[0];
-          if (!domain) throw new Error(`${target.name} does not have a public domain`);
-          publicUrl = `https://${domain.hostname}${healthPath}`;
-          const response = await fetch(publicUrl, { redirect: 'manual', signal: AbortSignal.timeout(10_000) });
-          if (response.status >= 500) throw new Error(`Application health check returned HTTP ${response.status}`);
+        const selected = serviceIdOrName ? await this.service(app.id, serviceIdOrName) : services.find((service) => service.ports.some((port) => port.protocol === 'tcp'));
+        if (selected && !services.some((service) => service.serviceId === selected.serviceId)) throw new Error('The selected Service is not built from this repository');
+        const previous = await this.repositories.getServiceUpdates(app.id);
+        const updates: ServiceUpdateRecipe[] = [];
+        for (const service of services) {
+          const build = await this.repositories.getBuild(app.id, service.image);
+          if (!build || build.commit !== appRecord.source?.resolvedCommit) throw new Error('Build and deploy every repository Service at this commit before verification; existing Apps need a one-time verified recipe');
+          const saved = previous.find((recipe) => recipe.serviceId === service.serviceId);
+          const path = service.ports.some((port) => port.protocol === 'tcp')
+            ? paths.get(service.serviceId!) ?? paths.get(service.name) ?? (selected?.serviceId === service.serviceId ? healthPath : saved?.healthPath ?? '/')
+            : null;
+          updates.push({ ...build, serviceId: service.serviceId!, healthPath: path });
         }
+        await Promise.all(updates.map((update) => this.waitForService(app.id, update.serviceId, update.imageId, update.healthPath)));
+        await Promise.all(updates.map((update) => this.waitForService(app.id, update.serviceId, update.imageId, update.healthPath, true)));
+        await this.repositories.saveServiceUpdates(app.id, updates);
         const updated = await this.repositories.markDeployed(app.id);
-        return { appId: app.id, commit: updated.source?.currentCommit, verified: true, ...(publicUrl ? { publicUrl } : {}) };
+        return { appId: app.id, commit: updated.source?.currentCommit, verified: true, updateRecipesSaved: updates.length };
       } catch (error) {
         await this.repositories.fail(appRecord.id, 'verifying', error);
         throw error;
       }
     });
+  }
+
+  private async waitForService(appId: string, serviceId: string, imageId: string, healthPath: string | null, singleProbe = false) {
+    const service = await this.service(appId, serviceId);
+    const domain = service.domains.find((candidate) => candidate.managed) ?? service.domains.find((candidate) => candidate.primary) ?? service.domains[0];
+    const started = Date.now();
+    let deadline = started + 30_000;
+    let successes = 0;
+    let lastError = 'Service did not become ready';
+    do {
+      try {
+        const inspection = await this.docker.inspectContainer(service.id);
+        if (inspection.healthcheck) {
+          const check = inspection.healthcheck;
+          deadline = started + Math.min(300_000, Math.max(30_000, check.startPeriodMs + check.intervalMs + check.timeoutMs + 5_000));
+        }
+        if (inspection.imageId !== imageId) throw new Error('Service is not using the expected built image');
+        if (inspection.state !== 'running' || (inspection.health !== null && inspection.health !== 'healthy')) throw new Error('Service is not healthy and running');
+        if (healthPath !== null) {
+          const port = inspection.ports.find((candidate) => candidate.target.endsWith('/tcp'));
+          if (!port || !domain) throw new Error('Web Service has no published port or domain');
+          const response = await fetch(`http://127.0.0.1:${port.hostPort}${healthPath}`, { redirect: 'manual', signal: AbortSignal.timeout(3_000) });
+          await response.body?.cancel();
+          if (response.status < 200 || response.status >= 400) throw new Error(`Application health check returned HTTP ${response.status}`);
+          const publicResponse = await fetch(`https://${domain.hostname}${healthPath}`, { redirect: 'manual', signal: AbortSignal.timeout(3_000) });
+          await publicResponse.body?.cancel();
+          const protectedRoute = domain.access.type === 'basic_auth' && publicResponse.status === 401;
+          if (!protectedRoute && (publicResponse.status < 200 || publicResponse.status >= 400)) throw new Error(`Public health check returned HTTP ${publicResponse.status}`);
+        }
+        if (++successes >= (singleProbe ? 1 : 3)) return;
+      } catch (error) {
+        if (singleProbe) throw error;
+        successes = 0;
+        lastError = error instanceof Error ? error.message : 'Service health check failed';
+      }
+      if (Date.now() >= deadline) break;
+      await delay(1_000);
+    } while (Date.now() < deadline);
+    throw new Error(`${service.name}: ${lastError}`);
   }
   listManagedVolumes(filter?: ManagedVolumeFilter) { return this.docker.listManagedVolumes(filter); }
   listDockerVolumes(unusedOnly?: boolean) { return this.docker.listDockerVolumes(unusedOnly); }
@@ -543,6 +746,7 @@ export class ApplicationService {
   }
 
   async createContainer(input: CreateContainerInput, onProgress?: (progress: DeploymentProgress) => void) {
+    this.assertAppNotUpdating(input.appId);
     const hasPublicTcpPort = Object.values(input.ports).some((target) => !target.includes('/') || target.endsWith('/tcp'));
     if (input.hostname && !hasPublicTcpPort) throw new Error('A hostname requires a published TCP port');
     const managedHostname = hasPublicTcpPort ? this.defaultHostname(input.publicName) : undefined;
@@ -563,24 +767,28 @@ export class ApplicationService {
   }
 
   async startContainer(id: string) {
+    await this.assertServiceNotUpdating(id);
     const result = await this.docker.startContainer(id);
     await this.syncRoutes();
     return result;
   }
 
   async stopContainer(id: string) {
+    await this.assertServiceNotUpdating(id);
     const result = await this.docker.stopContainer(id);
     await this.syncRoutes();
     return result;
   }
 
   async restartContainer(id: string) {
+    await this.assertServiceNotUpdating(id);
     const result = await this.docker.restartContainer(id);
     await this.syncRoutes();
     return result;
   }
 
   async deleteContainer(id: string) {
+    await this.assertServiceNotUpdating(id);
     const result = await this.docker.deleteContainer(id);
     await this.syncRoutes();
     return result;
@@ -665,6 +873,7 @@ export class ApplicationService {
     mutate: (name: string, legacyHostname?: string) => Promise<ServiceDomain[]>,
   ) {
     const serviceKey = application.serviceId ?? application.name;
+    await this.assertServiceNotUpdating(serviceKey);
     const previous = await this.domains.get(serviceKey, application.hostname);
     const updated = await mutate(serviceKey, application.hostname);
     try {
@@ -705,6 +914,7 @@ export class ApplicationService {
   }
 
   private async replaceRouteAccess(application: string, previous: ServiceDomain[], updated: ServiceDomain[]) {
+    await this.assertServiceNotUpdating(application);
     await this.domains.replace(application, updated);
     try {
       await this.syncRoutes();
@@ -726,6 +936,7 @@ export class ApplicationService {
   }
 
   private async applyEnvironment(id: string, serviceId: string, previous: EnvironmentVariable[], updated: EnvironmentVariable[]) {
+    await this.assertServiceNotUpdating(serviceId);
     await this.environment.replaceVariables(serviceId, updated);
     try {
       const result = await this.docker.replaceContainerEnvironment(id, Object.fromEntries(updated.map((variable) => [variable.name, variable.value])));
@@ -771,18 +982,19 @@ export class ApplicationService {
 
   private async appAction(idOrName: string, action: (serviceId: string) => Promise<unknown>, applies = (_state: string) => true) {
     const app = await this.getApp(idOrName, false);
+    this.assertAppNotUpdating(app.id);
     const results = [];
     for (const service of app.services) if (applies(service.state)) results.push(await action(service.id));
     return { appId: app.id, services: results };
   }
 
-  private async checkTcpPort(port: number) {
-    const net = await import('node:net');
-    await new Promise<void>((resolve, reject) => {
-      const socket = net.createConnection({ host: '127.0.0.1', port });
-      const timer = setTimeout(() => socket.destroy(new Error('Application port did not become reachable')), 5_000);
-      socket.once('connect', () => { clearTimeout(timer); socket.destroy(); resolve(); });
-      socket.once('error', (error) => { clearTimeout(timer); reject(error); });
-    });
+  private assertAppNotUpdating(appId: string) {
+    if (this.updatingApps.has(appId)) throw new Error('An App update or its recovery is in progress; wait before changing its Services or configuration');
+  }
+
+  private async assertServiceNotUpdating(id: string) {
+    if (!this.updatingApps.size) return;
+    const service = await this.application(id);
+    this.assertAppNotUpdating(service.appId!);
   }
 }

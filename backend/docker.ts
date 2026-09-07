@@ -1,5 +1,8 @@
 import net from 'node:net';
-import { lstat, mkdir, realpath, writeFile } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
+import { constants } from 'node:fs';
+import { cp, lstat, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import Docker from 'dockerode';
@@ -41,6 +44,31 @@ export interface BuildImageInput {
   dockerfile: string;
   entries: string[];
   image: string;
+}
+
+export interface ContainerReplacement {
+  containerId: string;
+  name: string;
+  state: string;
+  commit(): Promise<void>;
+  rollback(): Promise<void>;
+}
+
+// The rename is a durable journal: record running state before stopping, and commit before cleanup.
+const replacementName = /^\/?([a-zA-Z0-9][a-zA-Z0-9_.-]{0,127})-halfcloud-replacement-v1-([a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12})-(running|stopped)-(pending|committed)$/;
+const replacementLabel = 'halfcloud.replacement.backup';
+
+function isServiceInitializationContainer(container: Docker.ContainerInfo, appId: string, serviceId: string, serviceName: string) {
+  return container.Labels?.['halfcloud.operation'] === 'service-initialization'
+    && container.Labels['halfcloud.app.id'] === appId
+    && container.Labels['halfcloud.service.id'] === serviceId
+    && container.Labels['halfcloud.managed'] === undefined
+    && container.Labels[replacementLabel] === undefined
+    // Helpers have Docker-generated names, never the Service's runtime name or a replacement journal name.
+    && container.Names?.length === 1
+    && /^\/[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(container.Names[0]!)
+    && container.Names[0] !== `/${serviceName}`
+    && !replacementName.test(container.Names[0]!);
 }
 
 export type DeploymentProgress =
@@ -245,9 +273,37 @@ export class DockerService {
     const abortController = new AbortController();
     const timer = setTimeout(() => abortController.abort(), timeoutMs);
     const messages: string[] = [];
+    let context: string | undefined;
     try {
+      // Dockerode filters src with .dockerignore, including the Dockerfile itself. Use a private
+      // snapshot with last-match exceptions, never rewrite the repository or import its tar dependencies.
+      context = await mkdtemp(path.join(tmpdir(), 'halfcloud-build-'));
+      const entries = [...new Set([...input.entries, input.dockerfile, '.dockerignore'])];
+      for (const entry of entries) {
+        if (abortController.signal.aborted) throw new Error('Docker build context preparation timed out');
+        if (!entry || path.isAbsolute(entry) || entry.split('/').some((part) => part === '..' || part === '.' || !part) || /[\r\n\\]/.test(entry)) {
+          throw new Error('Invalid Docker build context path');
+        }
+        const source = path.join(input.context, entry);
+        if (entry === '.dockerignore') continue;
+        const details = await lstat(source);
+        if (!details.isFile() && !details.isSymbolicLink()) throw new Error('Docker build entries must be files');
+        if (await realpath(path.dirname(source)) !== path.resolve(path.dirname(source))) throw new Error('Docker build entry has a symbolic-link parent');
+        if (entry === input.dockerfile && !details.isFile()) throw new Error('Dockerfile must be a regular file');
+        await mkdir(path.dirname(path.join(context, entry)), { recursive: true });
+        await cp(source, path.join(context, entry), { mode: constants.COPYFILE_FICLONE, verbatimSymlinks: true });
+      }
+      const ignorePath = path.join(input.context, '.dockerignore');
+      const ignoreStat = await lstat(ignorePath).catch((error: NodeJS.ErrnoException) => {
+        if (error.code === 'ENOENT') return undefined;
+        throw error;
+      });
+      if (ignoreStat && !ignoreStat.isFile()) throw new Error('.dockerignore must be a regular file');
+      const ignore = ignoreStat ? await readFile(ignorePath, 'utf8') : '';
+      const dockerfilePattern = input.dockerfile.replace(/([*?\[\]!# ])/g, '\\$1');
+      await writeFile(path.join(context, '.dockerignore'), `${ignore}\n!${dockerfilePattern}\n!.dockerignore\n`, { mode: 0o600 });
       const stream = await this.docker.buildImage(
-        { context: input.context, src: input.entries },
+        { context, src: entries },
         {
           dockerfile: input.dockerfile,
           t: input.image,
@@ -282,6 +338,7 @@ export class DockerService {
       throw new Error(logs ? `${detail}\n${logs}`.slice(-32 * 1024) : detail);
     } finally {
       clearTimeout(timer);
+      if (context) await rm(context, { recursive: true, force: true });
     }
   }
 
@@ -290,7 +347,7 @@ export class DockerService {
       all: true,
       filters: { label: ['halfcloud.managed=true'] },
     });
-    return Promise.all(containers.map(async (container) => {
+    return Promise.all(containers.filter((container) => container.Labels?.['halfcloud.managed'] === 'true' && !container.Names?.some((name) => replacementName.test(name))).map(async (container) => {
       const ports = (container.Ports ?? []).filter((port) => port.PublicPort).map((port) => ({
         host: port.PublicPort!,
         container: port.PrivatePort,
@@ -793,22 +850,43 @@ export class DockerService {
     for (const key of Object.keys(nextEnvironment)) {
       if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) throw new Error(`Invalid environment variable name ${key}`);
     }
-    return this.replaceContainer(id, { environment: nextEnvironment });
+    const transaction = await this.replaceContainer(id, { environment: nextEnvironment });
+    await transaction.commit();
+    return { containerId: transaction.containerId, name: transaction.name, state: transaction.state };
   }
 
   async replaceContainerImage(id: string, image: string) {
+    const transaction = await this.beginContainerImageReplacement(id, image);
+    await transaction.commit();
+    return { containerId: transaction.containerId, name: transaction.name, state: transaction.state };
+  }
+
+  async beginContainerImageReplacement(id: string, image: string): Promise<ContainerReplacement> {
     image = image.trim();
     if (!image || image.length > 255) throw new Error('Invalid image name');
     return this.replaceContainer(id, { image });
   }
 
-  private async replaceContainer(id: string, changes: { environment?: Record<string, string>; image?: string }) {
+  private async replaceContainer(id: string, changes: { environment?: Record<string, string>; image?: string }): Promise<ContainerReplacement> {
     const container = await this.managedContainer(id);
     const inspection = await container.inspect();
+    const name = inspection.Name.replace(/^\//, '');
+    const appId = inspection.Config.Labels?.['halfcloud.app.id'];
+    if (!appId) throw new Error('Managed service is missing its App ID');
+    const serviceId = inspection.Config.Labels?.['halfcloud.service.id'];
+    if (!serviceId) throw new Error('Managed service is missing its Service ID');
+    if (replacementName.test(name)) throw new Error('Cannot replace a retained backup');
+    if (this.initializingServices.has(serviceId)) throw new Error(`Cannot replace Service ${serviceId} while an initialization command is active`);
+    const backups = await this.docker.listContainers({ all: true, filters: { label: ['halfcloud.managed=true'] } });
+    if (backups.some((candidate) => candidate.Labels?.['halfcloud.managed'] === 'true' && candidate.Labels['halfcloud.service.id'] === serviceId && candidate.Names?.some((value) => replacementName.test(value)))) {
+      throw new Error(`Service ${serviceId} already has a pending replacement or cleanup`);
+    }
     // Keep existing environment values, even if they match image defaults: they may be intentional secrets or overrides.
     const config: Docker.ContainerCreateOptions = { ...inspection.Config };
+    let expectedImageId: string | undefined;
     if (changes.image !== undefined) {
       const nextImage = await this.docker.getImage(changes.image).inspect();
+      expectedImageId = nextImage.Id;
       // The original tag may already point at the newly built image.
       const previousImage = await this.docker.getImage(inspection.Image).inspect();
       config.Image = changes.image;
@@ -824,9 +902,6 @@ export class DockerService {
     if (changes.environment !== undefined) {
       config.Env = Object.entries(changes.environment).map(([key, value]) => `${key}=${value}`);
     }
-    const name = inspection.Name.replace(/^\//, '');
-    const appId = inspection.Config.Labels?.['halfcloud.app.id'];
-    if (!appId) throw new Error('Managed service is missing its App ID');
     const networkName = appNetworkName(appId);
     await createOrReuseAppNetwork(this.docker, appId);
     const hostConfig = { ...inspection.HostConfig };
@@ -849,42 +924,138 @@ export class DockerService {
       { IPAMConfig: endpoint.IPAMConfig, Links: endpoint.Links, Aliases: endpoint.Aliases, DriverOpts: (endpoint as Docker.EndpointSettings).DriverOpts },
     ]));
     endpoints[networkName] ??= { Aliases: [inspection.Config.Labels?.['halfcloud.service.name'] ?? name] };
-    const backupName = `${name}-halfcloud-backup-${Date.now()}`;
+    const operations = await this.docker.listContainers({ all: true });
+    if (this.initializingServices.has(serviceId) || operations.some((candidate) =>
+      isServiceInitializationContainer(candidate, appId, serviceId, name) && !['exited', 'dead'].includes(candidate.State),
+    )) throw new Error(`Cannot replace Service ${serviceId} while an initialization command is active`);
     const wasRunning = inspection.State.Running;
-    if (wasRunning) await container.stop({ t: 10 });
-    await container.rename({ name: backupName });
+    const backupName = `${name}-halfcloud-replacement-v1-${randomUUID()}-${wasRunning ? 'running' : 'stopped'}-pending`;
+    if (!replacementName.test(backupName)) throw new Error('Invalid replacement container name');
     let replacement: Docker.Container | undefined;
     try {
+      await container.rename({ name: backupName });
+      if (wasRunning) await container.stop({ t: 10 });
       replacement = await this.docker.createContainer({
         ...config,
+        Labels: { ...config.Labels, [replacementLabel]: backupName },
         name,
         HostConfig: hostConfig,
         NetworkingConfig: { EndpointsConfig: endpoints },
       });
+      // Keep the tag for service.image matching, but never start an image if that tag moved during creation.
+      if (expectedImageId && (await replacement.inspect()).Image !== expectedImageId) throw new Error('Replacement image tag changed during container creation');
       if (wasRunning) await replacement.start();
       if (changes.environment !== undefined) {
         const appDir = path.join(this.appsDir, appId);
         await writeFile(path.join(appDir, '.env'), `${Object.entries(changes.environment).map(([key, value]) => `${key}=${value.replace(/\n/g, '\\n')}`).join('\n')}${Object.keys(changes.environment).length ? '\n' : ''}`, { mode: 0o600 });
       }
-      await container.remove({ force: true, v: false });
-      return { containerId: replacement.id, name, state: wasRunning ? 'running' : 'exited' };
     } catch (error) {
-      if (replacement) await replacement.remove({ force: true, v: false }).catch(() => undefined);
-      await container.rename({ name });
-      if (wasRunning) await container.start().catch(() => undefined);
+      try {
+        await this.finishContainerReplacement(inspection.Id, backupName, 'rollback');
+      } catch (rollbackError) {
+        throw new AggregateError([error, rollbackError], `Container replacement failed; rollback failed: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`);
+      }
       throw error;
+    }
+    let completed: 'commit' | 'rollback' | undefined;
+    let busy = false;
+    const finish = async (action: 'commit' | 'rollback') => {
+      if (busy) throw new Error('Container replacement is already being finalized');
+      if (completed === action) return;
+      if (completed) throw new Error(`Container replacement already completed: ${completed}`);
+      busy = true;
+      try {
+        await this.finishContainerReplacement(inspection.Id, backupName, action);
+        completed = action;
+      } finally {
+        busy = false;
+      }
+    };
+    return {
+      containerId: replacement.id, name, state: wasRunning ? 'running' : 'exited',
+      commit: () => finish('commit'),
+      rollback: () => finish('rollback'),
+    };
+  }
+
+  // committedApps must come from durable group decisions. Run at startup, or scope to an App whose updates are locked.
+  // Recovery errors must block startup or further updates for that App, not be ignored.
+  async recoverContainerReplacements(committedApps: ReadonlySet<string> = new Set(), appId?: string): Promise<void> {
+    const containers = await this.docker.listContainers({ all: true, filters: { label: [
+      'halfcloud.managed=true',
+      ...(appId !== undefined ? [`halfcloud.app.id=${appId}`] : []),
+    ] } });
+    const backups = containers.flatMap((container) => {
+      const ownerAppId = container.Labels?.['halfcloud.app.id'];
+      if (container.Labels?.['halfcloud.managed'] !== 'true' || (appId !== undefined && ownerAppId !== appId)) return [];
+      const name = container.Names?.find((value) => replacementName.test(value));
+      return name ? [{ id: container.Id, name: name.replace(/^\//, ''), appId: ownerAppId }] : [];
+    });
+    const names = backups.map((backup) => replacementName.exec(backup.name)![1]);
+    if (new Set(names).size !== names.length) throw new Error('Multiple replacement backups claim the same container name');
+    for (const backup of backups) {
+      const committed = backup.name.endsWith('-committed') || (backup.appId !== undefined && committedApps.has(backup.appId));
+      await this.finishContainerReplacement(backup.id, backup.name, committed ? 'commit' : 'rollback');
+    }
+  }
+
+  private async finishContainerReplacement(id: string, backupName: string, action: 'commit' | 'rollback'): Promise<void> {
+    const match = replacementName.exec(backupName);
+    if (!match) throw new Error('Invalid replacement backup name');
+    const name = match[1]!;
+    const wasRunning = match[3] === 'running';
+    const pendingName = backupName.replace(/-committed$/, '-pending');
+    const committedName = pendingName.replace(/-pending$/, '-committed');
+    const container = this.docker.getContainer(id);
+    const inspection = await container.inspect().catch((error: { statusCode?: number }) => {
+      if (action === 'commit' && error.statusCode === 404) return undefined;
+      throw error;
+    });
+    if (!inspection) return;
+    const currentName = inspection.Name.replace(/^\//, '');
+    const labels = inspection.Config.Labels;
+    if (labels?.['halfcloud.managed'] !== 'true' || !labels['halfcloud.app.id'] || !labels['halfcloud.service.id']
+      || ![pendingName, committedName, ...(action === 'rollback' ? [name] : [])].includes(currentName)) {
+      throw new Error(`Replacement backup ${id} has mismatched identity`);
+    }
+    if (action === 'rollback' && currentName === committedName) throw new Error('Cannot roll back a committed container replacement');
+    const containers = await this.docker.listContainers({ all: true });
+    const candidates = containers.filter((candidate) => candidate.Id !== id
+      && !isServiceInitializationContainer(candidate, labels['halfcloud.app.id']!, labels['halfcloud.service.id']!, name)
+      && (candidate.Names?.includes(`/${name}`) || candidate.Labels?.['halfcloud.service.id'] === labels['halfcloud.service.id']));
+    const replacement = candidates[0];
+    if (candidates.length > 1 || (replacement && (
+      !replacement.Names?.includes(`/${name}`)
+      || replacement.Labels?.['halfcloud.managed'] !== 'true'
+      || replacement.Labels['halfcloud.app.id'] !== labels['halfcloud.app.id']
+      || replacement.Labels['halfcloud.service.id'] !== labels['halfcloud.service.id']
+      || replacement.Labels[replacementLabel] !== pendingName
+    ))) throw new Error(`Replacement for ${name} has mismatched identity; refusing recovery`);
+    if (action === 'commit') {
+      if (!replacement) throw new Error(`Replacement for ${name} is missing; refusing commit`);
+      // Once renamed, a cleanup failure must never turn a successful update into a rollback.
+      if (currentName !== committedName) await container.rename({ name: committedName });
+      await container.remove({ force: true, v: false });
+    } else {
+      if (replacement) await this.docker.getContainer(replacement.Id).remove({ force: true, v: false });
+      if (wasRunning && !inspection.State.Running) await container.start();
+      if (!wasRunning && inspection.State.Running) await container.stop({ t: 10 });
+      // Clear the journal last, so a restart during restoration can safely retry it.
+      if (currentName !== name) await container.rename({ name });
     }
   }
 
   async inspectContainer(id: string) {
     const container = await this.managedContainer(id);
     const inspection = await container.inspect();
+    const healthcheck = inspection.Config.Healthcheck;
     return {
       id: inspection.Id,
       name: inspection.Config.Labels?.['halfcloud.service.name'] ?? inspection.Name.replace(/^\//, ''),
       appId: inspection.Config.Labels?.['halfcloud.app.id'],
       serviceId: inspection.Config.Labels?.['halfcloud.service.id'],
       image: inspection.Config.Image,
+      imageId: inspection.Image,
       state: inspection.State.Status,
       ports: Object.entries(inspection.NetworkSettings.Ports ?? {}).flatMap(([target, bindings]) =>
         (bindings ?? []).map((binding) => ({ target, hostPort: binding.HostPort, hostIp: binding.HostIp }))),
@@ -892,6 +1063,14 @@ export class DockerService {
       networks: Object.keys(inspection.NetworkSettings.Networks ?? {}),
       restartPolicy: inspection.HostConfig.RestartPolicy?.Name ?? 'no',
       health: inspection.State.Health?.Status ?? null,
+      // Docker stores durations in nanoseconds; zero/omitted values select daemon defaults.
+      healthcheck: healthcheck?.Test?.length && healthcheck.Test[0] !== 'NONE' ? {
+        intervalMs: (healthcheck.Interval || 30_000_000_000) / 1_000_000,
+        startPeriodMs: (healthcheck.StartPeriod || 0) / 1_000_000,
+        startIntervalMs: (healthcheck.StartInterval || 5_000_000_000) / 1_000_000,
+        retries: healthcheck.Retries || 3,
+        timeoutMs: (healthcheck.Timeout || 30_000_000_000) / 1_000_000,
+      } : null,
     };
   }
 
@@ -922,7 +1101,9 @@ export class DockerService {
   private async managedContainer(idOrName: string) {
     const candidates = await this.docker.listContainers({ all: true, filters: { label: ['halfcloud.managed=true'] } });
     const matches = candidates.filter((container) =>
-      container.Id === idOrName || container.Id.startsWith(idOrName) || container.Names?.some((name) => name === `/${idOrName}`) || container.Labels?.['halfcloud.service.id'] === idOrName,
+      container.Labels?.['halfcloud.managed'] === 'true' && (container.Id === idOrName || (!container.Names?.some((name) => replacementName.test(name)) && (
+        container.Id.startsWith(idOrName) || container.Names?.some((name) => name === `/${idOrName}`) || container.Labels?.['halfcloud.service.id'] === idOrName
+      ))),
     );
     if (!matches.length) throw new Error(`Managed container ${idOrName} was not found`);
     if (matches.length > 1) throw new Error(`Container id ${idOrName} is ambiguous; use the exact name or full id`);
