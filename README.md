@@ -203,7 +203,7 @@ HalfCloud is still early, but the direction is clear.
 
 * **Automatic deployments**: Connect a branch once and let HalfCloud handle the rest. Every push can automatically build, deploy, verify, and switch to the new version.
 
-* **Notifications and outgoing webhooks**: Know when deployments succeed, fail, or need your attention — or forward those events to tools like n8n and build your own workflows.
+* **Continuous monitoring and notifications**: Let HalfCloud keep an eye on your applications and deployments, alert you when something needs attention, and forward important events to tools like n8n through outgoing webhooks.
 
 * **Webhook-triggered actions**: Let external tools trigger HalfCloud actions through simple webhooks — deploy, restart, rollback, investigate a problem with AI, or run other operations. Sensitive actions can require human confirmation before anything changes.
 
