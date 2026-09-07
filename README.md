@@ -201,7 +201,7 @@ HalfCloud is still early, but the direction is clear.
 
 ### Coming next
 
-* **Automatic deployments**: Connect a branch once and let HalfCloud handle the rest. Every push can automatically build, deploy, verify, and switch to the new version.
+* **Broader deployment automation**: GitHub push deployments are available through a guided, signed-webhook setup using saved per-Service recipes. Future work will extend this to more providers and deployment strategies. See [GitHub push deployments](docs/operating-applications.md#github-push-deployments).
 
 * **Continuous monitoring and notifications**: Let HalfCloud keep an eye on your applications and deployments, alert you when something needs attention, and forward important events to tools like n8n through outgoing webhooks.
 

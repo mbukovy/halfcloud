@@ -16,7 +16,7 @@
     "start": "node dist/backend/server.js",
     "update:app": "node dist/backend/update-app.js",
     "typecheck": "tsc -p backend/tsconfig.json --noEmit && vue-tsc -p frontend/tsconfig.json --noEmit",
-    "test": "npm run build:server && node --test tests/*.test.mjs"
+    "test": "npm run build:server && node --test tests/*.test.mjs && node --import tsx --test frontend/tests/*.test.mjs"
   },
   "dependencies": {
     "@ai-sdk/anthropic": "^4.0.44",

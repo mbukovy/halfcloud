@@ -40,9 +40,11 @@ export type AppRecord = z.infer<typeof appSchema>;
 
 export class AppStore {
   private readonly filePath: string;
+  readonly dataDir: string;
 
   constructor(dataDir = process.env.HALFCLOUD_DATA_DIR ?? `${process.env.HOME ?? '/home/halfcloudrunner'}/.halfcloud/data`) {
-    this.filePath = path.join(path.resolve(dataDir), 'apps.json');
+    this.dataDir = path.resolve(dataDir);
+    this.filePath = path.join(this.dataDir, 'apps.json');
   }
 
   async list() {

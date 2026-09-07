@@ -1,9 +1,10 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue';
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, shallowRef, watch } from 'vue';
 import { useChat } from '@ai-sdk/vue';
 import { DefaultChatTransport, lastAssistantMessageIsCompleteWithApprovalResponses, type UIMessage } from 'ai';
 import MarkdownIt from 'markdown-it';
-import { api, type AppInfo, type ContainerInfo, type EnvironmentVariable, type LlmProvider, type LlmSettingsResponse, type ModelInfo, type ProviderMetadata, type PublicSettings, type ServerStats, type ServiceDomain } from './api';
+import { api, safeGitHubWebhookSetup, type GitHubWebhookSetup as GitHubWebhookSetupInfo, type AppInfo, type ContainerInfo, type EnvironmentVariable, type LlmProvider, type LlmSettingsResponse, type ModelInfo, type ProviderMetadata, type PublicSettings, type ServerStats, type ServiceDomain } from './api';
+import GitHubWebhookSetup from './components/GitHubWebhookSetup.vue';
 
 const markdown = new MarkdownIt({ html: false, linkify: true, breaks: true });
 markdown.renderer.rules.link_open = (tokens, index, options, environment, renderer) => {
@@ -50,6 +51,7 @@ const revealedEnvironmentValues = reactive(new Set<string>());
 const environmentRequestForms = reactive<Record<string, { value: string; protectedFromAI: boolean; saving: boolean; error: string }>>({});
 const basicAuthRequestForms = reactive<Record<string, { username: string; password: string; saving: boolean; error: string }>>({});
 const repositorySetupForms = reactive<Record<string, { verifying: boolean; copied: boolean; error: string }>>({});
+const githubWebhookScope = shallowRef(new AbortController());
 const logs = ref<{ id: string; name: string; content: string; tail: number; search: string; reverse: boolean; loading: boolean; error: string } | null>(null);
 const prompt = ref('');
 const transcript = ref<HTMLElement>();
@@ -214,9 +216,10 @@ async function restoreRecentConversation() {
 }
 
 async function loadConversation(id: string) {
-  if (chatBusy.value) await stop();
-  await persistConversation();
+  const scope = suspendGitHubWebhookWidgets();
   try {
+    if (chatBusy.value) await stop();
+    await persistConversation();
     const conversation = await api<ConversationRecord>(`/api/conversations/${encodeURIComponent(id)}`);
     activeConversationId.value = conversation.id;
     messages.value = conversation.messages;
@@ -231,6 +234,8 @@ async function loadConversation(id: string) {
     composerInput.value?.focus();
   } catch (error) {
     dashboardError.value = error instanceof Error ? `Conversation could not be loaded: ${error.message}` : 'Conversation could not be loaded';
+  } finally {
+    if (authenticated.value && githubWebhookScope.value === scope) githubWebhookScope.value = new AbortController();
   }
 }
 
@@ -355,6 +360,7 @@ function toolLabel(part: Record<string, unknown>) {
     removeServiceDomain: 'Removing service domain', setPrimaryServiceDomain: 'Changing primary domain',
     inspectRouteAccess: 'Inspecting route access', requestBasicAuthSetup: 'Protecting route',
     requestBasicAuthPasswordChange: 'Changing route credentials', removeRouteProtection: 'Making route public',
+    requestGitHubWebhookSetup: 'Setting up GitHub automatic updates', getGitHubWebhookSetup: 'Checking GitHub automatic updates',
     getContainerLogs: 'Reading logs', getContainerStats: 'Reading container metrics', getServerStats: 'Reading server metrics',
   };
   return labels[name] ?? name;
@@ -395,6 +401,29 @@ function repositorySetup(part: Record<string, unknown>) {
     title: typeof setup.title === 'string' ? setup.title : 'HalfCloud',
     form: repositorySetupForms[appId]!,
   };
+}
+
+function githubWebhookSetup(part: Record<string, unknown>) {
+  const name = toolName(part);
+  if (name !== 'requestGitHubWebhookSetup' && name !== 'getGitHubWebhookSetup') return undefined;
+  return safeGitHubWebhookSetup(part.output);
+}
+
+function updateGitHubWebhookSetup(part: Record<string, unknown>, value: GitHubWebhookSetupInfo) {
+  if (!authenticated.value || githubWebhookScope.value.signal.aborted
+    || !messages.value.some((message) => message.parts.some((candidate) => candidate === part))) return;
+  const safe = safeGitHubWebhookSetup(value);
+  if (!safe || safe.appId !== githubWebhookSetup(part)?.appId) return;
+  part.output = safe;
+  void persistConversation();
+}
+
+function suspendGitHubWebhookWidgets() {
+  githubWebhookScope.value.abort();
+  const scope = new AbortController();
+  scope.abort();
+  githubWebhookScope.value = scope;
+  return scope;
 }
 
 async function copyRepositoryPublicKey(part: Record<string, unknown>) {
@@ -703,11 +732,17 @@ function formatAccessCode(event: Event) {
 }
 
 async function logout() {
-  await api('/api/auth/logout', { method: 'POST', body: '{}' });
-  clearSession();
+  const scope = suspendGitHubWebhookWidgets();
+  try {
+    await api('/api/auth/logout', { method: 'POST', body: '{}' });
+    clearSession();
+  } finally {
+    if (authenticated.value && githubWebhookScope.value === scope) githubWebhookScope.value = new AbortController();
+  }
 }
 
 function clearSession() {
+  githubWebhookScope.value.abort();
   stop();
   authenticated.value = false;
   apps.value = [];
@@ -805,6 +840,7 @@ function deleteEnvironmentVariable(variable: EnvironmentVariable) {
 
 async function loadDashboard() {
   dashboardError.value = '';
+  githubWebhookScope.value = new AbortController();
   try {
     const [newSettings, newApps, newServer] = await Promise.all([
       api<LlmSettingsResponse>('/api/settings/llm'),
@@ -911,17 +947,22 @@ async function submitPrompt() {
 }
 
 async function newConversation() {
-  await stop();
-  await persistConversation();
-  activeConversationId.value = '';
-  messages.value = [];
-  prompt.value = '';
-  clearError();
-  agentStatus.value = null;
-  agentErrorDetails.value = null;
-  continuedRequestIds.clear();
-  await nextTick();
-  composerInput.value?.focus();
+  const scope = suspendGitHubWebhookWidgets();
+  try {
+    await stop();
+    await persistConversation();
+    activeConversationId.value = '';
+    messages.value = [];
+    prompt.value = '';
+    clearError();
+    agentStatus.value = null;
+    agentErrorDetails.value = null;
+    continuedRequestIds.clear();
+    await nextTick();
+    composerInput.value?.focus();
+  } finally {
+    if (authenticated.value && githubWebhookScope.value === scope) githubWebhookScope.value = new AbortController();
+  }
 }
 
 async function runAction(container: ContainerInfo, action: 'start' | 'stop' | 'restart' | 'delete') {
@@ -1066,6 +1107,7 @@ onMounted(bootstrap);
 onMounted(() => window.addEventListener('halfcloud:unauthorized', clearSession));
 onMounted(() => document.addEventListener('pointerdown', closeHistoryOutside));
 onBeforeUnmount(() => {
+  githubWebhookScope.value.abort();
   if (refreshTimer) window.clearInterval(refreshTimer);
   if (activityTimer) window.clearInterval(activityTimer);
   if (debugCopyTimer) window.clearTimeout(debugCopyTimer);
@@ -1293,6 +1335,13 @@ onBeforeUnmount(() => {
                     <li v-for="(detail, detailIndex) in toolGroupDetails(group.parts)" :key="detailIndex"><a v-if="detail.href" :href="detail.href" target="_blank" rel="noopener noreferrer">{{ detail.text }}</a><template v-else>{{ detail.text }}</template></li>
                   </ul>
                    <template v-for="(part, partIndex) in group.parts" :key="partIndex">
+                   <GitHubWebhookSetup
+                     v-if="githubWebhookSetup(part)"
+                     :key="`${activeConversationId}:${message.id}:${part.toolCallId ?? partIndex}`"
+                     :setup="githubWebhookSetup(part)!"
+                     :scope="githubWebhookScope.signal"
+                     @update="updateGitHubWebhookSetup(part, $event)"
+                   />
                    <div v-if="repositorySetup(part)" class="environment-request-widget repository-setup-widget">
                      <template v-if="repositorySetup(part)!.status === 'verified'">
                        <strong>Repository access confirmed</strong>

@@ -3,6 +3,7 @@ import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import type { UIMessage } from 'ai';
 import { z } from 'zod';
+import { sanitizeGitHubWebhookMessages } from './github-webhook-context.js';
 
 export const conversationMessagesSchema = z.array(z.object({
   id: z.string().min(1),
@@ -80,12 +81,12 @@ export class ConversationStore {
       WHERE id = ?
     `).get(id) as ConversationRow | undefined;
     if (!row) return undefined;
-    const messages = conversationMessagesSchema.parse(JSON.parse(row.messages_json)) as UIMessage[];
+    const messages = sanitizeGitHubWebhookMessages(conversationMessagesSchema.parse(JSON.parse(row.messages_json)) as UIMessage[]);
     return { id: row.id, title: row.title, messages, createdAt: row.created_at, updatedAt: row.updated_at };
   }
 
   save(id: string, inputMessages: UIMessage[]): Conversation {
-    const messages = conversationMessagesSchema.parse(inputMessages) as UIMessage[];
+    const messages = sanitizeGitHubWebhookMessages(conversationMessagesSchema.parse(inputMessages) as UIMessage[]);
     if (!messages.some((message) => message.role === 'user')) throw new Error('A conversation requires a user message');
     const now = new Date().toISOString();
     this.database.prepare(`

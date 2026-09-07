@@ -8,9 +8,11 @@ import { z, ZodError } from 'zod';
 import { AuthService } from './auth.js';
 import { SettingsStore } from './config.js';
 import { DockerService } from './docker.js';
-import { ApplicationService } from './applications.js';
+import { AppBusyError, ApplicationService } from './applications.js';
 import { createChatResponse } from './agent.js';
 import { GitRepositoryError } from './repositories.js';
+import { GitHubWebhookError } from './github-webhooks.js';
+import { githubWebhookReceiver } from './github-webhook-routes.js';
 import { getServerStats } from './metrics.js';
 import { credentialsSchema, llmProviderSchema } from './llm/types.js';
 import { listModels, providerMetadata, testModel } from './llm/index.js';
@@ -38,6 +40,7 @@ async function resolveLlmCredentials(value: unknown): Promise<LlmCredentials> {
 
 app.set('trust proxy', 1);
 app.disable('x-powered-by');
+app.use('/api/webhooks/github', githubWebhookReceiver(() => docker.githubWebhooks));
 app.use(express.json({ limit: '1mb' }));
 app.use(cookieParser());
 app.use('/api', (request, response, next) => {
@@ -133,6 +136,30 @@ app.post('/api/apps/:appId/:action', async (request, response) => {
 });
 app.post('/api/apps/:appId/repository/verify', async (request, response) => {
   response.json(await docker.verifyRepositoryDeployKey(request.params.appId));
+});
+app.post('/api/apps/:appId/github-webhook/setup', async (request, response) => {
+  response.setHeader('Cache-Control', 'no-store');
+  response.json(await docker.requestGitHubWebhookSetup(request.params.appId));
+});
+app.get('/api/apps/:appId/github-webhook', async (request, response) => {
+  response.setHeader('Cache-Control', 'no-store');
+  response.json(await docker.getGitHubWebhookSetup(request.params.appId));
+});
+const webhookIdSchema = z.string().regex(/^[a-f0-9]{64}$/);
+app.post('/api/apps/:appId/github-webhook/secret', async (request, response) => {
+  response.setHeader('Cache-Control', 'no-store');
+  const { hookId } = z.object({ hookId: webhookIdSchema }).strict().parse(request.body);
+  response.json(await docker.githubWebhooks.getSecret(request.params.appId, hookId));
+});
+app.put('/api/apps/:appId/github-webhook', async (request, response) => {
+  response.setHeader('Cache-Control', 'no-store');
+  const { hookId, enabled } = z.object({ hookId: webhookIdSchema, enabled: z.boolean() }).strict().parse(request.body);
+  response.json(await docker.githubWebhooks.setEnabled(request.params.appId, hookId, enabled));
+});
+app.post('/api/apps/:appId/github-webhook/rotate', async (request, response) => {
+  response.setHeader('Cache-Control', 'no-store');
+  const { hookId } = z.object({ hookId: webhookIdSchema }).strict().parse(request.body);
+  response.json(await docker.githubWebhooks.rotateSecret(request.params.appId, hookId));
 });
 app.get('/api/containers', async (_request, response) => response.json(await docker.listContainers()));
 app.get('/api/containers/:id/environment', async (request, response) => {
@@ -260,10 +287,13 @@ app.use((error: unknown, _request: Request, response: Response, _next: NextFunct
   const message = error instanceof ZodError ? error.issues[0]?.message ?? 'Invalid request' : error instanceof Error ? error.message : 'Unexpected error';
   console.error(error instanceof Error ? error.message : error);
   const status = error instanceof ZodError ? 400
+    : error instanceof AppBusyError ? 409
+    : error instanceof GitHubWebhookError ? error.status
     : error instanceof GitRepositoryError
       ? error.code === 'invalid_url' ? 400 : error.code === 'not_found' ? 404 : error.code === 'authentication_required' ? 409 : 502
       : 500;
   if (!response.headersSent) response.status(status).json({ error: message });
 });
 
+if (process.env.HALFCLOUD_HOSTNAME) await docker.githubWebhooks.start();
 app.listen(port, '127.0.0.1', () => console.log(`HalfCloud listening on 127.0.0.1:${port}`));

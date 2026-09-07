@@ -7,10 +7,16 @@ import { DomainStore, normalizeHostname, type ServiceDomain } from './domains.js
 import { EnvironmentStore, assertEnvironmentVariableName, environmentRequestTargets, serializeEnvironmentForAgent, type EnvironmentTarget, type EnvironmentVariable } from './environment.js';
 import { RouteAccessRequestStore, assertBasicAuthPassword, assertBasicAuthUsername, hashBasicAuthPassword } from './route-access.js';
 import { GitRepositoryError, RepositoryService, normalizeRepositoryUrl, type RepositoryUpdateRun, type ServiceUpdateRecipe } from './repositories.js';
+import { GitHubWebhookService, GitHubWebhookError, type GitHubWebhookTarget } from './github-webhooks.js';
+
+export class AppBusyError extends Error {
+  readonly code = 'app_busy';
+}
 
 export class ApplicationService {
   private readonly repositoryOperations = new Set<string>();
   private readonly updatingApps = new Set<string>();
+  private webhookService?: GitHubWebhookService;
 
   constructor(
     private readonly docker: DockerService,
@@ -22,6 +28,38 @@ export class ApplicationService {
     private readonly apps = new AppStore(),
     private readonly repositories = new RepositoryService(apps),
   ) {}
+
+  get githubWebhooks() {
+    return this.webhookService ??= new GitHubWebhookService({
+      target: (appId) => this.githubWebhookTarget(appId),
+      update: (appId) => this.updateGitApp(appId),
+      busy: (appId) => this.repositoryOperations.has(appId),
+    }, this.apps.dataDir);
+  }
+
+  private async githubWebhookTarget(appIdOrName: string): Promise<GitHubWebhookTarget> {
+    return this.withRepositoryOperation(appIdOrName, async (app) => {
+      if (!app.source?.branch) throw new GitHubWebhookError(409, 'A GitHub App with a configured branch is required');
+      const location = normalizeRepositoryUrl(app.source.url);
+      if (location.provider !== 'github') throw new GitHubWebhookError(409, 'This App is not backed by GitHub');
+      const recipes = await this.repositories.getServiceUpdates(app.id);
+      const services = (await this.docker.listContainers(false)).filter((service) => service.appId === app.id);
+      const prefix = `halfcloud/app-${app.id.slice(4).replaceAll('-', '')}:`;
+      const ready = Boolean(app.source.currentCommit) && recipes.length > 0
+        && recipes.every((recipe) => recipe.commit === app.source!.currentCommit && services.some((service) => service.serviceId === recipe.serviceId && service.image === recipe.image))
+        && services.every((service) => !service.image.startsWith(prefix) || recipes.some((recipe) => recipe.serviceId === service.serviceId));
+      return { appId: app.id, appName: app.name, repository: `${location.owner}/${location.repository}`.toLowerCase(), branch: app.source.branch, ready };
+    });
+  }
+
+  requestGitHubWebhookSetup(appIdOrName: string) { return this.githubWebhooks.requestSetup(appIdOrName); }
+
+  async getGitHubWebhookSetup(appIdOrName: string) {
+    const app = await this.apps.get(appIdOrName);
+    const setup = await this.githubWebhooks.getSetup(app.id);
+    if (!setup) throw new GitHubWebhookError(404, 'GitHub webhook setup not found');
+    return setup;
+  }
 
   ping() { return this.docker.ping(); }
   searchContainerImages(input: SearchContainerImagesInput) { return this.docker.searchContainerImages(input); }
@@ -321,7 +359,7 @@ export class ApplicationService {
     const app = await this.apps.get(appIdOrName);
     if (app.source?.type !== 'git') throw new Error('This App is not backed by a Git repository');
     this.assertAppNotUpdating(app.id);
-    if (this.repositoryOperations.has(app.id)) throw new Error('Another repository operation is in progress for this App; wait for it to finish');
+    if (this.repositoryOperations.has(app.id)) throw new AppBusyError('Another repository operation is in progress for this App; wait for it to finish');
     this.repositoryOperations.add(app.id);
     try {
       return await operation(await this.apps.get(app.id));
@@ -410,6 +448,7 @@ export class ApplicationService {
   async deleteApp(idOrName: string, deleteData = false) {
     const app = await this.getApp(idOrName, false);
     this.assertAppNotUpdating(app.id);
+    await this.webhookService?.remove(app.id);
     const deployKeyRemovalUrl = app.source?.authentication === 'ssh-deploy-key' ? app.source.settingsUrl : undefined;
     for (const service of app.services) await this.docker.deleteContainer(service.id);
     await this.docker.deleteAppNetwork(app.id);
@@ -989,7 +1028,11 @@ export class ApplicationService {
   }
 
   private assertAppNotUpdating(appId: string) {
-    if (this.updatingApps.has(appId)) throw new Error('An App update or its recovery is in progress; wait before changing its Services or configuration');
+    if (this.updatingApps.has(appId)) {
+      const message = 'An App update or its recovery is in progress; wait before changing its Services or configuration';
+      if (this.repositoryOperations.has(appId)) throw new AppBusyError(message);
+      throw new Error(message);
+    }
   }
 
   private async assertServiceNotUpdating(id: string) {
