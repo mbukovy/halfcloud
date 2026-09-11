@@ -100,6 +100,7 @@ async function fixture(t, { verify = true } = {}) {
     async listUnusedImages() { return { images: [], totalSize: 0 }; },
     async pruneUnusedImages() { return { deleted: 0, spaceReclaimed: 0 }; },
     async assertImageIdentity() {},
+    async hasContainerReplacements(appId) { return [...this.backups.values()].some((backup) => backup.appId === appId); },
     async beginContainerImageReplacement(id, image) {
       const index = this.services.findIndex((service) => service.id === id);
       assert.notEqual(index, -1);
@@ -124,14 +125,16 @@ async function fixture(t, { verify = true } = {}) {
       this.backups.set(previous.serviceId, { appId: previous.appId, transaction });
       return transaction;
     },
-    async recoverContainerReplacements(committedApps = new Set(), appId) {
-      events.push(committedApps.has(app.id) ? 'recover:forward' : 'recover:rollback');
-      for (const backup of [...this.backups.values()]) {
+    async recoverContainerReplacements(plan = new Map(), appId) {
+      events.push([...plan.get(app.id)?.values() ?? []].some(({ action }) => action === 'commit') ? 'recover:forward' : 'recover:rollback');
+      for (const [serviceId, backup] of [...this.backups]) {
         if (appId && backup.appId !== appId) continue;
-        await backup.transaction[committedApps.has(backup.appId) ? 'commit' : 'rollback']();
+        const action = plan.get(backup.appId)?.get(serviceId)?.action ?? 'rollback';
+        await backup.transaction[action === 'commit' ? 'commit' : 'rollback']();
       }
       return [];
     },
+    async restoreMissingStandaloneReplacements() {},
     async recreateMissingContainerReplacement() {},
   };
   const caddy = { sync: t.mock.fn(async () => { events.push('routes'); }) };
@@ -592,8 +595,8 @@ test('startup publishes the committed plan and commit when finalization failed b
 test('a committed journal finishes forward on restart after partial container cleanup, never rolling back', async (t) => {
   const f = await fixture(t);
   const recover = f.runtime.recoverContainerReplacements.bind(f.runtime);
-  const recovery = t.mock.method(f.runtime, 'recoverContainerReplacements', async (committedApps, appId) => {
-    assert.ok(committedApps.has(f.app.id));
+  const recovery = t.mock.method(f.runtime, 'recoverContainerReplacements', async (plan, appId) => {
+    assert.equal(plan.get(f.app.id)?.size, 2);
     assert.equal(appId, f.app.id);
     assert.equal((await f.repositories.getUpdateRun(f.app.id)).phase, 'committed');
     await f.runtime.backups.values().next().value.transaction.commit();
@@ -616,7 +619,7 @@ test('a committed journal finishes forward on restart after partial container cl
   f.events.length = 0;
   await restarted.recoverUpdates();
   assert.deepEqual(f.events, ['recover:forward', 'cleanup:worker', 'recover:forward', 'routes']);
-  assert.deepEqual(recoverCalls.mock.calls.map((call) => call.arguments), [[new Set([f.app.id]), undefined, new Map()], [new Set([f.app.id]), f.app.id]]);
+  assert.deepEqual(recoverCalls.mock.calls.map((call) => call.arguments.map((argument) => argument instanceof Map ? [...argument.keys()] : argument)), [[[f.app.id]], [[f.app.id], f.app.id]]);
   assert.equal(f.runtime.backups.size, 0);
   assert.equal(await repositories.getUpdateRun(f.app.id), undefined);
   assert.deepEqual(await repositories.getServiceUpdates(f.app.id), run.updates);
@@ -670,10 +673,11 @@ test('startup quarantines a partially finalized update and chat recreates the mi
     name: f.previousServices[0].runtimeName, backupId: 'backup-web', backupName: 'backup-web-pending',
   }];
   let repaired = false;
-  const recover = t.mock.method(f.runtime, 'recoverContainerReplacements', async (committedApps, _appId, repairingServices = new Map()) => {
-    f.events.push(committedApps.has(f.app.id) ? 'recover:forward' : 'recover:rollback');
-    if (repairingServices.get(f.app.id)?.size) return issues;
-    return committedApps.has(f.app.id) && !repaired ? issues : [];
+  const recover = t.mock.method(f.runtime, 'recoverContainerReplacements', async (plan) => {
+    const expectations = plan.get(f.app.id);
+    f.events.push(expectations?.size ? 'recover:forward' : 'recover:rollback');
+    if ([...expectations?.values() ?? []].some(({ action }) => action === 'retain')) return issues;
+    return expectations?.size && !repaired ? issues : [];
   });
   await assert.rejects(f.applications.updateGitApp(f.app.id), /finalization is pending/);
   await f.runtime.backups.get(f.previousUpdates[1].serviceId).transaction.commit();
@@ -703,6 +707,49 @@ test('startup quarantines a partially finalized update and chat recreates the mi
   assert.equal((await f.apps.get(f.app.id)).source.currentCommit, nextCommit);
   recover.mock.restore();
   assert.equal((await f.applications.updateGitApp(f.app.id)).updated, false);
+});
+
+test('chat recovery restores an unrelated retained Service, completes Git recovery, and unlocks the App', async (t) => {
+  const f = await fixture(t);
+  const interrupted = t.mock.method(f.repositories, 'saveServiceUpdates', async () => { throw new Error('Plan publication interrupted'); });
+  await assert.rejects(f.applications.updateGitApp(f.app.id), /finalization is pending/);
+  interrupted.mock.restore();
+  const redis = f.previousServices[2];
+  const issue = {
+    code: 'missing_replacement', appId: f.app.id, serviceId: redis.serviceId,
+    name: redis.runtimeName, backupId: 'redis-backup', backupName: `${redis.runtimeName}-halfcloud-replacement-v1-00000000-0000-4000-8000-000000000000-running-committed`,
+  };
+  let restored = false;
+  const recover = f.runtime.recoverContainerReplacements.bind(f.runtime);
+  t.mock.method(f.runtime, 'recoverContainerReplacements', async (plan, appId) => {
+    assert.equal(plan.get(f.app.id)?.has(redis.serviceId), false, 'the unrelated Service must not inherit the Git commit decision');
+    if (!restored) return [issue];
+    return recover(plan, appId);
+  });
+  const restore = t.mock.method(f.runtime, 'restoreMissingStandaloneReplacements', async (issues) => {
+    assert.deepEqual(issues, [issue]);
+    restored = true;
+  });
+  assert.deepEqual(await f.applications.recoverGitAppUpdate(f.app.id), { appId: f.app.id, recovered: true, result: 'completed' });
+  assert.equal(restore.mock.callCount(), 1);
+  assert.equal(await f.repositories.getUpdateRun(f.app.id), undefined);
+  const added = await f.applications.addService(f.app.id, { name: 'adminer', image: 'adminer:latest', ports: {} });
+  assert.ok(added.services.some(({ name }) => name === 'adminer'));
+});
+
+test('startup resets a committed journal when every Service is provably on the previous generation', async (t) => {
+  const f = await fixture(t);
+  const interrupted = t.mock.method(f.repositories, 'saveServiceUpdates', async () => { throw new Error('Plan publication interrupted'); });
+  await assert.rejects(f.applications.updateGitApp(f.app.id), /finalization is pending/);
+  interrupted.mock.restore();
+  for (const backup of [...f.runtime.backups.values()]) await backup.transaction.rollback();
+  assert.equal((await f.repositories.getUpdateRun(f.app.id)).phase, 'committed');
+  await f.applications.recoverUpdates();
+  assert.equal(await f.repositories.getUpdateRun(f.app.id), undefined);
+  assert.deepEqual(await f.repositories.getServiceUpdates(f.app.id), f.previousUpdates);
+  assert.equal((await f.apps.get(f.app.id)).source.currentCommit, currentCommit);
+  await f.applications.addService(f.app.id, { name: 'adminer', image: 'adminer:latest', ports: {} });
+  assert.ok((await f.applications.getApp(f.app.id, false)).services.some(({ name }) => name === 'adminer'));
 });
 
 test('uncertain commit writes retain all containers and recover forward, including unreadable decisions', async (t) => {

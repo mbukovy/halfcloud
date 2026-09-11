@@ -2,7 +2,7 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { AppStore, type AppRecord } from './apps.js';
 import { CaddyService } from './caddy.js';
-import { DockerService, type ContainerRecoveryIssue, type ContainerReplacement, type CreateContainerInput, type DeploymentProgress, type ManagedVolumeFilter, type SearchContainerImagesInput, type ServiceCommandNetworkMode } from './docker.js';
+import { DockerService, type ContainerRecoveryIssue, type ContainerRecoveryPlan, type ContainerReplacement, type CreateContainerInput, type DeploymentProgress, type ManagedVolumeFilter, type SearchContainerImagesInput, type ServiceCommandNetworkMode } from './docker.js';
 import { DomainStore, normalizeHostname, type ServiceDomain } from './domains.js';
 import { EnvironmentStore, assertEnvironmentVariableName, environmentRequestTargets, serializeEnvironmentForAgent, type EnvironmentTarget, type EnvironmentVariable } from './environment.js';
 import { RouteAccessRequestStore, assertBasicAuthPassword, assertBasicAuthUsername, hashBasicAuthPassword } from './route-access.js';
@@ -304,7 +304,7 @@ export class ApplicationService {
         try {
           for (const replacement of replacements.reverse()) await replacement.rollback();
           if (run) {
-            this.assertContainerRecoveryComplete(await this.docker.recoverContainerReplacements(new Set(), app.id));
+            this.assertContainerRecoveryComplete(await this.docker.recoverContainerReplacements(this.updateRecoveryPlan(app.id, run), app.id));
             await this.repositories.saveServiceUpdates(app.id, previousUpdates);
           }
           await this.syncRoutes();
@@ -323,45 +323,59 @@ export class ApplicationService {
   }
 
   private async finishUpdate(appId: string, run: RepositoryUpdateRun) {
+    if (await this.updateRuntimeGeneration(appId, run) !== 'committed') throw new Error('The running Services do not match the committed update');
     await this.repositories.saveServiceUpdates(appId, run.updates);
     const app = await this.apps.get(appId);
     await this.apps.update(appId, {
       source: { ...app.source!, currentCommit: run.commit },
       deployment: { ...app.deployment, image: undefined, status: 'running', stage: 'running', message: 'Update complete', errorCode: undefined, updatedAt: new Date().toISOString() },
     });
-    this.assertContainerRecoveryComplete(await this.docker.recoverContainerReplacements(new Set([appId]), appId));
+    this.assertContainerRecoveryComplete(await this.docker.recoverContainerReplacements(this.updateRecoveryPlan(appId, run), appId));
     await this.syncRoutes();
     await this.repositories.clearUpdateRun(appId);
   }
 
   async recoverGitAppUpdate(appIdOrName: string, onProgress?: (progress: DeploymentProgress) => void) {
     const app = await this.apps.get(appIdOrName);
-    if (app.source?.type !== 'git') throw new Error('This App is not backed by a Git repository');
     if (this.repositoryOperations.has(app.id)) throw new AppBusyError('Another repository operation is in progress for this App; wait for it to finish');
     this.repositoryOperations.add(app.id);
     this.updatingApps.add(app.id);
     try {
-      const run = await this.repositories.getUpdateRun(app.id);
-      const repairingServiceIds = new Set(run?.repairingServiceIds ?? []);
-      const repairingServices = repairingServiceIds.size ? new Map([[app.id, repairingServiceIds]]) : new Map();
-      const issues = await this.docker.recoverContainerReplacements(run?.phase === 'committed' ? new Set([app.id]) : new Set(), app.id, repairingServices);
+      const run = app.source?.type === 'git' ? await this.repositories.getUpdateRun(app.id) : undefined;
+      const plan = run ? this.updateRecoveryPlan(app.id, run) : new Map();
+      let issues = await this.docker.recoverContainerReplacements(plan, app.id);
+      const claimedServiceIds = new Set(plan.get(app.id)?.keys() ?? []);
+      const standaloneIssues = issues.filter(({ serviceId }) => !claimedServiceIds.has(serviceId));
+      if (standaloneIssues.length) {
+        await this.docker.restoreMissingStandaloneReplacements(standaloneIssues);
+        issues = issues.filter(({ serviceId }) => claimedServiceIds.has(serviceId));
+      }
       if (issues.length) {
-        if (run?.phase === 'committed' && issues.every(({ serviceId }) => run.updates.some((update) => update.serviceId === serviceId))) {
+        if (run?.phase === 'committed') {
           await this.repairCommittedUpdate(app.id, run, issues, onProgress);
           return { appId: app.id, recovered: true, result: 'completed' as const };
         }
         await this.markUpdateRecoveryRequired(app.id, issues);
         throw new Error('This update cannot be recovered automatically because its retained Service does not match the committed update. The Service and recovery record were preserved.');
       }
-      if (!run) return { appId: app.id, recovered: false, message: 'No interrupted update needed recovery' };
+      if (!run) return standaloneIssues.length
+        ? { appId: app.id, recovered: true, result: 'rolled_back' as const }
+        : { appId: app.id, recovered: false, message: 'No interrupted update needed recovery' };
       if (run.phase === 'committed') {
-        await this.finishUpdate(app.id, run);
-        return { appId: app.id, recovered: true, result: 'completed' as const };
+        const generation = await this.updateRuntimeGeneration(app.id, run);
+        if (generation === 'committed') {
+          await this.finishUpdate(app.id, run);
+          return { appId: app.id, recovered: true, result: 'completed' as const };
+        }
+        if (generation === 'previous') {
+          await this.restorePreviousUpdateBaseline(app.id, run);
+          return { appId: app.id, recovered: true, result: 'rolled_back' as const };
+        }
+        await this.repositories.fail(app.id, 'deploying', new Error('Running Services match neither the previous nor committed update generation'));
+        throw new Error('The running Services cannot be reconciled with either saved update generation. No recovery state was removed.');
       }
-      await this.repositories.saveServiceUpdates(app.id, run.previousUpdates);
-      await this.repositories.fail(app.id, 'deploying', new Error('Interrupted update was rolled back to the previous containers'));
-      await this.syncRoutes();
-      await this.repositories.clearUpdateRun(app.id);
+      if (await this.updateRuntimeGeneration(app.id, run) !== 'previous') throw new Error('The rolled-back Services do not match the previous update generation');
+      await this.restorePreviousUpdateBaseline(app.id, run);
       return { appId: app.id, recovered: true, result: 'rolled_back' as const };
     } finally {
       await this.releaseUpdateGuardIfSettled(app.id);
@@ -371,7 +385,9 @@ export class ApplicationService {
 
   private async releaseUpdateGuardIfSettled(appId: string) {
     try {
-      if (!await this.repositories.getUpdateRun(appId)) this.updatingApps.delete(appId);
+      const app = await this.apps.get(appId);
+      const run = app.source?.type === 'git' ? await this.repositories.getUpdateRun(appId) : undefined;
+      if (!run && !await this.docker.hasContainerReplacements(appId)) this.updatingApps.delete(appId);
     } catch {
       // Keep the guard when durable recovery state cannot be read safely.
     }
@@ -386,6 +402,46 @@ export class ApplicationService {
     await this.repositories.fail(appId, 'deploying', new Error(
       `${issues.length === 1 ? 'A replacement Service is' : 'Replacement Services are'} missing from a committed update. Previous Services were retained for safe recovery.`,
     ));
+  }
+
+  private updateRecoveryPlan(appId: string, run: RepositoryUpdateRun): ContainerRecoveryPlan {
+    const previous = new Map(run.previousUpdates.map((update) => [update.serviceId, update]));
+    return new Map([[appId, new Map(run.updates.map((update) => {
+      const prior = previous.get(update.serviceId);
+      if (!prior) throw new Error(`Update recovery is missing the previous image for Service ${update.serviceId}`);
+      return [update.serviceId, {
+        action: run.repairingServiceIds?.includes(update.serviceId) ? 'retain' as const : run.phase === 'committed' ? 'commit' as const : 'rollback' as const,
+        previousImageId: prior.imageId,
+        updateImageId: update.imageId,
+      }];
+    }))]]);
+  }
+
+  private async updateRuntimeGeneration(appId: string, run: RepositoryUpdateRun): Promise<'committed' | 'previous' | 'mixed'> {
+    const services = (await this.getApp(appId, false)).services;
+    const tracked = new Set([...run.previousUpdates, ...run.updates].map(({ serviceId }) => serviceId));
+    const imageIds = new Map<string, string>();
+    for (const serviceId of tracked) {
+      const service = services.find((candidate) => candidate.serviceId === serviceId);
+      if (!service) continue;
+      imageIds.set(serviceId, (await this.docker.inspectContainer(service.id)).imageId);
+    }
+    const matches = (updates: ServiceUpdateRecipe[]) => updates.every((update) => imageIds.get(update.serviceId) === update.imageId);
+    if (matches(run.updates)) return 'committed';
+    if (matches(run.previousUpdates)) return 'previous';
+    return 'mixed';
+  }
+
+  private async restorePreviousUpdateBaseline(appId: string, run: RepositoryUpdateRun) {
+    await this.repositories.saveServiceUpdates(appId, run.previousUpdates);
+    const previousCommits = new Set(run.previousUpdates.map(({ commit }) => commit));
+    const app = await this.apps.get(appId);
+    await this.apps.update(appId, {
+      source: { ...app.source!, ...(previousCommits.size === 1 ? { currentCommit: [...previousCommits][0] } : {}) },
+    });
+    await this.repositories.fail(appId, 'deploying', new Error('Interrupted update was restored to the previous verified Services'));
+    await this.syncRoutes();
+    await this.repositories.clearUpdateRun(appId);
   }
 
   private async repairCommittedUpdate(appId: string, run: RepositoryUpdateRun, issues: ContainerRecoveryIssue[], onProgress?: (progress: DeploymentProgress) => void) {
@@ -424,7 +480,7 @@ export class ApplicationService {
       await this.finishUpdate(appId, committed);
     } catch (error) {
       if (repairCommitted) throw new Error('The repaired update passed verification, but finalization is pending. Recover this App update again to finish safely.');
-      await this.docker.recoverContainerReplacements(new Set([appId]), appId, new Map([[appId, new Set(repairIds)]])).catch(() => undefined);
+      await this.docker.recoverContainerReplacements(this.updateRecoveryPlan(appId, repairing), appId).catch(() => undefined);
       await this.markUpdateRecoveryRequired(appId, issues);
       throw new Error(`The missing Service could not be recreated safely: ${error instanceof Error ? error.message : String(error)}`);
     }
@@ -442,21 +498,27 @@ export class ApplicationService {
         runs.push({ appId: app.id, run });
       }
     }
-    const repairingServices = new Map(runs.flatMap(({ appId, run }) => run.repairingServiceIds?.length
-      ? [[appId, new Set(run.repairingServiceIds)] as const] : []));
-    const issues = await this.docker.recoverContainerReplacements(
-      new Set(runs.filter(({ run }) => run.phase === 'committed').map(({ appId }) => appId)), undefined, repairingServices,
-    );
+    const recoveryPlan = new Map(runs.map(({ appId, run }) => [appId, this.updateRecoveryPlan(appId, run).get(appId)!]));
+    const issues = await this.docker.recoverContainerReplacements(recoveryPlan);
     const unresolvedApps = new Set(issues.map(({ appId }) => appId));
     for (const appId of unresolvedApps) await this.markUpdateRecoveryRequired(appId, issues.filter((issue) => issue.appId === appId));
     for (const { appId, run } of runs) {
       if (unresolvedApps.has(appId)) continue;
-      if (run.phase === 'committed') await this.finishUpdate(appId, run);
+      if (run.phase === 'committed') {
+        const generation = await this.updateRuntimeGeneration(appId, run);
+        if (generation === 'committed') await this.finishUpdate(appId, run);
+        else if (generation === 'previous') await this.restorePreviousUpdateBaseline(appId, run);
+        else {
+          await this.repositories.fail(appId, 'deploying', new Error('Running Services match neither saved update generation'));
+          continue;
+        }
+      }
       else {
-        await this.repositories.saveServiceUpdates(appId, run.previousUpdates);
-        await this.repositories.fail(appId, 'deploying', new Error('Interrupted update was rolled back to the previous containers'));
-        await this.syncRoutes();
-        await this.repositories.clearUpdateRun(appId);
+        if (await this.updateRuntimeGeneration(appId, run) !== 'previous') {
+          await this.repositories.fail(appId, 'deploying', new Error('Recovered Services do not match the previous update generation'));
+          continue;
+        }
+        await this.restorePreviousUpdateBaseline(appId, run);
       }
       this.updatingApps.delete(appId);
     }

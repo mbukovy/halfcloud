@@ -73,10 +73,11 @@ class FakeDocker {
     this.replacements.set(service.serviceId, { appId: service.appId, transaction });
     return transaction;
   }
-  async recoverContainerReplacements(committedApps = new Set(), appId) {
-    for (const replacement of this.replacements.values()) {
+  async recoverContainerReplacements(plan = new Map(), appId) {
+    for (const [serviceId, replacement] of this.replacements) {
       if (appId && replacement.appId !== appId) continue;
-      await replacement.transaction[committedApps.has(replacement.appId) ? 'commit' : 'rollback']();
+      const action = plan.get(replacement.appId)?.get(serviceId)?.action ?? 'rollback';
+      await replacement.transaction[action === 'commit' ? 'commit' : 'rollback']();
     }
     return [];
   }

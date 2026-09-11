@@ -84,7 +84,7 @@ function replacementFixture({ running = true, failure, suffix = '', ownerAppId =
     async listContainers() {
       return Promise.all([...containers.values()].map(async (container) => {
         const value = await container.inspect();
-        return { Id: value.Id, Names: [value.Name], Labels: value.Config.Labels, Image: value.Config.Image, State: value.State.Status };
+        return { Id: value.Id, Names: [value.Name], Labels: value.Config.Labels, Image: value.Config.Image, ImageID: value.Image, State: value.State.Status };
       }));
     },
     getContainer(id) {
@@ -139,6 +139,18 @@ function combineReplacementFixtures(fixtures) {
     },
   };
   return service;
+}
+
+function recoveryPlan(fixtures, action = 'commit') {
+  const entries = Array.isArray(fixtures) ? fixtures : [fixtures];
+  const plan = new Map();
+  for (const { inspection } of entries) {
+    const owner = inspection.Config.Labels['halfcloud.app.id'];
+    const service = inspection.Config.Labels['halfcloud.service.id'];
+    if (!plan.has(owner)) plan.set(owner, new Map());
+    plan.get(owner).set(service, { action, previousImageId: inspection.Image, updateImageId: 'sha256:new-image' });
+  }
+  return plan;
 }
 
 function addInitializationHelper({ containers }, state = 'running') {
@@ -393,7 +405,7 @@ for (const committed of [false, true]) {
       const originalHelper = structuredClone(helper);
       const restarted = Object.create(DockerService.prototype);
       restarted.docker = service.docker;
-      await restarted.recoverContainerReplacements(committed ? new Set([appId]) : undefined);
+      await restarted.recoverContainerReplacements(committed ? recoveryPlan(fixture) : undefined);
       assert.deepEqual([...containers.keys()].sort(), [committed ? 'new-container' : inspection.Id, helper.Id].sort());
       assert.deepEqual(await containers.get(helper.Id).inspect(), originalHelper);
       assert.equal((await restarted.inspectContainer(serviceId)).state, 'running');
@@ -489,16 +501,16 @@ for (const interrupted of [false, true]) {
     for (const { inspection, containers } of fixtures) assert.match((await containers.get(inspection.Id).inspect()).Name, /-pending$/);
     const restarted = Object.create(DockerService.prototype);
     restarted.docker = service.docker;
-    const committedApps = new Set([appId]);
+    const committedServices = recoveryPlan(fixtures);
     if (interrupted) {
       fixtures[1].failures.add('commit-name');
-      await assert.rejects(restarted.recoverContainerReplacements(committedApps), /commit-name failed/);
+      await assert.rejects(restarted.recoverContainerReplacements(committedServices), /commit-name failed/);
       assert.deepEqual([...fixtures[0].containers.keys()], ['new-container']);
       assert.match((await fixtures[1].containers.get(fixtures[1].inspection.Id).inspect()).Name, /-pending$/);
       fixtures[1].failures.clear();
     }
-    await restarted.recoverContainerReplacements(committedApps);
-    await restarted.recoverContainerReplacements(committedApps);
+    await restarted.recoverContainerReplacements(committedServices);
+    await restarted.recoverContainerReplacements(committedServices);
     for (const { inspection, containers, events } of fixtures) {
       assert.equal(containers.size, 1);
       assert.ok(!containers.has(inspection.Id));
@@ -520,7 +532,7 @@ for (const committed of [true, false]) {
     const service = combineReplacementFixtures(fixtures);
     await Promise.all(fixtures.map(({ inspection }) => service.beginContainerImageReplacement(inspection.Config.Labels['halfcloud.service.id'], 'halfcloud/web:latest')));
     const otherEvents = [...fixtures[1].events];
-    await service.recoverContainerReplacements(committed ? new Set([appId, otherAppId]) : undefined, appId);
+    await service.recoverContainerReplacements(committed ? recoveryPlan(fixtures) : undefined, appId);
     assert.deepEqual([...fixtures[0].containers.keys()], [committed ? 'new-container' : 'old-container']);
     assert.equal(fixtures[1].containers.size, 2);
     assert.deepEqual(fixtures[1].events, otherEvents);
@@ -529,6 +541,33 @@ for (const committed of [true, false]) {
     assert.deepEqual([...fixtures[1].containers.keys()], ['old-container-other']);
   });
 }
+
+test('committed Git recovery rolls an unrelated missing pending replacement back', async () => {
+  const fixtures = [replacementFixture(), replacementFixture({ suffix: '-database' })];
+  const service = combineReplacementFixtures(fixtures);
+  await Promise.all(fixtures.map(({ inspection }) => service.beginContainerImageReplacement(inspection.Config.Labels['halfcloud.service.id'], 'halfcloud/web:latest')));
+  fixtures[1].containers.delete('new-container-database');
+  assert.deepEqual(await service.recoverContainerReplacements(recoveryPlan(fixtures[0])), []);
+  assert.deepEqual([...fixtures[0].containers.keys()], ['new-container']);
+  assert.deepEqual([...fixtures[1].containers.keys()], ['old-container-database']);
+  assert.equal((await fixtures[1].containers.get('old-container-database').inspect()).Name, '/app-web-database');
+});
+
+test('explicit recovery restores a missing independently committed replacement', async () => {
+  const fixture = replacementFixture();
+  const transaction = await fixture.service.beginContainerImageReplacement(serviceId, 'halfcloud/web:latest');
+  fixture.failures.add('remove-old');
+  await assert.rejects(transaction.commit(), /remove-old failed/);
+  fixture.failures.clear();
+  fixture.containers.delete('new-container');
+  const issues = await fixture.service.recoverContainerReplacements();
+  assert.equal(issues.length, 1);
+  assert.match((await fixture.containers.get('old-container').inspect()).Name, /-committed$/);
+  await fixture.service.restoreMissingStandaloneReplacements(issues);
+  assert.deepEqual([...fixture.containers.keys()], ['old-container']);
+  assert.equal((await fixture.containers.get('old-container').inspect()).Name, '/app-web');
+  assert.equal((await fixture.service.inspectContainer(serviceId)).state, 'running');
+});
 
 for (const failure of ['backup-name', 'backup-name-after', 'stop', 'create-after']) {
   test(`a ${failure} failure restores name and original running state`, async () => {
@@ -622,7 +661,8 @@ for (const mismatch of ['halfcloud.managed', 'halfcloud.app.id', 'halfcloud.serv
 
 test('recovery ignores unmanaged lookalikes and names outside the controlled convention', async () => {
   for (const managed of [true, false]) {
-    const { service, containers, inspection, events } = replacementFixture();
+    const fixture = replacementFixture();
+    const { service, containers, inspection, events } = fixture;
     const old = containers.get(inspection.Id);
     if (managed) await old.rename({ name: 'app-web-halfcloud-backup-123456' });
     else {
@@ -630,7 +670,7 @@ test('recovery ignores unmanaged lookalikes and names outside the controlled con
       inspection.Config.Labels['halfcloud.managed'] = 'false';
     }
     const before = events.length;
-    await service.recoverContainerReplacements(new Set([appId]));
+    await service.recoverContainerReplacements(recoveryPlan(fixture));
     assert.equal(events.length, before);
     assert.deepEqual((await service.listContainers(false)).map(({ id }) => id), [managed ? inspection.Id : 'new-container']);
     if (managed) assert.equal((await service.inspectContainer(serviceId)).id, inspection.Id);
@@ -639,11 +679,12 @@ test('recovery ignores unmanaged lookalikes and names outside the controlled con
 });
 
 test('a committed group can recreate a missing replacement from its retained configuration', async () => {
-  const { service, containers, events } = replacementFixture();
+  const fixture = replacementFixture();
+  const { service, containers, events } = fixture;
   await service.beginContainerImageReplacement(serviceId, 'halfcloud/web:latest');
   containers.delete('new-container');
   const before = events.length;
-  const issues = await service.recoverContainerReplacements(new Set([appId]));
+  const issues = await service.recoverContainerReplacements(recoveryPlan(fixture));
   assert.deepEqual(issues.map(({ code, appId: owner, serviceId: service }) => ({ code, appId: owner, serviceId: service })), [{
     code: 'missing_replacement', appId, serviceId,
   }]);
@@ -651,17 +692,18 @@ test('a committed group can recreate a missing replacement from its retained con
   assert.match((await containers.get('old-container').inspect()).Name, /-pending$/);
   await service.recreateMissingContainerReplacement(issues[0], 'halfcloud/web:latest', 'sha256:new-image');
   assert.equal((await service.inspectContainer(serviceId)).id, 'new-container');
-  assert.deepEqual(await service.recoverContainerReplacements(new Set([appId])), []);
+  assert.deepEqual(await service.recoverContainerReplacements(recoveryPlan(fixture)), []);
   assert.deepEqual([...containers.keys()], ['new-container']);
 });
 
 test('startup discards an interrupted unverified repair and retains the previous container', async () => {
-  const { service, containers } = replacementFixture();
+  const fixture = replacementFixture();
+  const { service, containers } = fixture;
   await service.beginContainerImageReplacement(serviceId, 'halfcloud/web:latest');
   containers.delete('new-container');
-  const [issue] = await service.recoverContainerReplacements(new Set([appId]));
+  const [issue] = await service.recoverContainerReplacements(recoveryPlan(fixture));
   await service.recreateMissingContainerReplacement(issue, 'halfcloud/web:latest', 'sha256:new-image');
-  const issues = await service.recoverContainerReplacements(new Set([appId]), appId, new Map([[appId, new Set([serviceId])]]));
+  const issues = await service.recoverContainerReplacements(recoveryPlan(fixture, 'retain'), appId);
   assert.equal(issues.length, 1);
   assert.deepEqual([...containers.keys()], ['old-container']);
   assert.match((await containers.get('old-container').inspect()).Name, /-pending$/);
@@ -671,7 +713,7 @@ test('missing replacement repair refuses an active persisted initialization help
   const fixture = replacementFixture();
   await fixture.service.beginContainerImageReplacement(serviceId, 'halfcloud/web:latest');
   fixture.containers.delete('new-container');
-  const [issue] = await fixture.service.recoverContainerReplacements(new Set([appId]));
+  const [issue] = await fixture.service.recoverContainerReplacements(recoveryPlan(fixture));
   addInitializationHelper(fixture);
   await assert.rejects(
     fixture.service.recreateMissingContainerReplacement(issue, 'halfcloud/web:latest', 'sha256:new-image'),

@@ -63,6 +63,14 @@ export interface ContainerRecoveryIssue {
   backupName: string;
 }
 
+export interface ContainerRecoveryExpectation {
+  action: 'commit' | 'rollback' | 'retain';
+  previousImageId: string;
+  updateImageId: string;
+}
+
+export type ContainerRecoveryPlan = ReadonlyMap<string, ReadonlyMap<string, ContainerRecoveryExpectation>>;
+
 interface PreparedContainerReplacement {
   appId: string;
   serviceId: string;
@@ -1050,9 +1058,9 @@ export class DockerService {
     return { appId, serviceId, config, hostConfig, endpoints, expectedImageId };
   }
 
-  // committedApps must come from durable group decisions. Run at startup, or scope to an App whose updates are locked.
+  // Git decisions claim exact Services. Unclaimed replacements follow their own pending/committed name journal.
   // Ambiguous recovery errors stay fatal; a specifically missing committed replacement is returned for App-level quarantine.
-  async recoverContainerReplacements(committedApps: ReadonlySet<string> = new Set(), appId?: string, repairingServices: ReadonlyMap<string, ReadonlySet<string>> = new Map()): Promise<ContainerRecoveryIssue[]> {
+  async recoverContainerReplacements(plan: ContainerRecoveryPlan = new Map(), appId?: string): Promise<ContainerRecoveryIssue[]> {
     const containers = await this.docker.listContainers({ all: true, filters: { label: [
       'halfcloud.managed=true',
       ...(appId !== undefined ? [`halfcloud.app.id=${appId}`] : []),
@@ -1068,10 +1076,10 @@ export class DockerService {
     const issues: ContainerRecoveryIssue[] = [];
     for (const backup of backups) {
       const serviceId = containers.find((container) => container.Id === backup.id)?.Labels?.['halfcloud.service.id'];
-      const repairing = backup.appId !== undefined && serviceId !== undefined && repairingServices.get(backup.appId)?.has(serviceId) === true;
-      const committed = backup.name.endsWith('-committed') || (backup.appId !== undefined && committedApps.has(backup.appId));
+      const expectation = backup.appId !== undefined && serviceId !== undefined ? plan.get(backup.appId)?.get(serviceId) : undefined;
+      const action = expectation?.action ?? (backup.name.endsWith('-committed') ? 'commit' : 'rollback');
       try {
-        await this.finishContainerReplacement(backup.id, backup.name, repairing ? 'retain' : committed ? 'commit' : 'rollback');
+        await this.finishContainerReplacement(backup.id, backup.name, action, expectation);
       } catch (error) {
         if (error instanceof MissingContainerReplacementError) issues.push(error.issue);
         else throw error;
@@ -1080,7 +1088,40 @@ export class DockerService {
     return issues;
   }
 
-  private async finishContainerReplacement(id: string, backupName: string, action: 'commit' | 'rollback' | 'retain'): Promise<void> {
+  async hasContainerReplacements(appId: string): Promise<boolean> {
+    const containers = await this.docker.listContainers({ all: true, filters: { label: [
+      'halfcloud.managed=true', `halfcloud.app.id=${appId}`,
+    ] } });
+    return containers.some((container) => container.Labels?.['halfcloud.managed'] === 'true'
+      && container.Labels['halfcloud.app.id'] === appId && container.Names?.some((name) => replacementName.test(name)));
+  }
+
+  async restoreMissingStandaloneReplacements(issues: ContainerRecoveryIssue[]): Promise<void> {
+    const prepared = [];
+    for (const issue of issues) {
+      const container = this.docker.getContainer(issue.backupId);
+      const inspection = await container.inspect();
+      const currentName = inspection.Name.replace(/^\//, '');
+      const match = replacementName.exec(currentName);
+      const labels = inspection.Config.Labels;
+      if (!match || !currentName.endsWith('-committed') || issue.backupName !== currentName || match[1] !== issue.name
+        || labels?.['halfcloud.managed'] !== 'true' || labels['halfcloud.app.id'] !== issue.appId || labels['halfcloud.service.id'] !== issue.serviceId) {
+        throw new Error(`Replacement backup ${issue.backupId} has mismatched identity`);
+      }
+      const candidates = (await this.docker.listContainers({ all: true })).filter((candidate) => candidate.Id !== issue.backupId
+        && !isServiceInitializationContainer(candidate, issue.appId, issue.serviceId, issue.name)
+        && (candidate.Names?.includes(`/${issue.name}`) || candidate.Labels?.['halfcloud.service.id'] === issue.serviceId));
+      if (candidates.length) throw new Error(`Replacement for ${issue.name} appeared during restoration`);
+      prepared.push({ issue, container, pendingName: currentName.replace(/-committed$/, '-pending') });
+    }
+    for (const { issue, container, pendingName } of prepared) {
+      // Renaming first durably changes the standalone decision to rollback; startup can finish after a crash.
+      await container.rename({ name: pendingName });
+      await this.finishContainerReplacement(issue.backupId, pendingName, 'rollback');
+    }
+  }
+
+  private async finishContainerReplacement(id: string, backupName: string, action: 'commit' | 'rollback' | 'retain', expectation?: ContainerRecoveryExpectation): Promise<void> {
     const match = replacementName.exec(backupName);
     if (!match) throw new Error('Invalid replacement backup name');
     const name = match[1]!;
@@ -1100,6 +1141,7 @@ export class DockerService {
       throw new Error(`Replacement backup ${id} has mismatched identity`);
     }
     if (action === 'rollback' && currentName === committedName) throw new Error('Cannot roll back a committed container replacement');
+    if (expectation && inspection.Image !== expectation.previousImageId) throw new Error(`Replacement backup ${id} has an unexpected image; refusing recovery`);
     const containers = await this.docker.listContainers({ all: true });
     const candidates = containers.filter((candidate) => candidate.Id !== id
       && !isServiceInitializationContainer(candidate, labels['halfcloud.app.id']!, labels['halfcloud.service.id']!, name)
@@ -1112,6 +1154,7 @@ export class DockerService {
       || replacement.Labels['halfcloud.service.id'] !== labels['halfcloud.service.id']
       || replacement.Labels[replacementLabel] !== pendingName
     ))) throw new Error(`Replacement for ${name} has mismatched identity; refusing recovery`);
+    if (expectation && replacement && replacement.ImageID !== expectation.updateImageId) throw new Error(`Replacement for ${name} has an unexpected image; refusing recovery`);
     if (action === 'retain') {
       if (replacement) await this.docker.getContainer(replacement.Id).remove({ force: true, v: false });
       throw new MissingContainerReplacementError({
