@@ -33,7 +33,7 @@ export class ApplicationService {
     return this.webhookService ??= new GitHubWebhookService({
       target: (appId) => this.githubWebhookTarget(appId),
       update: (appId) => this.updateGitApp(appId),
-      busy: (appId) => this.repositoryOperations.has(appId),
+      busy: (appId) => this.repositoryOperations.has(appId) || this.updatingApps.has(appId),
     }, this.apps.dataDir);
   }
 
@@ -294,12 +294,12 @@ export class ApplicationService {
             run = persisted;
           } catch {
             recovered = false;
-            throw new Error('The update commit decision could not be read. Containers were retained; restart HalfCloud to recover safely.');
+            throw new Error('The update commit decision could not be read. Containers were retained; recover this App update before trying again.');
           }
         }
         if (run?.phase === 'committed') {
           recovered = false;
-          throw new Error('The update passed verification and was committed, but finalization is pending. Restart HalfCloud to finish recovery; do not rebuild or replace the App.');
+          throw new Error('The update passed verification and was committed, but finalization is pending. Recover this App update to finish safely; do not rebuild or replace the App.');
         }
         try {
           for (const replacement of replacements.reverse()) await replacement.rollback();
@@ -312,11 +312,12 @@ export class ApplicationService {
           if (run) await this.repositories.clearUpdateRun(app.id);
         } catch (rollbackError) {
           recovered = false;
-          throw new AggregateError([error, rollbackError], 'Update failed and recovery is incomplete. Previous containers were retained; restart HalfCloud to retry recovery.');
+          throw new AggregateError([error, rollbackError], 'Update failed and recovery is incomplete. Previous containers were retained; recover this App update before trying again.');
         }
         throw error;
       } finally {
         if (recovered) this.updatingApps.delete(app.id);
+        else await this.releaseUpdateGuardIfSettled(app.id);
       }
     });
   }
@@ -331,6 +332,39 @@ export class ApplicationService {
     await this.docker.recoverContainerReplacements(new Set([appId]), appId);
     await this.syncRoutes();
     await this.repositories.clearUpdateRun(appId);
+  }
+
+  async recoverGitAppUpdate(appIdOrName: string) {
+    const app = await this.apps.get(appIdOrName);
+    if (app.source?.type !== 'git') throw new Error('This App is not backed by a Git repository');
+    if (this.repositoryOperations.has(app.id)) throw new AppBusyError('Another repository operation is in progress for this App; wait for it to finish');
+    this.repositoryOperations.add(app.id);
+    this.updatingApps.add(app.id);
+    try {
+      const run = await this.repositories.getUpdateRun(app.id);
+      if (!run) return { appId: app.id, recovered: false, message: 'No interrupted update needed recovery' };
+      await this.docker.recoverContainerReplacements(run.phase === 'committed' ? new Set([app.id]) : new Set(), app.id);
+      if (run.phase === 'committed') {
+        await this.finishUpdate(app.id, run);
+        return { appId: app.id, recovered: true, result: 'completed' as const };
+      }
+      await this.repositories.saveServiceUpdates(app.id, run.previousUpdates);
+      await this.repositories.fail(app.id, 'deploying', new Error('Interrupted update was rolled back to the previous containers'));
+      await this.syncRoutes();
+      await this.repositories.clearUpdateRun(app.id);
+      return { appId: app.id, recovered: true, result: 'rolled_back' as const };
+    } finally {
+      await this.releaseUpdateGuardIfSettled(app.id);
+      this.repositoryOperations.delete(app.id);
+    }
+  }
+
+  private async releaseUpdateGuardIfSettled(appId: string) {
+    try {
+      if (!await this.repositories.getUpdateRun(appId)) this.updatingApps.delete(appId);
+    } catch {
+      // Keep the guard when durable recovery state cannot be read safely.
+    }
   }
 
   async recoverUpdates() {
@@ -1030,8 +1064,7 @@ export class ApplicationService {
   private assertAppNotUpdating(appId: string) {
     if (this.updatingApps.has(appId)) {
       const message = 'An App update or its recovery is in progress; wait before changing its Services or configuration';
-      if (this.repositoryOperations.has(appId)) throw new AppBusyError(message);
-      throw new Error(message);
+      throw new AppBusyError(message);
     }
   }
 

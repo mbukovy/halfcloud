@@ -624,6 +624,39 @@ test('a committed journal finishes forward on restart after partial container cl
   assert.equal(f.runtime.backups.size, 0);
 });
 
+test('chat recovery finishes a committed update without restarting HalfCloud', async (t) => {
+  const f = await fixture(t);
+  const interrupted = t.mock.method(f.repositories, 'saveServiceUpdates', async () => { throw new Error('Plan publication interrupted'); });
+  await assert.rejects(f.applications.updateGitApp(f.app.id), /finalization is pending/);
+  assert.equal((await f.repositories.getUpdateRun(f.app.id)).phase, 'committed');
+  interrupted.mock.restore();
+  const result = await f.applications.recoverGitAppUpdate(f.app.id);
+  assert.deepEqual(result, { appId: f.app.id, recovered: true, result: 'completed' });
+  assert.equal(await f.repositories.getUpdateRun(f.app.id), undefined);
+  assert.equal(f.runtime.backups.size, 0);
+  assert.equal((await f.apps.get(f.app.id)).source.currentCommit, nextCommit);
+  assert.equal((await f.applications.updateGitApp(f.app.id)).updated, false);
+});
+
+test('a removed recovery journal releases the guard even when its directory sync reports failure', async (t) => {
+  const f = await fixture(t);
+  const clear = f.repositories.clearUpdateRun.bind(f.repositories);
+  let failed = false;
+  t.mock.method(f.repositories, 'clearUpdateRun', async (appId) => {
+    await clear(appId);
+    if (!failed) {
+      failed = true;
+      throw new Error('Directory sync failed after journal removal');
+    }
+  });
+  await assert.rejects(f.applications.updateGitApp(f.app.id), /finalization is pending/);
+  assert.equal(await f.repositories.getUpdateRun(f.app.id), undefined);
+  assert.deepEqual(await f.applications.recoverGitAppUpdate(f.app.id), {
+    appId: f.app.id, recovered: false, message: 'No interrupted update needed recovery',
+  });
+  assert.equal((await f.applications.updateGitApp(f.app.id)).updated, false);
+});
+
 test('uncertain commit writes retain all containers and recover forward, including unreadable decisions', async (t) => {
   for (const unreadable of [false, true]) await t.test(unreadable ? 'decision reread fails closed' : 'committed rename followed by sync failure', async (t) => {
     const f = await fixture(t);
@@ -642,7 +675,7 @@ test('uncertain commit writes retain all containers and recover forward, includi
       return read(appId);
     });
     await assert.rejects(f.applications.updateGitApp(f.app.id), unreadable ? /commit decision could not be read/ : /committed, but finalization is pending/);
-    assert.equal(reread.mock.callCount(), 2);
+    assert.equal(reread.mock.callCount(), 3);
     const run = await read(f.app.id);
     assert.equal(run.phase, 'committed');
     assert.equal(f.runtime.backups.size, 2);
