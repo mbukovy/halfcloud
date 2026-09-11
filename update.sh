@@ -26,7 +26,9 @@ id "${HALFCLOUD_USER}" >/dev/null 2>&1 || fail "The ${HALFCLOUD_USER} account do
 [[ -d "${INSTALL_DIR}" ]] || fail "HalfCloud is not installed at ${INSTALL_DIR}."
 [[ -f "${INSTALL_DIR}/package.json" ]] || fail "The existing HalfCloud installation is incomplete."
 [[ -f /etc/systemd/system/halfcloud.service ]] || fail "halfcloud.service is not installed."
-systemctl is-active --quiet halfcloud.service || fail "halfcloud.service is not running; resolve that before updating."
+if ! systemctl is-active --quiet halfcloud.service; then
+  warning "halfcloud.service is not running; updating the installed release to attempt recovery."
+fi
 command -v curl >/dev/null 2>&1 || fail "curl is required."
 command -v npm >/dev/null 2>&1 || fail "npm is required."
 command -v flock >/dev/null 2>&1 || fail "flock is required."

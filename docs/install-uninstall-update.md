@@ -67,7 +67,7 @@ Update an installed and healthy control plane to the current `main` branch with:
 curl -fsSL https://raw.githubusercontent.com/mbukovy/halfcloud/main/update.sh | sudo bash
 ```
 
-The updater requires `halfcloud.service` to be running. It takes a non-blocking host lock so two updates cannot run concurrently.
+The updater can also replace an installed release when `halfcloud.service` is not running, allowing a broken control-plane release to be repaired. It takes a non-blocking host lock so two updates cannot run concurrently.
 
 The new release is downloaded, dependencies are installed, and assets are built before the current service is stopped. During the final swap:
 
