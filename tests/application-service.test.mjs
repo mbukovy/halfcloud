@@ -78,6 +78,7 @@ class FakeDocker {
       if (appId && replacement.appId !== appId) continue;
       await replacement.transaction[committedApps.has(replacement.appId) ? 'commit' : 'rollback']();
     }
+    return [];
   }
   async getContainerEnvironment(id) {
     const service = this.services.find((service) => service.id === id || service.serviceId === id);

@@ -2,7 +2,7 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { AppStore, type AppRecord } from './apps.js';
 import { CaddyService } from './caddy.js';
-import { DockerService, type ContainerReplacement, type CreateContainerInput, type DeploymentProgress, type ManagedVolumeFilter, type SearchContainerImagesInput, type ServiceCommandNetworkMode } from './docker.js';
+import { DockerService, type ContainerRecoveryIssue, type ContainerReplacement, type CreateContainerInput, type DeploymentProgress, type ManagedVolumeFilter, type SearchContainerImagesInput, type ServiceCommandNetworkMode } from './docker.js';
 import { DomainStore, normalizeHostname, type ServiceDomain } from './domains.js';
 import { EnvironmentStore, assertEnvironmentVariableName, environmentRequestTargets, serializeEnvironmentForAgent, type EnvironmentTarget, type EnvironmentVariable } from './environment.js';
 import { RouteAccessRequestStore, assertBasicAuthPassword, assertBasicAuthUsername, hashBasicAuthPassword } from './route-access.js';
@@ -304,7 +304,7 @@ export class ApplicationService {
         try {
           for (const replacement of replacements.reverse()) await replacement.rollback();
           if (run) {
-            await this.docker.recoverContainerReplacements(new Set(), app.id);
+            this.assertContainerRecoveryComplete(await this.docker.recoverContainerReplacements(new Set(), app.id));
             await this.repositories.saveServiceUpdates(app.id, previousUpdates);
           }
           await this.syncRoutes();
@@ -329,7 +329,7 @@ export class ApplicationService {
       source: { ...app.source!, currentCommit: run.commit },
       deployment: { ...app.deployment, image: undefined, status: 'running', stage: 'running', message: 'Update complete', errorCode: undefined, updatedAt: new Date().toISOString() },
     });
-    await this.docker.recoverContainerReplacements(new Set([appId]), appId);
+    this.assertContainerRecoveryComplete(await this.docker.recoverContainerReplacements(new Set([appId]), appId));
     await this.syncRoutes();
     await this.repositories.clearUpdateRun(appId);
   }
@@ -342,8 +342,25 @@ export class ApplicationService {
     this.updatingApps.add(app.id);
     try {
       const run = await this.repositories.getUpdateRun(app.id);
+      const issues = await this.docker.recoverContainerReplacements(run?.phase === 'committed' ? new Set([app.id]) : new Set(), app.id);
+      if (issues.length) {
+        if (run?.phase === 'committed' && this.isCompleteMissingReplacementSet(run, issues)) {
+          await this.docker.rollbackMissingContainerReplacements(issues);
+          await this.repositories.saveServiceUpdates(app.id, run.previousUpdates);
+          const restoredCommit = new Set(run.previousUpdates.map(({ commit }) => commit));
+          const current = await this.apps.get(app.id);
+          await this.apps.update(app.id, {
+            source: { ...current.source!, ...(restoredCommit.size === 1 ? { currentCommit: [...restoredCommit][0] } : {}) },
+          });
+          await this.repositories.fail(app.id, 'deploying', new Error('The incomplete committed update was rolled back to the previous Services'));
+          await this.syncRoutes();
+          await this.repositories.clearUpdateRun(app.id);
+          return { appId: app.id, recovered: true, result: 'rolled_back' as const };
+        }
+        await this.markUpdateRecoveryRequired(app.id, issues);
+        throw new Error('This update cannot be recovered automatically because only part of the committed App can be restored. The retained Services and recovery record were preserved.');
+      }
       if (!run) return { appId: app.id, recovered: false, message: 'No interrupted update needed recovery' };
-      await this.docker.recoverContainerReplacements(run.phase === 'committed' ? new Set([app.id]) : new Set(), app.id);
       if (run.phase === 'committed') {
         await this.finishUpdate(app.id, run);
         return { appId: app.id, recovered: true, result: 'completed' as const };
@@ -367,6 +384,22 @@ export class ApplicationService {
     }
   }
 
+  private assertContainerRecoveryComplete(issues: ContainerRecoveryIssue[]) {
+    if (issues.length) throw new Error('A committed update is missing a replacement Service; the previous Service and recovery record were retained');
+  }
+
+  private isCompleteMissingReplacementSet(run: RepositoryUpdateRun, issues: ContainerRecoveryIssue[]) {
+    const expected = new Set(run.updates.map(({ serviceId }) => serviceId));
+    return issues.length === expected.size && issues.every(({ serviceId }) => expected.delete(serviceId)) && expected.size === 0;
+  }
+
+  private async markUpdateRecoveryRequired(appId: string, issues: ContainerRecoveryIssue[]) {
+    this.updatingApps.add(appId);
+    await this.repositories.fail(appId, 'deploying', new Error(
+      `${issues.length === 1 ? 'A replacement Service is' : 'Replacement Services are'} missing from a committed update. Previous Services were retained for safe recovery.`,
+    ));
+  }
+
   async recoverUpdates() {
     const runs = [];
     for (const app of await this.apps.list()) {
@@ -374,10 +407,16 @@ export class ApplicationService {
       const run = await this.repositories.getUpdateRun(app.id);
       // A previous process may have seen a rename succeed but its directory fsync fail.
       if (run?.phase === 'committed') await this.repositories.saveUpdateRun(app.id, run);
-      if (run) runs.push({ appId: app.id, run });
+      if (run) {
+        this.updatingApps.add(app.id);
+        runs.push({ appId: app.id, run });
+      }
     }
-    await this.docker.recoverContainerReplacements(new Set(runs.filter(({ run }) => run.phase === 'committed').map(({ appId }) => appId)));
+    const issues = await this.docker.recoverContainerReplacements(new Set(runs.filter(({ run }) => run.phase === 'committed').map(({ appId }) => appId)));
+    const unresolvedApps = new Set(issues.map(({ appId }) => appId));
+    for (const appId of unresolvedApps) await this.markUpdateRecoveryRequired(appId, issues.filter((issue) => issue.appId === appId));
     for (const { appId, run } of runs) {
+      if (unresolvedApps.has(appId)) continue;
       if (run.phase === 'committed') await this.finishUpdate(appId, run);
       else {
         await this.repositories.saveServiceUpdates(appId, run.previousUpdates);

@@ -643,9 +643,14 @@ test('a committed group with a missing replacement fails closed rather than roll
   await service.beginContainerImageReplacement(serviceId, 'halfcloud/web:latest');
   containers.delete('new-container');
   const before = events.length;
-  await assert.rejects(service.recoverContainerReplacements(new Set([appId])), /missing; refusing commit/);
+  const issues = await service.recoverContainerReplacements(new Set([appId]));
+  assert.deepEqual(issues.map(({ code, appId: owner, serviceId: service }) => ({ code, appId: owner, serviceId: service })), [{
+    code: 'missing_replacement', appId, serviceId,
+  }]);
   assert.equal(events.length, before);
   assert.match((await containers.get('old-container').inspect()).Name, /-pending$/);
+  await service.rollbackMissingContainerReplacements(issues);
+  assert.equal((await service.inspectContainer(serviceId)).id, 'old-container');
 });
 
 test('startup recovery propagates restoration errors and leaves the recovery marker intact', async () => {

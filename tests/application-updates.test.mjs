@@ -127,6 +127,10 @@ async function fixture(t, { verify = true } = {}) {
         if (appId && backup.appId !== appId) continue;
         await backup.transaction[committedApps.has(backup.appId) ? 'commit' : 'rollback']();
       }
+      return [];
+    },
+    async rollbackMissingContainerReplacements(issues) {
+      for (const issue of issues) await this.backups.get(issue.serviceId).transaction.rollback();
     },
   };
   const caddy = { sync: t.mock.fn(async () => { events.push('routes'); }) };
@@ -655,6 +659,32 @@ test('a removed recovery journal releases the guard even when its directory sync
     appId: f.app.id, recovered: false, message: 'No interrupted update needed recovery',
   });
   assert.equal((await f.applications.updateGitApp(f.app.id)).updated, false);
+});
+
+test('startup quarantines missing committed replacements and chat restores a complete previous generation', async (t) => {
+  const f = await fixture(t);
+  const issues = f.previousUpdates.map(({ serviceId }, index) => ({
+    code: 'missing_replacement', appId: f.app.id, serviceId,
+    name: f.previousServices[index].runtimeName, backupId: `backup-${index}`, backupName: `backup-${index}-pending`,
+  }));
+  const recover = t.mock.method(f.runtime, 'recoverContainerReplacements', async (committedApps) => {
+    f.events.push(committedApps.has(f.app.id) ? 'recover:forward' : 'recover:rollback');
+    return committedApps.has(f.app.id) ? issues : [];
+  });
+  await assert.rejects(f.applications.updateGitApp(f.app.id), /finalization is pending/);
+  assert.equal((await f.repositories.getUpdateRun(f.app.id)).phase, 'committed');
+  await f.applications.recoverUpdates();
+  assert.equal((await f.repositories.getUpdateRun(f.app.id)).phase, 'committed');
+  assert.equal((await f.apps.get(f.app.id)).deployment.status, 'failed');
+  await assert.rejects(f.applications.startApp(f.app.id), /update or its recovery is in progress/);
+  const result = await f.applications.recoverGitAppUpdate(f.app.id);
+  assert.deepEqual(result, { appId: f.app.id, recovered: true, result: 'rolled_back' });
+  assert.equal(await f.repositories.getUpdateRun(f.app.id), undefined);
+  assert.deepEqual(f.runtime.services, f.previousServices);
+  assert.deepEqual(await f.repositories.getServiceUpdates(f.app.id), f.previousUpdates);
+  assert.equal((await f.apps.get(f.app.id)).source.currentCommit, currentCommit);
+  recover.mock.restore();
+  assert.equal((await f.applications.updateGitApp(f.app.id)).updated, true);
 });
 
 test('uncertain commit writes retain all containers and recover forward, including unreadable decisions', async (t) => {
