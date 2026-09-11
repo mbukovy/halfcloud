@@ -638,7 +638,7 @@ test('recovery ignores unmanaged lookalikes and names outside the controlled con
   }
 });
 
-test('a committed group with a missing replacement fails closed rather than rolling back', async () => {
+test('a committed group can recreate a missing replacement from its retained configuration', async () => {
   const { service, containers, events } = replacementFixture();
   await service.beginContainerImageReplacement(serviceId, 'halfcloud/web:latest');
   containers.delete('new-container');
@@ -649,8 +649,35 @@ test('a committed group with a missing replacement fails closed rather than roll
   }]);
   assert.equal(events.length, before);
   assert.match((await containers.get('old-container').inspect()).Name, /-pending$/);
-  await service.rollbackMissingContainerReplacements(issues);
-  assert.equal((await service.inspectContainer(serviceId)).id, 'old-container');
+  await service.recreateMissingContainerReplacement(issues[0], 'halfcloud/web:latest', 'sha256:new-image');
+  assert.equal((await service.inspectContainer(serviceId)).id, 'new-container');
+  assert.deepEqual(await service.recoverContainerReplacements(new Set([appId])), []);
+  assert.deepEqual([...containers.keys()], ['new-container']);
+});
+
+test('startup discards an interrupted unverified repair and retains the previous container', async () => {
+  const { service, containers } = replacementFixture();
+  await service.beginContainerImageReplacement(serviceId, 'halfcloud/web:latest');
+  containers.delete('new-container');
+  const [issue] = await service.recoverContainerReplacements(new Set([appId]));
+  await service.recreateMissingContainerReplacement(issue, 'halfcloud/web:latest', 'sha256:new-image');
+  const issues = await service.recoverContainerReplacements(new Set([appId]), appId, new Map([[appId, new Set([serviceId])]]));
+  assert.equal(issues.length, 1);
+  assert.deepEqual([...containers.keys()], ['old-container']);
+  assert.match((await containers.get('old-container').inspect()).Name, /-pending$/);
+});
+
+test('missing replacement repair refuses an active persisted initialization helper', async () => {
+  const fixture = replacementFixture();
+  await fixture.service.beginContainerImageReplacement(serviceId, 'halfcloud/web:latest');
+  fixture.containers.delete('new-container');
+  const [issue] = await fixture.service.recoverContainerReplacements(new Set([appId]));
+  addInitializationHelper(fixture);
+  await assert.rejects(
+    fixture.service.recreateMissingContainerReplacement(issue, 'halfcloud/web:latest', 'sha256:new-image'),
+    /initialization command is active/,
+  );
+  assert.deepEqual([...fixture.containers.keys()], ['old-container', 'initialization-helper']);
 });
 
 test('startup recovery propagates restoration errors and leaves the recovery marker intact', async () => {

@@ -85,6 +85,7 @@ export interface RepositoryUpdateRun {
   commit: string;
   previousUpdates: ServiceUpdateRecipe[];
   updates: ServiceUpdateRecipe[];
+  repairingServiceIds?: string[];
 }
 
 export interface RepositoryBuildContext {
@@ -116,13 +117,22 @@ const serviceUpdatesSchema = z.array(savedBuildSchema.extend({
   healthPath: z.string().max(500).regex(/^\/[^\x00-\x1f\x7f]*$/).nullable(),
 }).strict()).max(100).refine((entries) => new Set(entries.map((entry) => entry.serviceId)).size === entries.length, 'Duplicate Service update recipe');
 const servicePlanSchema = z.object({ version: z.literal(1), generation: z.uuid(), entries: serviceUpdatesSchema }).strict();
-const updateRunSchema = z.object({
+const legacyUpdateRunSchema = z.object({
   phase: z.enum(['applying', 'committed']),
   commit: savedBuildSchema.shape.commit,
   previousUpdates: serviceUpdatesSchema,
   updates: serviceUpdatesSchema,
 }).strict();
-const updateRunFileSchema = z.object({ version: z.literal(1), run: updateRunSchema }).strict();
+const updateRunSchema = legacyUpdateRunSchema.extend({
+  repairingServiceIds: z.array(serviceUpdatesSchema.element.shape.serviceId).max(100)
+    .refine((entries) => new Set(entries).size === entries.length, 'Duplicate repairing Service ID').optional(),
+}).strict().refine(({ phase, updates, repairingServiceIds }) => !repairingServiceIds
+  || (phase === 'committed' && repairingServiceIds.every((serviceId) => updates.some((update) => update.serviceId === serviceId))),
+'Only committed update Services may be repaired');
+const updateRunFileSchema = z.union([
+  z.object({ version: z.literal(1), run: legacyUpdateRunSchema }).strict(),
+  z.object({ version: z.literal(2), run: updateRunSchema }).strict(),
+]);
 
 const githubEd25519HostKey = 'github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl';
 
@@ -797,7 +807,7 @@ export class RepositoryService {
   }
 
   async saveUpdateRun(appId: string, run: RepositoryUpdateRun): Promise<void> {
-    const value = updateRunFileSchema.parse({ version: 1, run });
+    const value = updateRunFileSchema.parse({ version: 2, run });
     const app = await this.gitApp(appId);
     await this.writeRecipeJson(await this.appRoot(app.id, true), 'update-run.json', value, true);
   }

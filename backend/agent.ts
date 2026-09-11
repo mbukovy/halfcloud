@@ -355,9 +355,9 @@ export async function createChatResponse(
       execute: ({ appId }) => withProgress(() => docker.updateGitApp(appId, reportProgress)),
     }),
     recoverGitAppUpdate: tool({
-      description: 'Safely recover one interrupted Git App update. A committed update is completed forward; an uncommitted update is rolled back. Also clears a stale in-memory update guard when no recovery journal remains. Use only after updateGitApp reports pending or incomplete recovery.',
+      description: 'Safely recover one interrupted Git App update. A committed update is completed forward, including recreating and verifying a missing replacement from its retained Service; an uncommitted update is rolled back. Also clears a stale in-memory update guard when no recovery journal remains. Use only after updateGitApp reports pending or incomplete recovery.',
       inputSchema: z.object({ appId }),
-      execute: ({ appId }) => withProgress(() => docker.recoverGitAppUpdate(appId)),
+      execute: ({ appId }) => withProgress(() => docker.recoverGitAppUpdate(appId, reportProgress)),
     }),
     requestGitHubWebhookSetup: tool({
       description: 'Prepare or restore a trusted setup widget for automatic deployments on GitHub pushes. Requires a GitHub App with verified per-Service update recipes. Returns safe setup metadata only; the signing secret is fetched directly by the widget, never through AI. The user must verify a signed delivery and enable automatic updates in the widget.',

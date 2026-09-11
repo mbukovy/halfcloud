@@ -836,9 +836,13 @@ test('persists the complete applying and committed update journal across restart
   assert.deepEqual(await restarted.getUpdateRun(app.id), run);
   const file = path.join(root, 'update-run.json');
   assert.equal((await stat(file)).mode & 0o777, 0o600);
-  assert.deepEqual(JSON.parse(await readFile(file, 'utf8')), { version: 1, run });
+  assert.deepEqual(JSON.parse(await readFile(file, 'utf8')), { version: 2, run });
+  await writeFile(file, JSON.stringify({ version: 1, run }));
+  assert.deepEqual(await restarted.getUpdateRun(app.id), run, 'version 1 journals remain readable');
   await restarted.saveUpdateRun(app.id, { ...run, phase: 'committed' });
   assert.deepEqual(await service.getUpdateRun(app.id), { ...run, phase: 'committed' });
+  await restarted.saveUpdateRun(app.id, { ...run, phase: 'committed', repairingServiceIds: ['service_web'] });
+  assert.deepEqual(await service.getUpdateRun(app.id), { ...run, phase: 'committed', repairingServiceIds: ['service_web'] });
   assert.deepEqual(await apps.get(app.id), before, 'the journal alone must not advance deployment state');
   assert.deepEqual(await service.getServiceUpdates(app.id), [], 'the journal alone must not publish the candidate plan');
   await restarted.clearUpdateRun(app.id);
@@ -865,6 +869,8 @@ test('rejects invalid, oversized, corrupt, or symlinked update journals without 
     { ...run, previousUpdates: [{ ...entry, serviceId: '../escape' }] },
     { ...run, updates: [entry, entry] },
     { ...run, updates: Array.from({ length: 40 }, (_, index) => ({ ...entry, serviceId: `service_${index}` })) },
+    { ...run, phase: 'applying', repairingServiceIds: ['service_web'] },
+    { ...run, repairingServiceIds: ['service_unknown'] },
   ]) {
     await assert.rejects(service.saveUpdateRun(app.id, invalid));
     assert.equal(await readFile(file, 'utf8'), original);

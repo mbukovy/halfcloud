@@ -97,6 +97,9 @@ async function fixture(t, { verify = true } = {}) {
       assert.ok(service, `Unknown container ${id}`);
       return { ...service, imageId: this.builds.get(service.image), health: null, ports: service.ports.map((port) => ({ hostPort: port.host, target: `${port.container}/tcp` })) };
     },
+    async listUnusedImages() { return { images: [], totalSize: 0 }; },
+    async pruneUnusedImages() { return { deleted: 0, spaceReclaimed: 0 }; },
+    async assertImageIdentity() {},
     async beginContainerImageReplacement(id, image) {
       const index = this.services.findIndex((service) => service.id === id);
       assert.notEqual(index, -1);
@@ -129,9 +132,7 @@ async function fixture(t, { verify = true } = {}) {
       }
       return [];
     },
-    async rollbackMissingContainerReplacements(issues) {
-      for (const issue of issues) await this.backups.get(issue.serviceId).transaction.rollback();
-    },
+    async recreateMissingContainerReplacement() {},
   };
   const caddy = { sync: t.mock.fn(async () => { events.push('routes'); }) };
   const makeApplications = (store = apps, repositoryService = repositories) => new ApplicationService(
@@ -615,7 +616,7 @@ test('a committed journal finishes forward on restart after partial container cl
   f.events.length = 0;
   await restarted.recoverUpdates();
   assert.deepEqual(f.events, ['recover:forward', 'cleanup:worker', 'recover:forward', 'routes']);
-  assert.deepEqual(recoverCalls.mock.calls.map((call) => call.arguments), [[new Set([f.app.id])], [new Set([f.app.id]), f.app.id]]);
+  assert.deepEqual(recoverCalls.mock.calls.map((call) => call.arguments), [[new Set([f.app.id]), undefined, new Map()], [new Set([f.app.id]), f.app.id]]);
   assert.equal(f.runtime.backups.size, 0);
   assert.equal(await repositories.getUpdateRun(f.app.id), undefined);
   assert.deepEqual(await repositories.getServiceUpdates(f.app.id), run.updates);
@@ -661,30 +662,47 @@ test('a removed recovery journal releases the guard even when its directory sync
   assert.equal((await f.applications.updateGitApp(f.app.id)).updated, false);
 });
 
-test('startup quarantines missing committed replacements and chat restores a complete previous generation', async (t) => {
+test('startup quarantines a partially finalized update and chat recreates the missing Service forward', async (t) => {
   const f = await fixture(t);
-  const issues = f.previousUpdates.map(({ serviceId }, index) => ({
-    code: 'missing_replacement', appId: f.app.id, serviceId,
-    name: f.previousServices[index].runtimeName, backupId: `backup-${index}`, backupName: `backup-${index}-pending`,
-  }));
-  const recover = t.mock.method(f.runtime, 'recoverContainerReplacements', async (committedApps) => {
+  const missing = f.previousUpdates[0];
+  const issues = [{
+    code: 'missing_replacement', appId: f.app.id, serviceId: missing.serviceId,
+    name: f.previousServices[0].runtimeName, backupId: 'backup-web', backupName: 'backup-web-pending',
+  }];
+  let repaired = false;
+  const recover = t.mock.method(f.runtime, 'recoverContainerReplacements', async (committedApps, _appId, repairingServices = new Map()) => {
     f.events.push(committedApps.has(f.app.id) ? 'recover:forward' : 'recover:rollback');
-    return committedApps.has(f.app.id) ? issues : [];
+    if (repairingServices.get(f.app.id)?.size) return issues;
+    return committedApps.has(f.app.id) && !repaired ? issues : [];
   });
   await assert.rejects(f.applications.updateGitApp(f.app.id), /finalization is pending/);
-  assert.equal((await f.repositories.getUpdateRun(f.app.id)).phase, 'committed');
+  await f.runtime.backups.get(f.previousUpdates[1].serviceId).transaction.commit();
+  const committed = await f.repositories.getUpdateRun(f.app.id);
+  const missingUpdate = committed.updates.find(({ serviceId }) => serviceId === missing.serviceId);
+  assert.equal(committed.phase, 'committed');
+  const prune = t.mock.method(f.runtime, 'pruneUnusedImages');
+  await assert.rejects(f.applications.pruneUnusedImages(), /cannot be pruned while an App update needs recovery/);
+  assert.equal(prune.mock.callCount(), 0);
   await f.applications.recoverUpdates();
   assert.equal((await f.repositories.getUpdateRun(f.app.id)).phase, 'committed');
   assert.equal((await f.apps.get(f.app.id)).deployment.status, 'failed');
   await assert.rejects(f.applications.startApp(f.app.id), /update or its recovery is in progress/);
+  t.mock.method(f.runtime, 'recreateMissingContainerReplacement', async (issue, image, imageId) => {
+    assert.equal(issue.serviceId, missing.serviceId);
+    assert.equal(image, missingUpdate.image);
+    assert.equal(imageId, missingUpdate.imageId);
+    assert.deepEqual((await f.repositories.getUpdateRun(f.app.id)).repairingServiceIds, [missing.serviceId]);
+    repaired = true;
+    await f.runtime.backups.get(missing.serviceId).transaction.commit();
+  });
+  t.mock.method(f.runtime, 'assertImageIdentity', async () => {});
   const result = await f.applications.recoverGitAppUpdate(f.app.id);
-  assert.deepEqual(result, { appId: f.app.id, recovered: true, result: 'rolled_back' });
+  assert.deepEqual(result, { appId: f.app.id, recovered: true, result: 'completed' });
   assert.equal(await f.repositories.getUpdateRun(f.app.id), undefined);
-  assert.deepEqual(f.runtime.services, f.previousServices);
-  assert.deepEqual(await f.repositories.getServiceUpdates(f.app.id), f.previousUpdates);
-  assert.equal((await f.apps.get(f.app.id)).source.currentCommit, currentCommit);
+  assert.deepEqual((await f.repositories.getServiceUpdates(f.app.id)).map(({ commit }) => commit), [nextCommit, nextCommit]);
+  assert.equal((await f.apps.get(f.app.id)).source.currentCommit, nextCommit);
   recover.mock.restore();
-  assert.equal((await f.applications.updateGitApp(f.app.id)).updated, true);
+  assert.equal((await f.applications.updateGitApp(f.app.id)).updated, false);
 });
 
 test('uncertain commit writes retain all containers and recover forward, including unreadable decisions', async (t) => {
