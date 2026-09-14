@@ -1,3 +1,5 @@
+import type { RedirectRoute } from './redirects.js';
+
 interface RoutedApplication {
   hostname?: string;
   domains?: Array<{
@@ -13,7 +15,7 @@ export class CaddyService {
   private readonly halfcloudHostname = process.env.HALFCLOUD_HOSTNAME;
   private readonly halfcloudPort = Number(process.env.PORT ?? 9000);
 
-  async sync(applications: RoutedApplication[]) {
+  async sync(applications: RoutedApplication[], redirects: RedirectRoute[] = []) {
     if (!this.halfcloudHostname) throw new Error('HALFCLOUD_HOSTNAME is required for Caddy configuration');
     const sites = applications
       .filter((application) => (application.domains?.length || application.hostname) && application.state === 'running')
@@ -29,6 +31,7 @@ export class CaddyService {
         }).join('\n\n');
       })
       .filter(Boolean);
+    const redirectSites = redirects.map((redirect) => `${redirect.hostname} {\n  redir https://${redirect.targetHostname}{uri} permanent\n}`);
     const caddyfile = `{
   admin 127.0.0.1:2019
 }
@@ -45,7 +48,7 @@ ${this.halfcloudHostname} {
   }
 }
 
-${sites.join('\n\n')}
+${[...sites, ...redirectSites].join('\n\n')}
 `;
     const response = await fetch(`${this.endpoint}/load`, {
       method: 'POST',

@@ -6,6 +6,7 @@ import { DockerService, type ContainerRecoveryIssue, type ContainerRecoveryPlan,
 import { DomainStore, normalizeHostname, type ServiceDomain } from './domains.js';
 import { EnvironmentStore, assertEnvironmentVariableName, environmentRequestTargets, serializeEnvironmentForAgent, type EnvironmentTarget, type EnvironmentVariable } from './environment.js';
 import { RouteAccessRequestStore, assertBasicAuthPassword, assertBasicAuthUsername, hashBasicAuthPassword } from './route-access.js';
+import { RedirectStore } from './redirects.js';
 import { GitRepositoryError, RepositoryService, normalizeRepositoryUrl, type RepositoryUpdateRun, type ServiceUpdateRecipe } from './repositories.js';
 import { GitHubWebhookService, GitHubWebhookError, type GitHubWebhookTarget } from './github-webhooks.js';
 
@@ -27,6 +28,7 @@ export class ApplicationService {
     private readonly hashPassword: (password: string) => Promise<string> = hashBasicAuthPassword,
     private readonly apps = new AppStore(),
     private readonly repositories = new RepositoryService(apps),
+    private readonly redirects = new RedirectStore(),
   ) {}
 
   get githubWebhooks() {
@@ -1022,10 +1024,43 @@ export class ApplicationService {
 
   async syncRoutes() {
     const containers = await this.docker.listContainers(false);
-    await this.caddy.sync(await Promise.all(containers.map(async (container) => ({
-      ...container,
-       domains: await this.domains.get(container.serviceId ?? container.name, container.hostname),
-    }))));
+    const [applications, redirects] = await Promise.all([
+      Promise.all(containers.map(async (container) => ({
+        ...container,
+        domains: await this.domains.get(container.serviceId ?? container.name, container.hostname),
+      }))),
+      this.redirects.list(),
+    ]);
+    await this.caddy.sync(applications, redirects);
+  }
+
+  listRedirects() {
+    return this.redirects.list();
+  }
+
+  async addRedirect(hostname: string, targetHostname: string) {
+    const source = normalizeHostname(hostname);
+    await this.assertHostnameAvailable(source);
+    const redirect = await this.redirects.add(source, targetHostname);
+    try {
+      await this.syncRoutes();
+      return redirect;
+    } catch (error) {
+      await this.redirects.remove(source);
+      throw error;
+    }
+  }
+
+  async removeRedirect(hostname: string) {
+    const previous = await this.redirects.list();
+    const redirect = await this.redirects.remove(hostname);
+    try {
+      await this.syncRoutes();
+      return redirect;
+    } catch (error) {
+      await this.redirects.replace(previous);
+      throw error;
+    }
   }
 
   async listDomains(id: string) {
@@ -1181,6 +1216,7 @@ export class ApplicationService {
       const domains = await this.domains.get(serviceKey, application.hostname);
       if (domains.some((domain) => domain.hostname === hostname)) throw new Error(`${hostname} is already attached to ${application.name}`);
     }
+    if ((await this.redirects.list()).some((redirect) => redirect.hostname === hostname)) throw new Error(`${hostname} already has a redirect`);
     if (hostname === process.env.HALFCLOUD_HOSTNAME?.toLowerCase()) throw new Error(`${hostname} is reserved for HalfCloud`);
   }
 

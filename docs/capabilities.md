@@ -36,6 +36,7 @@ Cross-App private networking is not currently supported.
 - Choose the primary public address.
 - Protect each domain independently with HTTP Basic Auth.
 - Change credentials or make a protected domain public again.
+- Create and remove native Caddy `301` hostname redirects that preserve paths and query strings, without running a redirect container.
 
 Domain changes and password setup begin in chat. Passwords are entered in a dedicated dashboard form rather than in the AI conversation, and only an Argon2id hash is stored.
 

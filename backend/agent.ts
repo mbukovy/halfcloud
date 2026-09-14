@@ -260,6 +260,7 @@ Rules:
 - When the user adds the first custom domain, prefer making it primary while preserving the HalfCloud-generated domain. Do not remove or replace any existing domain unless explicitly requested or required to resolve a conflict.
 - The primary domain is the preferred public URL, but every configured domain continues routing directly to the service. Changing it does not imply changing arbitrary application environment variables.
 - External DNS is the user's responsibility. When adding a custom domain, report the DNS target returned by the tool and explain that HTTPS becomes ready after DNS points to this server; Caddy manages the certificate.
+- Hostname redirects are independent of Apps and Services. Use addHostnameRedirect to create a native Caddy 301 redirect that preserves the request path and query string. Do not deploy a redirect container.
 - HTTP routes may be public or password protected independently, even when they route to the same application. Use inspectRouteAccess when the route's access state is unknown.
 - Never ask for a Basic Auth username or password in chat and never pass credentials as tool arguments. Use requestBasicAuthSetup or requestBasicAuthPasswordChange so the trusted HalfCloud widget collects credentials outside AI context.
 - Removing route protection makes that hostname publicly accessible. Clearly state this consequence before calling removeRouteProtection; the interface requires explicit user approval.
@@ -524,6 +525,24 @@ export async function createChatResponse(
       description: 'Make one existing routing domain the preferred public URL without changing application environment variables.',
       inputSchema: z.object({ containerId: serviceId, hostname: z.string().min(1) }),
       execute: ({ containerId, hostname }) => docker.setPrimaryDomain(containerId, hostname),
+    }),
+    listHostnameRedirects: tool({
+      description: 'List native Caddy hostname redirects. Redirects are independent of Apps and preserve request paths and query strings.',
+      inputSchema: z.object({}),
+      execute: () => docker.listRedirects(),
+    }),
+    addHostnameRedirect: tool({
+      description: 'Create a native Caddy permanent (301) HTTPS hostname redirect. Provide hostnames without schemes or paths; request paths and query strings are preserved.',
+      inputSchema: z.object({
+        hostname: z.string().min(1).describe('Source hostname'),
+        targetHostname: z.string().min(1).describe('Destination hostname'),
+      }),
+      execute: ({ hostname, targetHostname }) => docker.addRedirect(hostname, targetHostname),
+    }),
+    removeHostnameRedirect: tool({
+      description: 'Remove one native Caddy hostname redirect.',
+      inputSchema: z.object({ hostname: z.string().min(1).describe('Source hostname') }),
+      execute: ({ hostname }) => docker.removeRedirect(hostname),
     }),
     inspectRouteAccess: tool({
       description: 'Inspect whether one HTTP route is public or password protected. Password hashes are never returned.',

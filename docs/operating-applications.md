@@ -128,6 +128,8 @@ The generated `nip.io` hostname remains as a fallback. The first custom domain b
 
 Each hostname can independently be public or protected with HTTP Basic Auth. Ask HalfCloud to protect a route or change its credentials, then enter the username and password in the dedicated form rather than chat. Password protection requires working DNS and HTTPS. Caddy stores an Argon2id password hash; the plaintext password cannot be recovered.
 
+Hostname redirects are independent of Apps and Services. Ask HalfCloud to redirect one hostname to another and it creates a native Caddy permanent redirect to HTTPS, preserving the request path and query string. The source hostname still needs DNS pointed at the HalfCloud server so Caddy can obtain its certificate.
+
 Removing protection makes the selected hostname public and requires explicit approval. Other routes in the App are unaffected. Basic Auth is a simple access gate, not a replacement for application accounts, roles, MFA, or SSO.
 
 ## Persistent storage

@@ -362,6 +362,8 @@ function toolLabel(part: Record<string, unknown>) {
     repairStorageOwnership: 'Repairing storage ownership',
     listServiceDomains: 'Inspecting service domains', addServiceDomain: 'Adding service domain',
     removeServiceDomain: 'Removing service domain', setPrimaryServiceDomain: 'Changing primary domain',
+    listHostnameRedirects: 'Inspecting hostname redirects', addHostnameRedirect: 'Adding hostname redirect',
+    removeHostnameRedirect: 'Removing hostname redirect',
     inspectRouteAccess: 'Inspecting route access', requestBasicAuthSetup: 'Protecting route',
     requestBasicAuthPasswordChange: 'Changing route credentials', removeRouteProtection: 'Making route public',
     requestGitHubWebhookSetup: 'Setting up GitHub automatic updates', getGitHubWebhookSetup: 'Checking GitHub automatic updates',

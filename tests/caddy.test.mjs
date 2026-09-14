@@ -87,3 +87,27 @@ test('configures Basic Auth independently for one route', async (t) => {
   assert.doesNotMatch(body.match(/public\.example\.com \{[\s\S]*?\n\}/)?.[0] ?? '', /basic_auth/);
   assert.match(body, /admin\.example\.com \{\n  basic_auth argon2id \{\n    michal \$argon2id\$hash\n  \}/);
 });
+
+test('configures native permanent hostname redirects independently of applications', async (t) => {
+  let body = '';
+  const server = createServer((incoming, response) => {
+    incoming.setEncoding('utf8');
+    incoming.on('data', (chunk) => (body += chunk));
+    incoming.on('end', () => response.writeHead(200).end());
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => server.close());
+  const address = server.address();
+  assert(address && typeof address === 'object');
+  process.env.CADDY_ADMIN_URL = `http://127.0.0.1:${address.port}`;
+  process.env.HALFCLOUD_HOSTNAME = 'halfcloud.example.com';
+
+  await new CaddyService().sync([], [{
+    id: 'redirect_test',
+    hostname: 'taisen.mbukovy.eu',
+    targetHostname: 'taisen.fun',
+  }]);
+
+  assert.match(body, /taisen\.mbukovy\.eu \{\n  redir https:\/\/taisen\.fun\{uri\} permanent\n\}/);
+  assert.doesNotMatch(body, /reverse_proxy[^\n]*taisen/);
+});

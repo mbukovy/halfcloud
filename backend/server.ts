@@ -222,6 +222,18 @@ app.put('/api/containers/:id/domains/:hostname/primary', async (request, respons
 app.delete('/api/containers/:id/domains/:hostname', async (request, response) => {
   response.json(await docker.removeDomain(request.params.id, request.params.hostname, request.body?.allowManaged === true));
 });
+app.get('/api/redirects', async (_request, response) => {
+  response.json(await docker.listRedirects());
+});
+app.post('/api/redirects', async (request, response) => {
+  response.json(await docker.addRedirect(
+    z.string().parse(request.body?.hostname),
+    z.string().parse(request.body?.targetHostname),
+  ));
+});
+app.delete('/api/redirects/:hostname', async (request, response) => {
+  response.json(await docker.removeRedirect(request.params.hostname));
+});
 app.put('/api/routes/:routeId/basic-auth-requests/:requestId', async (request, response) => {
   response.json(await docker.completeBasicAuthRequest(
     request.params.routeId,
