@@ -66,6 +66,8 @@ test('instance name is persisted separately from AI settings', async () => {
     assert.deepEqual(await new SettingsStore(directory).getInstance(), { name: 'Workshop' });
     assert.equal((await stat(path.join(directory, 'instance.json'))).mode & 0o777, 0o600);
     await assert.rejects(store.saveInstance({ name: ' '.repeat(10) }));
+    assert.equal((await store.saveInstance({ name: 'x'.repeat(128) })).name.length, 128);
+    await assert.rejects(store.saveInstance({ name: 'x'.repeat(129) }));
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

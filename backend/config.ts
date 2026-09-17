@@ -10,7 +10,7 @@ const legacySettingsSchema = z.object({
   deployment: z.string().min(1),
 });
 
-const instanceSettingsSchema = z.object({ name: z.string().trim().min(1).max(64) });
+const instanceSettingsSchema = z.object({ name: z.string().trim().min(1).max(128) });
 
 export type AiSettings = LlmProviderConfig;
 
