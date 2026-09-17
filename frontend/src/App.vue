@@ -20,6 +20,9 @@ const loginError = ref('');
 const loginSubmitting = ref(false);
 const showLoginLoading = ref(false);
 const settings = ref<PublicSettings | null>(null);
+const serverName = ref('My server');
+const serverNameDraft = ref('My server');
+const serverNameSaving = ref(false);
 const providers = ref<ProviderMetadata[]>([]);
 const settingsForm = reactive({ provider: '' as LlmProvider | '', endpoint: '', apiKey: '', model: '', customModel: '' });
 const settingsOpen = ref(false);
@@ -737,6 +740,33 @@ function formatAccessCode(event: Event) {
   accessCode.value = normalized.length > 6 ? `${normalized.slice(0, 6)}-${normalized.slice(6)}` : normalized;
 }
 
+async function saveServerName() {
+  const name = serverNameDraft.value.trim();
+  if (!name || name === serverName.value || serverNameSaving.value) {
+    serverNameDraft.value = serverName.value;
+    return;
+  }
+  serverNameSaving.value = true;
+  try {
+    const saved = await api<{ name: string }>('/api/settings/instance', {
+      method: 'PUT',
+      body: JSON.stringify({ name }),
+    });
+    serverName.value = saved.name;
+    serverNameDraft.value = saved.name;
+  } catch (error) {
+    serverNameDraft.value = serverName.value;
+    dashboardError.value = error instanceof Error ? `Server name could not be saved: ${error.message}` : 'Server name could not be saved';
+  } finally {
+    serverNameSaving.value = false;
+  }
+}
+
+function cancelServerName(event: Event) {
+  serverNameDraft.value = serverName.value;
+  (event.currentTarget as HTMLInputElement).blur();
+}
+
 async function logout() {
   const scope = suspendGitHubWebhookWidgets();
   try {
@@ -754,6 +784,8 @@ function clearSession() {
   apps.value = [];
   server.value = null;
   settings.value = null;
+  serverName.value = 'My server';
+  serverNameDraft.value = 'My server';
   settingsOpen.value = false;
   logs.value = null;
   closeEnvironmentDialog();
@@ -848,12 +880,15 @@ async function loadDashboard() {
   dashboardError.value = '';
   githubWebhookScope.value = new AbortController();
   try {
-    const [newSettings, newApps, newServer] = await Promise.all([
+    const [newSettings, instance, newApps, newServer] = await Promise.all([
       api<LlmSettingsResponse>('/api/settings/llm'),
+      api<{ name: string }>('/api/settings/instance'),
       api<AppInfo[]>('/api/apps'),
       api<ServerStats>('/api/server/stats'),
     ]);
     settings.value = newSettings;
+    serverName.value = instance.name;
+    serverNameDraft.value = instance.name;
     providers.value = newSettings.providers;
     apps.value = newApps;
     server.value = newServer;
@@ -1232,7 +1267,23 @@ onBeforeUnmount(() => {
 
   <main v-else class="app-shell">
     <header class="topbar">
-      <div class="brand"><img class="brand-mark" src="/halfcloud-logo-ui.png" alt=""><strong>HalfCloud</strong><span class="version">0.1</span></div>
+      <div class="brand">
+        <img class="brand-mark" src="/halfcloud-logo-ui.png" alt="">
+        <strong>HalfCloud</strong>
+        <input
+          v-model="serverNameDraft"
+          class="server-name"
+          type="text"
+          aria-label="Server name"
+          title="Click to rename this server"
+          maxlength="64"
+          :readonly="serverNameSaving"
+          :style="{ width: `${Math.max(9, Math.min(serverNameDraft.length + 1, 65))}ch` }"
+          @blur="saveServerName"
+          @keydown.enter.prevent="($event.currentTarget as HTMLInputElement).blur()"
+          @keydown.esc.prevent="cancelServerName"
+        >
+      </div>
       <div class="server-health"><span class="health-dot"></span><span>HOST HEALTHY</span></div>
       <div class="header-actions">
         <div v-if="settings?.llmReady && activeProvider" class="active-model" :title="`${activeProvider.label} · ${settings.model}`">

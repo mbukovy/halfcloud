@@ -96,6 +96,8 @@ app.use('/api', (request, response, next) => {
 });
 
 app.get('/api/settings', async (_request, response) => response.json(await settings.publicValue()));
+app.get('/api/settings/instance', async (_request, response) => response.json(await settings.getInstance()));
+app.put('/api/settings/instance', async (request, response) => response.json(await settings.saveInstance(request.body)));
 app.get('/api/settings/llm', async (_request, response) => response.json({ ...(await settings.publicValue()), providers: providerMetadata }));
 app.get('/api/settings/llm/models', async (_request, response) => {
   const active = await settings.get();

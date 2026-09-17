@@ -10,15 +10,19 @@ const legacySettingsSchema = z.object({
   deployment: z.string().min(1),
 });
 
+const instanceSettingsSchema = z.object({ name: z.string().trim().min(1).max(64) });
+
 export type AiSettings = LlmProviderConfig;
 
 export class SettingsStore {
   readonly dataDir: string;
   private readonly settingsPath: string;
+  private readonly instanceSettingsPath: string;
 
   constructor(dataDir = process.env.HALFCLOUD_DATA_DIR ?? `${process.env.HOME ?? '/home/halfcloudrunner'}/.halfcloud/data`) {
     this.dataDir = dataDir;
     this.settingsPath = path.join(dataDir, 'settings.json');
+    this.instanceSettingsPath = path.join(dataDir, 'instance.json');
   }
 
   async get(): Promise<LlmProviderConfig | null> {
@@ -76,5 +80,23 @@ export class SettingsStore {
     await writeFile(temporaryPath, `${JSON.stringify(settings, null, 2)}\n`, { mode: 0o600 });
     await rename(temporaryPath, this.settingsPath);
     return this.publicValue();
+  }
+
+  async getInstance() {
+    try {
+      return instanceSettingsSchema.parse(JSON.parse(await readFile(this.instanceSettingsPath, 'utf8')));
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { name: 'My server' };
+      throw error;
+    }
+  }
+
+  async saveInstance(value: unknown) {
+    const instance = instanceSettingsSchema.parse(value);
+    await mkdir(this.dataDir, { recursive: true, mode: 0o700 });
+    const temporaryPath = `${this.instanceSettingsPath}.tmp`;
+    await writeFile(temporaryPath, `${JSON.stringify(instance, null, 2)}\n`, { mode: 0o600 });
+    await rename(temporaryPath, this.instanceSettingsPath);
+    return instance;
   }
 }

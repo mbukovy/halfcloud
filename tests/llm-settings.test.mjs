@@ -57,6 +57,20 @@ test('settings public value never returns the API key', async () => {
   }
 });
 
+test('instance name is persisted separately from AI settings', async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'halfcloud-instance-'));
+  try {
+    const store = new SettingsStore(directory);
+    assert.deepEqual(await store.getInstance(), { name: 'My server' });
+    assert.deepEqual(await store.saveInstance({ name: '  Workshop  ' }), { name: 'Workshop' });
+    assert.deepEqual(await new SettingsStore(directory).getInstance(), { name: 'Workshop' });
+    assert.equal((await stat(path.join(directory, 'instance.json'))).mode & 0o777, 0o600);
+    await assert.rejects(store.saveInstance({ name: ' '.repeat(10) }));
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test('legacy Azure settings are migrated in memory to Foundry v1', async () => {
   const directory = await mkdtemp(path.join(tmpdir(), 'halfcloud-legacy-'));
   try {
