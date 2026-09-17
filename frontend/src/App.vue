@@ -5,6 +5,9 @@ import { DefaultChatTransport, lastAssistantMessageIsCompleteWithApprovalRespons
 import MarkdownIt from 'markdown-it';
 import { api, safeGitHubWebhookSetup, type GitHubWebhookSetup as GitHubWebhookSetupInfo, type AppInfo, type ContainerInfo, type EnvironmentVariable, type LlmProvider, type LlmSettingsResponse, type ModelInfo, type ProviderMetadata, type PublicSettings, type ServerStats, type ServiceDomain } from './api';
 import GitHubWebhookSetup from './components/GitHubWebhookSetup.vue';
+import { useTheme } from './theme';
+
+const { theme, toggleTheme } = useTheme();
 
 const markdown = new MarkdownIt({ html: false, linkify: true, breaks: true });
 markdown.renderer.rules.link_open = (tokens, index, options, environment, renderer) => {
@@ -1286,6 +1289,16 @@ onBeforeUnmount(() => {
       </div>
       <div class="server-health"><span class="health-dot"></span><span>HOST HEALTHY</span></div>
       <div class="header-actions">
+        <button
+          class="theme-toggle"
+          type="button"
+          :title="theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'"
+          :aria-label="theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'"
+          @click="toggleTheme"
+        >
+          <svg v-if="theme === 'dark'" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4"></circle><path d="M12 2v2m0 16v2M2 12h2m16 0h2M5 5l1.5 1.5m11 11L19 19M5 19l1.5-1.5m11-11L19 5"></path></svg>
+          <svg v-else viewBox="0 0 24 24" aria-hidden="true"><path d="M20.5 13.5A9 9 0 0 1 10.5 3.5a9 9 0 1 0 10 10Z"></path></svg>
+        </button>
         <div v-if="settings?.llmReady && activeProvider" class="active-model" :title="`${activeProvider.label} · ${settings.model}`">
           <img :src="activeProvider.icon" alt="">
           <span>{{ settings.model }}</span>
