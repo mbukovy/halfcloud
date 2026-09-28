@@ -88,6 +88,10 @@ async function fixture(t, { verify = true } = {}) {
       const service = this.services.find((candidate) => candidate.id === id || candidate.serviceId === id);
       return { name: service.serviceId, environment: { API_KEY: secret } };
     },
+    async getContainerCopyConfiguration(id) {
+      const service = this.services.find((candidate) => candidate.id === id);
+      return { image: service.image, namedVolumes: {} };
+    },
     async startContainer(id) {
       this.services.find((service) => service.id === id).state = 'running';
       return { containerId: id, state: 'running' };
@@ -202,6 +206,48 @@ test('first verified deployment records distinct per-Service recipes and images 
   assert.equal((await f.apps.get(f.app.id)).source.currentCommit, currentCommit);
   assert.deepEqual(f.events, ['health:web', 'health:worker', 'probe:web', 'probe:worker', 'saveServiceUpdates']);
   assertSafeResult(await f.applications.getApp(f.app.id, false));
+});
+
+test('copying a worker keeps protected environment and includes both instances in Git updates', async (t) => {
+  const f = await fixture(t);
+  const worker = f.runtime.services.find((service) => service.name === 'worker');
+  const original = await f.environment.list(worker.serviceId, { API_KEY: secret });
+  assert.equal(original[0].protectedFromAI, false);
+  await f.environment.replaceVariables(worker.serviceId, [{ ...original[0], protectedFromAI: true }]);
+
+  const copied = await f.applications.copyService(f.app.id, worker.serviceId, 'worker-2');
+  assert.equal(copied.state, 'stopped');
+  assert.equal(copied.updateRecipeCopied, true);
+  assert.doesNotMatch(JSON.stringify(copied), /runtime-only-secret/);
+  const copyInput = f.runtime.services.find((service) => service.serviceId === copied.serviceId);
+  assert.equal(copyInput.state, 'exited');
+  const variables = await f.environment.list(copied.serviceId);
+  assert.equal(variables[0].value, secret);
+  assert.equal(variables[0].protectedFromAI, true);
+  assert.notEqual(variables[0].id, original[0].id);
+  assert.equal((await f.applications.listEnvironmentForAgent(copied.serviceId)).variables[0].configured, true);
+  assert.equal((await f.repositories.getServiceUpdates(f.app.id)).length, 3);
+
+  await f.applications.startService(f.app.id, copied.serviceId);
+  const result = await f.applications.updateGitApp(f.app.id);
+  assert.equal(result.updated, true);
+  assert.equal(result.services.length, 3);
+  assert.deepEqual(f.events.filter((event) => event.startsWith('swap:')), ['swap:web', 'swap:worker', 'swap:worker-2']);
+  assert.equal((await f.repositories.getServiceUpdates(f.app.id)).length, 3);
+});
+
+test('copy refuses a repository Service before its update recipe is verified', async (t) => {
+  const f = await fixture(t, { verify: false });
+  await assert.rejects(f.applications.copyService(f.app.id, 'worker', 'worker-2'), /Verify the source Service update recipe/);
+  assert.equal(f.runtime.services.length, 3);
+});
+
+test('a private copy of a public Service uses a private update health check', async (t) => {
+  const f = await fixture(t);
+  const copied = await f.applications.copyService(f.app.id, 'web', 'web-worker');
+  const recipe = (await f.repositories.getServiceUpdates(f.app.id)).find((entry) => entry.serviceId === copied.serviceId);
+  assert.equal(recipe.healthPath, null);
+  assert.deepEqual(f.runtime.services.find((service) => service.serviceId === copied.serviceId).ports, []);
 });
 
 test('initial build staging is cleaned after Docker or build-record failure without changing checkout files', async (t) => {

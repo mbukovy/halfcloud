@@ -87,6 +87,20 @@ test('limits bind mounts to application-relative paths', () => {
   }
 });
 
+test('copy configuration accepts owned named volumes but refuses bind or foreign storage', async () => {
+  const docker = Object.create(DockerService.prototype);
+  const serviceId = 'service_original';
+  const inspection = { Config: { Image: 'example:1', Labels: { 'halfcloud.service.id': serviceId } }, Mounts: [] };
+  docker.managedContainer = async () => ({ inspect: async () => inspection });
+  docker.managedVolume = async () => ({ Labels: { 'halfcloud.application': serviceId } });
+  inspection.Mounts = [{ Type: 'volume', Name: `halfcloud-${serviceId}-data`, Destination: '/data' }];
+  assert.deepEqual(await docker.getContainerCopyConfiguration('container'), { image: 'example:1', namedVolumes: { data: '/data' } });
+  inspection.Mounts = [{ Type: 'bind', Source: '/data', Destination: '/data' }];
+  await assert.rejects(docker.getContainerCopyConfiguration('container'), /cannot be copied safely/);
+  inspection.Mounts = [{ Type: 'volume', Name: 'halfcloud-service_foreign-data', Destination: '/data' }];
+  await assert.rejects(docker.getContainerCopyConfiguration('container'), /cannot be copied safely/);
+});
+
 test('accepts all required labels on a managed volume', () => {
   assert.doesNotThrow(() => assertManagedVolumeLabels({
     Name: 'halfcloud-n8n-data',

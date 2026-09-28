@@ -241,6 +241,7 @@ Rules:
 - Prefer descriptive App names. Choose short stable Service names such as web, worker, mysql, or redis. Use official images and explicit image tags (usually :latest) unless the user names another image.
 - Each App has an isolated private network. Services in the same App reach each other by Service name on internal ports; Services in other Apps are not reachable. Use an empty ports object for databases, queues, workers, and other private-only Services.
 - A request such as "deploy WordPress with MySQL" means one App with wordpress and mysql Services. A request to add a database, worker, cache, queue, or supporting component to an App must use addService and must not create another App.
+- To run another instance of an existing Service, use copyService rather than addService: it copies the image, complete environment (including AI-protected values), and verified Git update recipe without showing secrets to AI. The new Service starts stopped so you can adjust its settings before starting it. Named storage is separate and empty; bind-mounted Services cannot be copied. Public ports are not copied: supply a distinct available port only if the new Service needs a public address. Never copy a database expecting its data to be duplicated.
 - For public web images, infer their standard internal port. The ports object maps a localhost host port in the 10000-19999 range to a container port.
 - Deployments run on rootless Docker. Never request privileged mode, host networking, devices, Docker sockets, or arbitrary host paths.
 - If an application requires privileged host access, explain that it cannot currently be deployed safely by HalfCloud. Never suggest silently elevating it.
@@ -432,6 +433,11 @@ export async function createChatResponse(
       description: 'Add a stopped supporting Service to an existing App and its isolated network. Configure all required environment values before calling startService.',
       inputSchema: z.object({ appId, service: serviceSchema }),
       execute: ({ appId, service }) => withProgress(() => docker.addService(appId, service, reportProgress)),
+    }),
+    copyService: tool({
+      description: 'Copy a Service within its App with its complete environment, protected values, image, separate named storage, and verified Git update recipe. Starts stopped; public ports must be supplied explicitly. Does not copy persistent data or bind mounts. Never returns environment values.',
+      inputSchema: z.object({ appId, serviceId, name: z.string().min(1).describe('Unique name for the copy'), ports: z.record(z.string(), z.string()).default({}).describe('New public port mappings, or {} for a private copy'), hostname: z.string().optional() }),
+      execute: ({ appId, serviceId, name, ports, hostname }) => withProgress(() => docker.copyService(appId, serviceId, name, ports, hostname, reportProgress)),
     }),
     renameApp: tool({
       description: 'Change only an App display name without recreating or renaming runtime resources.',

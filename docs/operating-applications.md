@@ -30,6 +30,8 @@ Add Redis to WordPress.
 
 The new `redis` Service joins WordPress's existing private network. Service names are stable private DNS names within the App.
 
+To run another instance of an existing Service, ask HalfCloud to copy it (for example, "Copy worker as worker-2 in Customer API"). The copy gets the same image and all environment variables, including protected values, without revealing credentials to the agent. It starts stopped so you can adjust its settings before starting it. By default it is private; request a distinct public port if it needs its own public address. Named storage gets a separate empty volume, not a copy of the data. Services with bind-mounted or unmanaged storage cannot be copied this way.
+
 ## Images and names
 
 HalfCloud deploys images available to the rootless Docker daemon, public HTTPS Git repositories, and private GitHub repositories. For a private repository, HalfCloud generates a dedicated read-only SSH deploy key and gives you the exact GitHub settings link. The private key never leaves the server. Git-backed Apps use a persistent HalfCloud-managed checkout, but their runtime still uses built images and the same managed Service primitives as image-based Apps.
@@ -51,6 +53,8 @@ Deploy latest changes from git for Customer API.
 ```
 
 The first verified deployment saves a dedicated `Dockerfile.update`, ignore rules, build context, image identity, and health path for **each repository-built Service**, outside the Git checkout. Services may use different Dockerfiles and images. These saved recipes are not regenerated during an update.
+
+Copying a verified repository-built Service also copies its update recipe. Once the new Service is started, manual and GitHub push updates build and replace both instances along with every other repository-built Service in the App. A Service without a verified recipe cannot be copied until its deployment is verified.
 
 During preparation, `verifyGitDeployment` accepts `serviceHealthPaths` keyed by Service ID or name, so multiple APIs can each save their own readiness endpoint. Docker health-check startup timing is respected within a bounded five-minute readiness window.
 

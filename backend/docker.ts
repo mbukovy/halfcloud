@@ -878,6 +878,21 @@ export class DockerService {
     };
   }
 
+  async getContainerCopyConfiguration(id: string) {
+    const inspection = await (await this.managedContainer(id)).inspect();
+    const serviceId = inspection.Config.Labels?.['halfcloud.service.id'];
+    const namedVolumes: Record<string, string> = {};
+    for (const mount of inspection.Mounts) {
+      if (mount.Type !== 'volume' || !serviceId || !mount.Name?.startsWith(`halfcloud-${serviceId}-`)) {
+        throw new Error('Services with bind mounts or unmanaged storage cannot be copied safely');
+      }
+      const volume = await this.managedVolume(mount.Name);
+      if (volume.Labels?.['halfcloud.application'] !== serviceId) throw new Error('Service storage is not owned by the source Service');
+      namedVolumes[mount.Name.slice(`halfcloud-${serviceId}-`.length)] = mount.Destination;
+    }
+    return { image: inspection.Config.Image, namedVolumes };
+  }
+
   async replaceContainerEnvironment(id: string, nextEnvironment: Record<string, string>) {
     for (const key of Object.keys(nextEnvironment)) {
       if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) throw new Error(`Invalid environment variable name ${key}`);

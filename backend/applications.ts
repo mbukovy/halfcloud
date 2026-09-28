@@ -596,6 +596,40 @@ export class ApplicationService {
     return this.apps.renameApp(appIdOrName, name);
   }
 
+  async copyService(appIdOrName: string, serviceIdOrName: string, name: string, ports: CreateContainerInput['ports'] = {}, hostname?: string, onProgress?: (progress: DeploymentProgress) => void) {
+    const app = await this.apps.get(appIdOrName);
+    const copy = async () => {
+      this.assertAppNotUpdating(app.id);
+      const source = await this.service(app.id, serviceIdOrName);
+      const normalized = this.serviceName(name);
+      if ((await this.getApp(app.id, false)).services.some((service) => service.name === normalized)) throw new Error(`Service ${normalized} already exists in ${app.name}`);
+      const config = await this.docker.getContainerCopyConfiguration(source.id);
+      const runtime = await this.docker.getContainerEnvironment(source.id);
+      const variables = await this.environment.list(source.serviceId!, runtime.environment);
+      const prefix = `halfcloud/app-${app.id.slice(4).replaceAll('-', '')}:`;
+      const updates = app.source ? await this.repositories.getServiceUpdates(app.id) : [];
+      const recipe = config.image.startsWith(prefix) ? updates.find((entry) => entry.serviceId === source.serviceId) : undefined;
+      if (config.image.startsWith(prefix) && (!recipe || recipe.image !== config.image || (await this.docker.inspectContainer(source.id)).imageId !== recipe.imageId)) {
+        throw new Error('Verify the source Service update recipe before copying it');
+      }
+      const created = await this.createServiceRecord(app.id, { name: normalized, image: config.image, ports, hostname, environment: runtime.environment, namedVolumes: config.namedVolumes }, onProgress);
+      try {
+        const copied = (await this.service(app.id, normalized)).serviceId!;
+        await this.environment.replaceVariables(copied, variables.map((variable) => ({ ...variable, id: `env_${randomUUID()}`, serviceId: copied })));
+        if (recipe) await this.repositories.saveServiceUpdates(app.id, [...updates, {
+          ...recipe, serviceId: copied,
+          healthPath: Object.values(ports).some((target) => !target.includes('/') || target.endsWith('/tcp')) ? recipe.healthPath : null,
+        }]);
+        return { appId: app.id, serviceId: copied, name: normalized, state: 'stopped', updateRecipeCopied: Boolean(recipe) };
+      } catch (error) {
+        await this.docker.deleteContainer(created.id).catch(() => undefined);
+        await this.syncRoutes().catch(() => undefined);
+        throw error;
+      }
+    };
+    return app.source ? this.withRepositoryOperation(app.id, copy) : copy();
+  }
+
   async startApp(idOrName: string) {
     const app = await this.apps.get(idOrName);
     this.assertAppNotUpdating(app.id);
