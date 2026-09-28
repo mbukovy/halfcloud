@@ -30,7 +30,7 @@ Add Redis to WordPress.
 
 The new `redis` Service joins WordPress's existing private network. Service names are stable private DNS names within the App.
 
-To run another instance of an existing Service, ask HalfCloud to copy it (for example, "Copy worker as worker-2 in Customer API"). The copy gets the same image and all environment variables, including protected values, without revealing credentials to the agent. It starts stopped so you can adjust its settings before starting it. By default it is private; request a distinct public port if it needs its own public address. Named storage gets a separate empty volume, not a copy of the data. Services with bind-mounted or unmanaged storage cannot be copied this way.
+To run another instance of an existing Service, ask HalfCloud to copy it (for example, "Copy worker as worker-2 in Customer API"). The copy gets the same image and all environment variables, including protected values, without revealing credentials to the agent. It starts stopped so you can adjust its settings before starting it. By default it is private; request a distinct public port if it needs its own public address. Copies share the source's managed bind mounts and named volumes, so web and worker Services can use the same files. This is not a data copy: both Services write to the same storage. Only start copies when the application supports concurrent access; do not scale databases or other single-writer Services this way. Mounts outside the managed App and unmanaged volumes remain blocked.
 
 ## Images and names
 

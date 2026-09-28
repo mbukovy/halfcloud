@@ -612,7 +612,7 @@ export class ApplicationService {
       if (config.image.startsWith(prefix) && (!recipe || recipe.image !== config.image || (await this.docker.inspectContainer(source.id)).imageId !== recipe.imageId)) {
         throw new Error('Verify the source Service update recipe before copying it');
       }
-      const created = await this.createServiceRecord(app.id, { name: normalized, image: config.image, ports, hostname, environment: runtime.environment, namedVolumes: config.namedVolumes }, onProgress);
+      const created = await this.createServiceRecord(app.id, { name: normalized, image: config.image, ports, hostname, environment: runtime.environment, volumes: config.volumes, sharedVolumes: config.sharedVolumes }, onProgress);
       try {
         const copied = (await this.service(app.id, normalized)).serviceId!;
         await this.environment.replaceVariables(copied, variables.map((variable) => ({ ...variable, id: `env_${randomUUID()}`, serviceId: copied })));

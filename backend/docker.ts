@@ -19,6 +19,7 @@ export interface CreateContainerInput {
   ports: PortMap;
   environment?: Record<string, string>;
   namedVolumes?: Record<string, string>;
+  sharedVolumes?: Record<string, string>;
   volumes?: Record<string, string>;
   hostname?: string;
   start?: boolean;
@@ -492,6 +493,13 @@ export class DockerService {
       await createOrReuseManagedVolume(this.docker, input.serviceId, localName, input.appId);
       mounts.push({ Type: 'volume', Source: volumeName, Target: containerTarget });
     }
+    for (const [volumeName, containerTarget] of Object.entries(input.sharedVolumes ?? {})) {
+      if (!containerTarget.startsWith('/') || containerTarget === '/' || mountTargets.has(containerTarget)) throw new Error(`Invalid shared mount target ${containerTarget}`);
+      const volume = await this.managedVolume(volumeName);
+      if (volume.Labels?.['halfcloud.app.id'] !== input.appId) throw new Error('Shared volume must belong to the same App');
+      mountTargets.add(containerTarget);
+      mounts.push({ Type: 'volume', Source: volumeName, Target: containerTarget });
+    }
 
     const environment = input.environment ?? {};
     if (Object.keys(environment).length) {
@@ -881,16 +889,27 @@ export class DockerService {
   async getContainerCopyConfiguration(id: string) {
     const inspection = await (await this.managedContainer(id)).inspect();
     const serviceId = inspection.Config.Labels?.['halfcloud.service.id'];
-    const namedVolumes: Record<string, string> = {};
+    const appId = inspection.Config.Labels?.['halfcloud.app.id'];
+    if (!serviceId || !appId) throw new Error('Managed Service is missing its App or Service ID');
+    const sharedVolumes: Record<string, string> = {};
+    const volumes: Record<string, string> = {};
     for (const mount of inspection.Mounts) {
-      if (mount.Type !== 'volume' || !serviceId || !mount.Name?.startsWith(`halfcloud-${serviceId}-`)) {
-        throw new Error('Services with bind mounts or unmanaged storage cannot be copied safely');
+      if (mount.RW === false) throw new Error('Read-only storage cannot be copied as writable');
+      if (mount.Type === 'bind') {
+        const appRoot = await realpath(path.join(this.appsDir, appId));
+        const source = await realpath(mount.Source);
+        const relative = path.relative(appRoot, source);
+        if (source !== mount.Source || managedBindPath(appRoot, relative) !== source) throw new Error('Bind mount is outside the managed App directory');
+        volumes[relative] = mount.Destination;
+      } else if (mount.Type === 'volume' && mount.Name) {
+        const volume = await this.managedVolume(mount.Name);
+        if (volume.Labels?.['halfcloud.app.id'] !== appId) throw new Error('Volume is not owned by the source App');
+        sharedVolumes[mount.Name] = mount.Destination;
+      } else {
+        throw new Error('Unmanaged storage cannot be copied safely');
       }
-      const volume = await this.managedVolume(mount.Name);
-      if (volume.Labels?.['halfcloud.application'] !== serviceId) throw new Error('Service storage is not owned by the source Service');
-      namedVolumes[mount.Name.slice(`halfcloud-${serviceId}-`.length)] = mount.Destination;
     }
-    return { image: inspection.Config.Image, namedVolumes };
+    return { image: inspection.Config.Image, volumes, sharedVolumes };
   }
 
   async replaceContainerEnvironment(id: string, nextEnvironment: Record<string, string>) {

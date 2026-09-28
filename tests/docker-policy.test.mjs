@@ -87,18 +87,64 @@ test('limits bind mounts to application-relative paths', () => {
   }
 });
 
-test('copy configuration accepts owned named volumes but refuses bind or foreign storage', async () => {
+test('copy configuration shares managed bind directories and named volumes but rejects foreign storage', async (t) => {
+  const appsDir = await mkdtemp(path.join(tmpdir(), 'halfcloud-shared-storage-'));
+  t.after(() => rm(appsDir, { recursive: true, force: true }));
+  const appId = 'app_00000000-0000-4000-8000-000000000000';
+  await mkdir(path.join(appsDir, appId, 'uploads'), { recursive: true });
   const docker = Object.create(DockerService.prototype);
+  docker.appsDir = appsDir;
   const serviceId = 'service_original';
-  const inspection = { Config: { Image: 'example:1', Labels: { 'halfcloud.service.id': serviceId } }, Mounts: [] };
+  const inspection = { Config: { Image: 'example:1', Labels: { 'halfcloud.service.id': serviceId, 'halfcloud.app.id': appId } }, Mounts: [] };
   docker.managedContainer = async () => ({ inspect: async () => inspection });
-  docker.managedVolume = async () => ({ Labels: { 'halfcloud.application': serviceId } });
-  inspection.Mounts = [{ Type: 'volume', Name: `halfcloud-${serviceId}-data`, Destination: '/data' }];
-  assert.deepEqual(await docker.getContainerCopyConfiguration('container'), { image: 'example:1', namedVolumes: { data: '/data' } });
-  inspection.Mounts = [{ Type: 'bind', Source: '/data', Destination: '/data' }];
-  await assert.rejects(docker.getContainerCopyConfiguration('container'), /cannot be copied safely/);
+  docker.managedVolume = async () => ({ Labels: { 'halfcloud.app.id': appId } });
+  inspection.Mounts = [
+    { Type: 'volume', Name: `halfcloud-${serviceId}-data`, Destination: '/data' },
+    { Type: 'bind', Source: path.join(appsDir, appId, 'uploads'), Destination: '/uploads' },
+  ];
+  assert.deepEqual(await docker.getContainerCopyConfiguration('container'), {
+    image: 'example:1', sharedVolumes: { [`halfcloud-${serviceId}-data`]: '/data' }, volumes: { uploads: '/uploads' },
+  });
+  inspection.Mounts = [{ Type: 'bind', Source: appsDir, Destination: '/data' }];
+  await assert.rejects(docker.getContainerCopyConfiguration('container'), /managed application directory/);
   inspection.Mounts = [{ Type: 'volume', Name: 'halfcloud-service_foreign-data', Destination: '/data' }];
-  await assert.rejects(docker.getContainerCopyConfiguration('container'), /cannot be copied safely/);
+  docker.managedVolume = async () => ({ Labels: { 'halfcloud.app.id': 'app_foreign' } });
+  await assert.rejects(docker.getContainerCopyConfiguration('container'), /not owned by the source App/);
+  inspection.Mounts = [{ Type: 'volume', Name: 'anonymous', Destination: '/data' }];
+  docker.managedVolume = async () => { throw new Error('not managed'); };
+  await assert.rejects(docker.getContainerCopyConfiguration('container'), /not managed/);
+});
+
+test('creating a copy mounts the same managed storage and rejects volumes from other Apps', async (t) => {
+  const appsDir = await mkdtemp(path.join(tmpdir(), 'halfcloud-shared-storage-'));
+  t.after(() => rm(appsDir, { recursive: true, force: true }));
+  const appId = 'app_00000000-0000-4000-8000-000000000000';
+  await mkdir(path.join(appsDir, appId, 'uploads'), { recursive: true });
+  const docker = Object.create(DockerService.prototype);
+  docker.appsDir = appsDir;
+  docker.ensureAppNetwork = async () => {};
+  let owner = appId;
+  let created;
+  docker.docker = {
+    listContainers: async () => [],
+    getImage: () => ({ inspect: async () => ({ Config: { User: '' } }) }),
+    getVolume: () => ({ inspect: async () => ({ Name: 'halfcloud-service_original-data', Labels: {
+      'halfcloud.managed': 'true', 'halfcloud.application': 'service_original', 'halfcloud.volume': 'data', 'halfcloud.app.id': owner,
+    } }) }),
+    createContainer: async (input) => {
+      created = input;
+      return { inspect: async () => ({ Id: 'copied', State: { Running: false } }) };
+    },
+  };
+  const input = {
+    name: 'copy', appId, serviceId: 'service_copy', serviceName: 'worker-2', publicName: 'copy', image: 'example:1', ports: {}, start: false,
+    volumes: { uploads: '/uploads' }, sharedVolumes: { 'halfcloud-service_original-data': '/data' },
+  };
+  await docker.createContainer(input);
+  assert.deepEqual(created.HostConfig.Binds, [`${appsDir}/${appId}/uploads:/uploads`]);
+  assert.deepEqual(created.HostConfig.Mounts, [{ Type: 'volume', Source: 'halfcloud-service_original-data', Target: '/data' }]);
+  owner = 'app_foreign';
+  await assert.rejects(docker.createContainer(input), /same App/);
 });
 
 test('accepts all required labels on a managed volume', () => {

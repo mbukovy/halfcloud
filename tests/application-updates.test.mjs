@@ -76,6 +76,7 @@ async function fixture(t, { verify = true } = {}) {
       const service = {
         id: `container-${this.services.length + 1}`, appId: input.appId, serviceId: input.serviceId,
         name: input.serviceName, runtimeName: input.name, image: input.image, hostname: input.hostname,
+        mounts: { volumes: input.volumes ?? {}, sharedVolumes: input.sharedVolumes ?? {} },
         state: input.start === false ? 'exited' : 'running', status: 'Created',
         ports: Object.entries(input.ports).map(([host, target]) => ({ host: Number(host), container: Number(target), protocol: 'tcp' })),
         internalPorts: [], cpuPercent: 0, memoryUsed: 0, memoryLimit: 0,
@@ -90,7 +91,7 @@ async function fixture(t, { verify = true } = {}) {
     },
     async getContainerCopyConfiguration(id) {
       const service = this.services.find((candidate) => candidate.id === id);
-      return { image: service.image, namedVolumes: {} };
+      return { image: service.image, ...service.mounts };
     },
     async startContainer(id) {
       this.services.find((service) => service.id === id).state = 'running';
@@ -211,6 +212,7 @@ test('first verified deployment records distinct per-Service recipes and images 
 test('copying a worker keeps protected environment and includes both instances in Git updates', async (t) => {
   const f = await fixture(t);
   const worker = f.runtime.services.find((service) => service.name === 'worker');
+  worker.mounts = { volumes: { uploads: '/app/uploads' }, sharedVolumes: { [`halfcloud-${worker.serviceId}-data`]: '/app/data' } };
   const original = await f.environment.list(worker.serviceId, { API_KEY: secret });
   assert.equal(original[0].protectedFromAI, false);
   await f.environment.replaceVariables(worker.serviceId, [{ ...original[0], protectedFromAI: true }]);
@@ -221,6 +223,7 @@ test('copying a worker keeps protected environment and includes both instances i
   assert.doesNotMatch(JSON.stringify(copied), /runtime-only-secret/);
   const copyInput = f.runtime.services.find((service) => service.serviceId === copied.serviceId);
   assert.equal(copyInput.state, 'exited');
+  assert.deepEqual(copyInput.mounts, worker.mounts);
   const variables = await f.environment.list(copied.serviceId);
   assert.equal(variables[0].value, secret);
   assert.equal(variables[0].protectedFromAI, true);
