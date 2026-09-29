@@ -214,6 +214,13 @@ export class ApplicationService {
         throw error;
       }
       await replacement.commit();
+      if (app.source.currentCommit === build.commit && replacement.state === 'running') {
+        const updates = await this.repositories.getServiceUpdates(app.id);
+        await this.repositories.saveServiceUpdates(app.id, [
+          ...updates.filter((recipe) => recipe.serviceId !== service.serviceId),
+          { ...build, serviceId: service.serviceId!, healthPath: service.ports.some((port) => port.protocol === 'tcp') ? healthPath ?? saved?.healthPath ?? '/' : null },
+        ]);
+      }
       return { appId: app.id, serviceId: service.serviceId, image, containerId: replacement.containerId, state: replacement.state };
     });
   }
@@ -577,20 +584,22 @@ export class ApplicationService {
 
   async addService(appIdOrName: string, input: Omit<CreateContainerInput, 'appId' | 'serviceId' | 'serviceName' | 'publicName' | 'name' | 'start'> & { name: string }, onProgress?: (progress: DeploymentProgress) => void) {
     const app = await this.apps.get(appIdOrName);
-    this.assertAppNotUpdating(app.id);
-    const sourceDeployment = app.source?.type === 'git' && app.source.resolvedCommit !== app.source.currentCommit;
-    if (sourceDeployment) await this.repositories.setStage(app.id, 'deploying', `Preparing ${input.name}`);
-    try {
-      const name = this.serviceName(input.name);
-      const existing = (await this.getApp(app.id, false)).services;
-      if (existing.some((service) => service.name === name)) throw new Error(`Service ${name} already exists in ${app.name}`);
-      await this.createServiceRecord(app.id, { ...input, name }, onProgress);
-      onProgress?.({ phase: 'activity', label: `Verifying ${name}` });
-      return this.getApp(app.id);
-    } catch (error) {
-      if (sourceDeployment) await this.repositories.fail(app.id, 'deploying', error);
-      throw error;
-    }
+    const add = async () => {
+      const sourceDeployment = app.source?.type === 'git' && app.source.resolvedCommit !== app.source.currentCommit;
+      if (sourceDeployment) await this.repositories.setStage(app.id, 'deploying', `Preparing ${input.name}`);
+      try {
+        const name = this.serviceName(input.name);
+        const existing = (await this.getApp(app.id, false)).services;
+        if (existing.some((service) => service.name === name)) throw new Error(`Service ${name} already exists in ${app.name}`);
+        await this.createServiceRecord(app.id, { ...input, name }, onProgress);
+        onProgress?.({ phase: 'activity', label: `Verifying ${name}` });
+        return this.getApp(app.id);
+      } catch (error) {
+        if (sourceDeployment) await this.repositories.fail(app.id, 'deploying', error);
+        throw error;
+      }
+    };
+    return app.source ? this.withRepositoryOperation(app.id, add) : add();
   }
 
   async renameApp(appIdOrName: string, name: string) {
@@ -1079,10 +1088,26 @@ export class ApplicationService {
   }
 
   async deleteContainer(id: string) {
-    await this.assertServiceNotUpdating(id);
-    const result = await this.docker.deleteContainer(id);
-    await this.syncRoutes();
-    return result;
+    const service = await this.application(id);
+    const remove = async () => {
+      await this.assertServiceNotUpdating(service.id);
+      const updates = service.appId && service.serviceId && (await this.apps.get(service.appId)).source
+        ? await this.repositories.getServiceUpdates(service.appId) : [];
+      const remaining = updates.filter((recipe) => recipe.serviceId !== service.serviceId);
+      if (remaining.length !== updates.length) await this.repositories.saveServiceUpdates(service.appId!, remaining);
+      try {
+        const result = await this.docker.deleteContainer(service.id);
+        await this.syncRoutes();
+        return result;
+      } catch (error) {
+        if (remaining.length !== updates.length && (await this.docker.listContainers(false)).some((container) => container.id === service.id)) {
+          await this.repositories.saveServiceUpdates(service.appId!, updates);
+        }
+        throw error;
+      }
+    };
+    const app = service.appId ? await this.apps.get(service.appId) : undefined;
+    return app?.source ? this.withRepositoryOperation(app.id, remove) : remove();
   }
 
   async syncRoutes() {

@@ -97,6 +97,10 @@ async function fixture(t, { verify = true } = {}) {
       this.services.find((service) => service.id === id).state = 'running';
       return { containerId: id, state: 'running' };
     },
+    async deleteContainer(id) {
+      this.services = this.services.filter((service) => service.id !== id);
+      return { containerId: id, deleted: true };
+    },
     async inspectContainer(id) {
       const service = this.services.find((candidate) => candidate.id === id);
       assert.ok(service, `Unknown container ${id}`);
@@ -251,6 +255,60 @@ test('a private copy of a public Service uses a private update health check', as
   const recipe = (await f.repositories.getServiceUpdates(f.app.id)).find((entry) => entry.serviceId === copied.serviceId);
   assert.equal(recipe.healthPath, null);
   assert.deepEqual(f.runtime.services.find((service) => service.serviceId === copied.serviceId).ports, []);
+});
+
+test('adding a repository Service requires verification before it joins automatic updates', async (t) => {
+  const f = await fixture(t);
+  const built = await f.applications.buildRepositoryImage(f.app.id, 'worker', 'Dockerfile.worker');
+  await f.applications.addService(f.app.id, { name: 'scheduler', image: built.image, ports: {} });
+  await f.applications.startService(f.app.id, 'scheduler');
+  assert.deepEqual(await f.repositories.getServiceUpdates(f.app.id), f.previousUpdates);
+  await assert.rejects(f.applications.updateGitApp(f.app.id), /needs a verified update recipe/);
+
+  await f.applications.verifyGitDeployment(f.app.id, 'web', '/ready');
+  assert.equal((await f.repositories.getServiceUpdates(f.app.id)).length, 3);
+  assert.equal((await f.applications.updateGitApp(f.app.id)).updated, true);
+});
+
+test('replacing a Service at the verified commit refreshes its saved build recipe', async (t) => {
+  const f = await fixture(t);
+  const old = f.previousUpdates[0];
+  const built = await f.applications.buildRepositoryImage(f.app.id, 'web', 'Dockerfile', undefined, {
+    dockerfileContent: 'FROM node:22\nCMD ["node", "web.mjs"]\n',
+    dockerignoreContent: 'node_modules\n',
+  });
+  await f.applications.deployRepositoryImage(f.app.id, 'web', built.image, '/ready');
+  const updated = (await f.repositories.getServiceUpdates(f.app.id)).find((recipe) => recipe.serviceId === old.serviceId);
+  assert.equal(updated.image, built.image);
+  assert.equal(updated.imageId, built.imageId);
+  assert.equal(updated.healthPath, '/ready');
+  assert.deepEqual(updated.recipe, (await f.repositories.getBuild(f.app.id, built.image)).recipe);
+  assert.equal((await f.repositories.getServiceUpdates(f.app.id)).length, 2);
+});
+
+test('removing a Service removes its saved recipe before the next Git update', async (t) => {
+  const f = await fixture(t);
+  const worker = f.runtime.services.find((service) => service.name === 'worker');
+  await f.applications.removeService(f.app.id, worker.serviceId);
+  assert.deepEqual((await f.repositories.getServiceUpdates(f.app.id)).map((recipe) => recipe.serviceId), [f.previousUpdates[0].serviceId]);
+  const result = await f.applications.updateGitApp(f.app.id);
+  assert.deepEqual(result.services.map((service) => service.serviceId), [f.previousUpdates[0].serviceId]);
+});
+
+test('deleting a container directly also removes its saved recipe', async (t) => {
+  const f = await fixture(t);
+  const worker = f.runtime.services.find((service) => service.name === 'worker');
+  await f.applications.deleteContainer(worker.id);
+  assert.deepEqual((await f.repositories.getServiceUpdates(f.app.id)).map((recipe) => recipe.serviceId), [f.previousUpdates[0].serviceId]);
+});
+
+test('a failed Service deletion restores the saved update recipe', async (t) => {
+  const f = await fixture(t);
+  const worker = f.runtime.services.find((service) => service.name === 'worker');
+  t.mock.method(f.runtime, 'deleteContainer', async () => { throw new Error('Docker deletion failed'); });
+  await assert.rejects(f.applications.removeService(f.app.id, worker.serviceId), /Docker deletion failed/);
+  assert.deepEqual(await f.repositories.getServiceUpdates(f.app.id), f.previousUpdates);
+  assert.ok(f.runtime.services.some((service) => service.serviceId === worker.serviceId));
 });
 
 test('initial build staging is cleaned after Docker or build-record failure without changing checkout files', async (t) => {

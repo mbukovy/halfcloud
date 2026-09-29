@@ -56,6 +56,8 @@ The first verified deployment saves a dedicated `Dockerfile.update`, ignore rule
 
 Copying a verified repository-built Service also copies its update recipe. Once the new Service is started, manual and GitHub push updates build and replace both instances along with every other repository-built Service in the App. A Service without a verified recipe cannot be copied until its deployment is verified.
 
+Adding a repository-built Service requires starting it and verifying the Git deployment again before automatic updates can include it. Replacing a running Service with a build at the already verified commit updates its saved recipe after readiness checks; replacing it with a build at a new commit requires App-wide verification. Removing a Service also removes its saved recipe. Image-based supporting Services do not need Git update recipes.
+
 During preparation, `verifyGitDeployment` accepts `serviceHealthPaths` keyed by Service ID or name, so multiple APIs can each save their own readiness endpoint. Docker health-check startup timing is respected within a bounded five-minute readiness window.
 
 An update is one deterministic backend operation, not an AI deployment conversation. HalfCloud fetches the configured branch once and builds each Service from the latest source and its saved recipe in an isolated build context. All candidate images are built before any running container is stopped. Supporting databases and caches are left alone. The App and Service identities, domains and route protection, environment values, ports, and persistent storage are retained.
