@@ -217,6 +217,74 @@ test('bulk environment edits, additions, and deletions use one container recreat
   ]);
 });
 
+test('parallel agent environment changes on one Service keep both values and never overlap replacements', async (t) => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'halfcloud-environment-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  let environment = { IDENTITY_DATA_DIR: '/data/original', IDENTITY_ID: 'original' };
+  let replacing = false;
+  let releaseFirst;
+  const firstStarted = new Promise((resolve) => { releaseFirst = resolve; });
+  let finishFirst;
+  const firstFinished = new Promise((resolve) => { finishFirst = resolve; });
+  const replacements = [];
+  const docker = {
+    getContainerEnvironment: async () => ({ name: 'service_mayali', environment: { ...environment } }),
+    listContainers: async () => [],
+    replaceContainerEnvironment: async (_id, next) => {
+      assert.equal(replacing, false, 'replacements must not overlap');
+      replacing = true;
+      replacements.push(next);
+      if (replacements.length === 1) {
+        releaseFirst();
+        await firstFinished;
+      }
+      environment = next;
+      replacing = false;
+      return { containerId: 'replacement' };
+    },
+  };
+  const store = new EnvironmentStore(directory);
+  await store.initialize('service_mayali', environment, false);
+  const applications = new ApplicationService(docker, { sync: async () => undefined }, {}, store);
+  const first = applications.setEnvironmentVariableForAgent('service_mayali', 'IDENTITY_DATA_DIR', '/data/mayali');
+  await firstStarted;
+  const second = applications.setEnvironmentVariableForAgent('service_mayali', 'IDENTITY_ID', 'mayali');
+  try {
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(replacements.length, 1);
+  } finally {
+    finishFirst();
+  }
+  await Promise.all([first, second]);
+  assert.deepEqual(environment, { IDENTITY_DATA_DIR: '/data/mayali', IDENTITY_ID: 'mayali' });
+  assert.deepEqual(replacements[1], environment);
+});
+
+test('a failed environment replacement releases the Service queue for a later edit', async (t) => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'halfcloud-environment-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const store = new EnvironmentStore(directory);
+  await store.initialize('service_mayali', { IDENTITY_ID: 'original' }, false);
+  let environment = { IDENTITY_ID: 'original' };
+  let calls = 0;
+  const docker = {
+    getContainerEnvironment: async () => ({ name: 'service_mayali', environment }),
+    listContainers: async () => [],
+    replaceContainerEnvironment: async (_id, next) => {
+      if (++calls === 1) throw new Error('replacement failed');
+      environment = next;
+      return { containerId: 'replacement' };
+    },
+  };
+  const applications = new ApplicationService(docker, { sync: async () => undefined }, {}, store);
+  const first = applications.setEnvironmentVariableForAgent('service_mayali', 'IDENTITY_ID', 'failed');
+  const second = applications.setEnvironmentVariableForAgent('service_mayali', 'IDENTITY_ID', 'mayali');
+  await assert.rejects(first, /replacement failed/);
+  await second;
+  assert.equal(environment.IDENTITY_ID, 'mayali');
+  assert.equal(calls, 2);
+});
+
 test('provider-bound history excludes environment mutation values', () => {
   const messages = [{
     id: 'message',

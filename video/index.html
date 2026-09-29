@@ -1,0 +1,912 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f2efe7">
+  <meta name="description" content="You vibe coded it. Now vibe deploy it. A 30-second HalfCloud product film.">
+  <title>From localhost to live. | HalfCloud</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      color-scheme: light;
+      font-family: 'Manrope', Arial, sans-serif;
+      color: #16231f;
+      background: #f2efe7;
+      --paper: #f2efe7;
+      --panel: #faf8f2;
+      --ink: #16231f;
+      --muted: #777b73;
+      --line: #d7d4ca;
+      --orange: #ee5d2f;
+      --green: #2f9a6b;
+      --mono: 'DM Mono', monospace;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-width: 320px; }
+    button, input, a { -webkit-tap-highlight-color: transparent; }
+    button, input { font: inherit; color: inherit; }
+    button, a { touch-action: manipulation; }
+    button { cursor: pointer; }
+    a { color: inherit; text-decoration: none; }
+    button:focus-visible, a:focus-visible, input:focus-visible { outline: 2px solid var(--orange); outline-offset: 5px; }
+    button { border: 0; }
+    svg { display: block; }
+    .icon { width: 24px; height: 24px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; flex-shrink: 0; }
+    .logo { width: 48px; height: 34px; color: var(--orange); flex-shrink: 0; }
+    .mono { font-family: var(--mono); }
+    .page { max-width: 1536px; margin: 0 auto; padding: 0 48px; }
+    .masthead { height: 102px; display: flex; align-items: center; justify-content: space-between; gap: 24px; }
+    .brand { display: flex; align-items: center; gap: 12px; font-size: 21px; font-weight: 700; letter-spacing: -.8px; }
+    .repo-link { display: flex; align-items: center; gap: 11px; font-size: 12px; }
+    .repo-link .icon { width: 17px; height: 17px; }
+    .repo-link:hover { color: var(--orange); }
+    .masthead-actions { display: flex; align-items: center; gap: 24px; }
+    .download-link { display: flex; align-items: center; gap: 9px; padding: 10px 13px; border: 1px solid #c9c7bc; border-radius: 4px; font: 10px var(--mono); }
+    .download-link:hover { color: var(--orange); border-color: var(--orange); }
+    .download-link .icon { width: 16px; height: 16px; }
+    .film { position: relative; }
+    .viewport { position: relative; width: 100%; aspect-ratio: 16 / 9; overflow: hidden; border: 1px solid #d0cec3; background: var(--paper); isolation: isolate; }
+    .stage { width: 1600px; height: 900px; position: absolute; top: 50%; left: 50%; transform-origin: center; overflow: hidden; background: var(--paper); }
+    .film-brand { position: absolute; left: 65px; top: 49px; z-index: 35; font-size: 24px; }
+    .film-brand .logo { width: 52px; height: 36px; }
+    .scene { position: absolute; inset: 0; visibility: hidden; }
+    .scene.is-active { visibility: visible; }
+    .eyebrow { font: 14px var(--mono); letter-spacing: .13em; color: var(--muted); text-transform: uppercase; }
+    .orange { color: var(--orange); }
+    .headline { margin: 0; font-size: 76px; line-height: 1.08; font-weight: 600; letter-spacing: -4.8px; }
+    .caption { position: absolute; left: 80px; right: 80px; text-align: center; }
+    .caption span { display: inline-block; }
+    .browser { border: 1px solid #c9c8bc; border-radius: 12px; background: var(--panel); overflow: hidden; box-shadow: 0 28px 75px #16231f14, 0 3px 8px #16231f04; }
+    .browser-chrome { height: 56px; display: flex; align-items: center; gap: 18px; padding: 0 23px; border-bottom: 1px solid #dad7cd; background: #ebe8df; }
+    .browser-dots { display: flex; gap: 7px; }
+    .browser-dots i { width: 8px; height: 8px; border-radius: 50%; background: #c5c4b9; }
+    .browser-address { display: flex; gap: 9px; justify-content: center; align-items: center; height: 32px; background: #f8f6ef; border: 1px solid #dedbd1; border-radius: 5px; width: 410px; margin: auto; font: 14px var(--mono); color: #62685f; }
+    .browser-address .icon { width: 15px; height: 15px; }
+    .browser-chrome > .icon { width: 16px; height: 16px; color: #7f8379; }
+    .demo-app { height: 430px; display: grid; grid-template-columns: 170px 1fr; text-align: left; background: #faf8f2; }
+    .app-sidebar { background: #efede5; padding: 27px 18px; border-right: 1px solid #e0ddd2; }
+    .app-wordmark { display: flex; align-items: center; gap: 9px; font-size: 21px; font-weight: 800; letter-spacing: -1px; margin: 0 6px 37px; }
+    .awesome-mark { display: block; width: 23px; height: 24px; background: var(--orange); border-radius: 3px 11px 3px 3px; transform: rotate(-8deg); }
+    .app-nav { display: flex; gap: 10px; align-items: center; padding: 11px 10px; font-size: 12px; color: #767b70; margin: 5px 0; border-radius: 4px; }
+    .app-nav .icon { width: 15px; height: 15px; }
+    .app-nav.selected { color: var(--ink); background: #e2e1d5; font-weight: 700; }
+    .app-workspace { padding: 28px 31px; }
+    .app-greeting { font-size: 30px; letter-spacing: -1.3px; font-weight: 600; margin: 4px 0 24px; }
+    .app-nav b { height: 5px; width: 60px; background: #d3d6c8; border-radius: 3px; }
+    .app-stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 11px; }
+    .app-stat { padding: 14px 15px; border: 1px solid #deded1; border-radius: 5px; background: #f8f6ef; }
+    .app-stat:first-child { background: #e7ebdc; border-color: #d7decb; }
+    .app-stat label { font: 9px var(--mono); color: #7c8174; display: block; }
+    .app-stat strong { display: inline-block; font-size: 31px; font-weight: 500; letter-spacing: -1.4px; margin-top: 5px; }
+    .app-projects { margin-top: 22px; }
+    .project-card { border: 1px solid #deded1; border-radius: 5px; padding: 16px; }
+    .chart { height: 142px; display: flex; align-items: end; gap: 16px; padding-top: 15px; border-bottom: 1px solid #dddccf; }
+    .chart i { flex: 1; height: var(--h); background: #c8d0b8; border-radius: 3px 3px 0 0; transform-origin: bottom; }
+    .chart i:nth-last-child(-n+3) { background: var(--orange); }
+    .hook-browser { position: absolute; left: 320px; top: 150px; width: 960px; }
+    .hook-browser .browser-chrome { height: 124px; }
+    .hook-browser .browser-address { width: 750px; height: 86px; border: 2px solid var(--orange); background: #fff5eb; color: var(--orange); font-size: 60px; letter-spacing: -2px; }
+    .hook-browser .browser-address .icon { width: 28px; height: 28px; }
+    .hook-caption { top: 752px; font-size: 64px; letter-spacing: -3px; white-space: nowrap; }
+    .chaos-card { position: absolute; border: 1px solid #445047; border-radius: 7px; overflow: hidden; background: #16231f; color: #e4e9df; box-shadow: 0 24px 60px #16231f26; }
+    .terminal-top { height: 42px; padding: 0 17px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid #ffffff18; color: #9dab9e; font: 11px var(--mono); }
+    .terminal-top .browser-dots i { width: 6px; height: 6px; background: #5a685d; }
+    .terminal-body { padding: 30px; }
+    .terminal-body h3 { font-size: 34px; font-weight: 500; letter-spacing: -1.3px; margin: 0 0 16px; display: flex; align-items: center; gap: 13px; }
+    .terminal-body h3 .icon { width: 31px; height: 31px; color: #ee8058; }
+    .code-lines { display: grid; gap: 12px; margin-top: 28px; }
+    .code-lines i { width: 68%; height: 5px; border-radius: 3px; background: currentColor; opacity: .15; }
+    .code-lines i:last-child { width: 42%; }
+    .chaos-docker { left: 207px; top: 191px; width: 535px; height: 282px; }
+    .chaos-ssl { left: 902px; top: 146px; width: 392px; height: 223px; background: #faf8f2; color: var(--ink); border-color: #c8c7bc; }
+    .chaos-ssl .terminal-top { border-color: #dedbd1; color: #8e8d80; }
+    .chaos-ports { left: 815px; top: 359px; width: 517px; height: 248px; }
+    .chaos-proxy { left: 330px; top: 404px; width: 530px; height: 264px; }
+    .wave { position: absolute; z-index: 30; width: 2300px; height: 2000px; border-radius: 48%; top: 0; left: 0; background: var(--orange); visibility: hidden; }
+    .operator { position: absolute; left: 286px; top: 270px; width: 1028px; height: 330px; border: 1px solid #c9c7bc; background: #f7f5ed; border-radius: 9px; box-shadow: 0 22px 60px #16231f10; overflow: hidden; }
+    .operator-top { height: 63px; border-bottom: 1px solid var(--line); display: flex; align-items: center; justify-content: space-between; padding: 0 28px; }
+    .operator-top .brand { font-size: 19px; gap: 10px; }
+    .operator-top .logo { width: 40px; height: 28px; }
+    .server-name { border-left: 1px solid var(--line); padding-left: 18px; margin-left: 12px; font: 12px var(--mono); color: #8a8c7e; letter-spacing: 0; font-weight: 400; }
+    .healthy { display: flex; align-items: center; gap: 9px; font: 10px var(--mono); letter-spacing: .06em; }
+    .health-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--green); box-shadow: 0 0 0 4px #2f9a6b14; }
+    .chat-composer { position: absolute; left: 36px; right: 36px; top: 113px; height: 166px; padding: 25px; border: 1px solid #c7c4ba; border-radius: 5px; background: #fffefb; box-shadow: 0 8px 28px #19231f0c; }
+    .repo-chip { display: flex; gap: 10px; align-items: center; width: fit-content; height: 32px; padding: 0 10px; border: 1px solid #dfdccf; background: #f0ede4; border-radius: 3px; font: 12px var(--mono); color: #626a5d; }
+    .repo-chip .icon { width: 15px; height: 15px; }
+    .typed-line { margin-top: 20px; font-size: 32px; letter-spacing: -.8px; white-space: nowrap; }
+    .typing-caret { display: inline-block; width: 2px; height: 26px; background: var(--orange); vertical-align: -4px; margin-left: 3px; }
+    .send-button { position: absolute; right: 18px; bottom: 18px; width: 40px; height: 40px; background: var(--orange); color: #fff; border-radius: 3px; display: grid; place-items: center; }
+    .pipeline { position: absolute; left: 150px; top: 320px; width: 1300px; height: 280px; }
+    .connection-svg { position: absolute; left: 0; top: 0; width: 1300px; height: 280px; overflow: visible; }
+    .connection-base { fill: none; stroke: #d5d6c9; stroke-width: 2; stroke-dasharray: 5 8; }
+    .connection-live { fill: none; stroke: var(--orange); stroke-width: 3; stroke-linecap: round; filter: drop-shadow(0 0 6px #ee5d2f66); }
+    .node { position: absolute; top: 44px; display: flex; flex-direction: column; align-items: center; }
+    .repo-node { left: 71px; width: 238px; }
+    .node-box { height: 172px; width: 188px; background: #faf8f2; border: 1px solid #c8cabe; border-radius: 10px; display: grid; place-items: center; box-shadow: 0 15px 35px #16231f08; }
+    .repo-node .icon { width: 66px; height: 66px; stroke-width: 1; }
+    .node-label { font: 12px var(--mono); margin-top: 22px; color: #666f61; }
+    .server-node { left: 521px; width: 258px; top: 20px; }
+    .server-box { width: 206px; height: 218px; border: 1px solid #a8afa1; border-radius: 11px; background: #e7e9df; padding: 23px 18px; box-shadow: 0 15px 35px #16231f08; }
+    .server-brand { display: flex; justify-content: space-between; align-items: center; font: 10px var(--mono); color: #62705f; margin-bottom: 22px; }
+    .server-brand .logo { width: 38px; height: 26px; }
+    .server-rack { height: 41px; margin-top: 10px; border: 1px solid #c3cab9; border-radius: 3px; background: #f7f8f0; display: flex; align-items: center; padding: 0 14px; gap: 5px; }
+    .server-rack i { width: 3px; height: 14px; background: #c2c9b6; }
+    .server-rack b { margin-left: auto; width: 5px; height: 5px; border-radius: 50%; background: var(--green); }
+    .server-base { width: 45px; height: 5px; background: #bdc4b2; border-radius: 8px; margin: 21px auto 0; }
+    .globe-node { left: 991px; width: 238px; }
+    .globe-node .node-box { border-radius: 50%; width: 172px; background: #ecefe3; border-color: #d0d6c3; }
+    .globe-node .icon { width: 92px; height: 92px; stroke-width: .8; color: #6d8061; }
+    .https-badge { position: absolute; left: 1060px; top: 195px; height: 35px; padding: 0 11px; display: flex; align-items: center; gap: 7px; border: 1px solid #b4cdb8; border-radius: 4px; background: #f4faf1; color: #387861; font: 12px var(--mono); }
+    .https-badge .icon { width: 15px; height: 15px; }
+    .flying-app { position: absolute; left: 195px; top: 42px; width: 160px; height: 150px; border: 1px solid #d4b29b; border-radius: 7px; background: #fffaf0; box-shadow: 0 16px 45px #16231f25; padding: 16px; }
+    .flying-app .awesome-mark { width: 18px; height: 20px; }
+    .flying-app strong { font-size: 16px; position: absolute; top: 15px; left: 43px; letter-spacing: -.7px; }
+    .mini-chart { display: flex; gap: 5px; align-items: end; height: 54px; margin: 15px 0 10px; }
+    .mini-chart i { flex: 1; background: #c6d0b3; height: var(--h); border-radius: 2px; }
+    .mini-chart i:last-child { background: var(--orange); }
+    .result-browser { position: absolute; left: 212px; top: 166px; width: 960px; }
+    .result-browser .browser-address { color: #397253; border-color: #cbd6bf; background: #f4f7eb; }
+    .result-browser .browser-address b { font-weight: 400; color: #75886b; }
+    .phone { position: absolute; left: 1130px; top: 258px; width: 228px; height: 434px; border: 6px solid #25372c; border-radius: 32px; background: #faf8f2; box-shadow: 0 24px 40px #16231f1a; overflow: hidden; }
+    .phone-top { height: 35px; display: flex; align-items: center; justify-content: space-between; padding: 0 14px; font: 9px var(--mono); }
+    .phone-island { position: absolute; left: 75px; top: 5px; width: 67px; height: 17px; border-radius: 20px; background: #25372c; }
+    .phone-url { height: 25px; margin: 2px 12px 10px; background: #ebece0; border-radius: 4px; font: 8px var(--mono); color: #687b5b; display: flex; align-items: center; justify-content: center; gap: 4px; }
+    .phone-url .icon { width: 10px; height: 10px; }
+    .phone .demo-app { display: block; width: 100%; height: auto; }
+    .phone .app-sidebar { display: none; }
+    .phone .app-workspace { padding: 0 15px; }
+    .phone .app-greeting { font-size: 21px; margin: 6px 0 16px; }
+    .phone .app-stats { grid-template-columns: repeat(2, 1fr); gap: 7px; }
+    .phone .app-stat { padding: 10px; }
+    .phone .app-stat:last-child { display: none; }
+    .phone .app-stat strong { font-size: 28px; }
+    .phone .app-stat label { font-size: 7px; }
+    .phone .app-projects { display: block; margin-top: 12px; }
+    .phone .project-card { padding: 11px; }
+    .phone .chart { height: 100px; gap: 5px; }
+    .phone-brand { display: flex; align-items: center; gap: 6px; padding: 3px 15px 10px; font-size: 17px; font-weight: 800; letter-spacing: -.6px; }
+    .phone-brand .awesome-mark { width: 15px; height: 16px; }
+    .phone-bottom { height: 4px; width: 72px; border-radius: 5px; background: #25372c; position: absolute; bottom: 7px; left: 72px; }
+    .visitor { position: absolute; display: flex; flex-direction: column; align-items: start; filter: drop-shadow(0 3px 2px #16231f15); }
+    .visitor svg { width: 27px; height: 33px; }
+    .visitor-one { left: 662px; top: 415px; color: #ee5d2f; }
+    .result-caption { top: 735px; font-size: 64px; letter-spacing: -3.4px; }
+    .result-caption span { margin: 0 5px; }
+    .result-caption .online { color: var(--orange); }
+    .outro-mark { position: absolute; left: 706px; top: 215px; width: 188px; height: 132px; color: var(--orange); }
+    .outro-wordmark { position: absolute; left: 0; right: 0; top: 351px; text-align: center; font-size: 34px; font-weight: 700; letter-spacing: -1.6px; }
+    .outro-caption { top: 430px; font-size: 68px; line-height: 1.18; letter-spacing: -3.8px; }
+    .outro-caption .line { display: block; }
+    .outro-caption .line:last-child { color: var(--orange); }
+    .outro-cta { position: absolute; left: 0; right: 0; top: 651px; text-align: center; }
+    .outro-cta p { font-size: 19px; margin: 0 0 22px; color: #6d7568; letter-spacing: -.3px; }
+    .outro-cta a { display: inline-flex; align-items: center; gap: 12px; height: 52px; padding: 0 22px; border: 1px solid #c7cbbd; background: #faf8f2; border-radius: 5px; font: 17px var(--mono); }
+    .outro-cta a:hover { border-color: var(--orange); color: var(--orange); }
+    .outro-cta .icon { width: 21px; height: 21px; }
+    .playback { height: 77px; display: flex; align-items: center; gap: 20px; border-bottom: 1px solid var(--line); }
+    .control { display: grid; place-items: center; width: 44px; height: 44px; padding: 0; background: transparent; flex-shrink: 0; border-radius: 4px; }
+    .control[hidden] { display: none; }
+    .control:hover { background: #e8e5dc; }
+    .play-control { background: var(--ink); color: var(--paper); }
+    .play-control:hover { background: #314338; }
+    .control .icon { width: 19px; height: 19px; }
+    .pause-icon, .replay-icon { display: none; }
+    [data-playing="true"] .play-icon { display: none; }
+    [data-playing="true"] .pause-icon { display: block; }
+    [data-ended="true"] .play-icon { display: none; }
+    [data-ended="true"] .replay-icon { display: block; }
+    .timecode { font: 11px var(--mono); white-space: nowrap; color: #7f8378; font-variant-numeric: tabular-nums; }
+    .timecode strong { color: var(--ink); font-weight: 400; }
+    .scrubber { position: relative; flex: 1; height: 44px; display: flex; align-items: center; }
+    .scrubber-track { position: absolute; left: 0; right: 0; top: 21px; height: 2px; background: #d1d2c5; pointer-events: none; }
+    .scrubber-fill { height: 100%; width: 0; background: var(--orange); }
+    .scrubber-mark { position: absolute; width: 2px; height: 6px; background: #a9afa0; top: -2px; }
+    .seek { position: relative; z-index: 1; width: 100%; height: 44px; margin: 0; appearance: none; -webkit-appearance: none; background: transparent; cursor: pointer; }
+    .seek::-webkit-slider-runnable-track { height: 2px; background: transparent; }
+    .seek::-webkit-slider-thumb { appearance: none; width: 10px; height: 10px; margin-top: -4px; border-radius: 50%; background: var(--orange); border: 2px solid var(--paper); box-shadow: 0 0 0 1px var(--orange); }
+    .seek::-moz-range-track { height: 2px; background: transparent; }
+    .seek::-moz-range-thumb { width: 7px; height: 7px; border-radius: 50%; background: var(--orange); border: 2px solid var(--paper); box-shadow: 0 0 0 1px var(--orange); }
+    .sound-control { width: auto; padding: 0 9px; display: flex; gap: 8px; }
+    .sound-control span { font: 10px var(--mono); white-space: nowrap; }
+    .export-control { width: auto; padding: 0 10px; display: flex; gap: 8px; }
+    .export-control span { font: 10px var(--mono); white-space: nowrap; }
+    .export-control:disabled { cursor: wait; opacity: .5; }
+    .sound-on-icon { display: none; }
+    [data-muted="false"] .sound-on-icon { display: block; }
+    [data-muted="false"] .sound-off-icon { display: none; }
+    .chapters { display: grid; grid-template-columns: 4fr 4fr 10fr 6fr 6fr; margin-top: 25px; gap: 14px; }
+    .chapter { text-align: left; padding: 13px 0; background: none; position: relative; border-top: 1px solid #d4d4c8; }
+    .chapter::before { content: ''; position: absolute; height: 1px; top: -1px; left: 0; width: 0; background: var(--orange); transition: width .25s; }
+    .chapter[aria-current="step"]::before { width: 100%; }
+    .chapter span { font: 9px var(--mono); color: #96998b; display: block; margin-bottom: 7px; }
+    .chapter strong { font-size: 12px; font-weight: 500; color: #717869; }
+    .chapter[aria-current="step"] strong, .chapter:hover strong { color: var(--orange); }
+    .page-footer { display: flex; align-items: center; justify-content: space-between; gap: 20px; padding: 33px 0 30px; }
+    .film-title { font-size: 13px; margin: 0; letter-spacing: -.3px; font-weight: 500; }
+    .film-title span { color: #8a8f80; margin-left: 8px; font-size: 11px; font-weight: 400; }
+    .shortcuts { font: 9px var(--mono); color: #939687; }
+    kbd { font: inherit; color: #656e5d; border: 1px solid #d1d4c5; padding: 3px 5px; border-radius: 3px; margin: 0 5px 0 12px; }
+    .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
+    .export-dialog { width: min(460px, calc(100% - 32px)); padding: 0; border: 1px solid #c9c7bc; border-radius: 8px; color: var(--ink); background: var(--panel); box-shadow: 0 30px 80px #16231f35; }
+    .export-dialog::backdrop { background: #101a17b8; backdrop-filter: blur(3px); }
+    .export-dialog-inner { padding: 32px; }
+    .export-dialog .logo { width: 45px; height: 31px; margin-bottom: 24px; }
+    .export-dialog h2 { margin: 0 0 12px; font-size: 29px; letter-spacing: -1.3px; }
+    .export-dialog p { margin: 0; color: #666e62; font-size: 14px; line-height: 1.65; }
+    .export-dialog-note { margin-top: 14px !important; padding: 11px 13px; border-left: 2px solid var(--orange); background: #f2efe7; font-family: var(--mono); font-size: 11px !important; }
+    .export-dialog-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 28px; }
+    .dialog-button { min-height: 42px; padding: 0 16px; border: 1px solid #c9c7bc; border-radius: 4px; background: transparent; }
+    .dialog-button.primary { color: #fff; background: var(--orange); border-color: var(--orange); }
+    .export-status { position: fixed; z-index: 100; right: 24px; bottom: 24px; max-width: min(390px, calc(100% - 48px)); padding: 14px 18px; border: 1px solid #c9c7bc; border-radius: 5px; background: #faf8f2; box-shadow: 0 12px 35px #16231f1c; font: 11px/1.5 var(--mono); }
+    .export-status[hidden] { display: none; }
+    .film:fullscreen { width: 100%; height: 100%; background: #101a16; display: flex; flex-direction: column; justify-content: center; }
+    .film:fullscreen .viewport { border: 0; flex: 1; min-height: 0; aspect-ratio: auto; background: #101a16; }
+    .film:fullscreen .playback { color: var(--paper); background: #16231f; border: 0; padding: 0 30px; height: 68px; flex-shrink: 0; }
+    .film:fullscreen .timecode strong { color: var(--paper); }
+    .film:fullscreen .control:hover { background: #344638; }
+    .film:fullscreen .chapters { display: none; }
+    .clean .page, .exporting .page { max-width: none; padding: 0; }
+    .clean .masthead, .clean .playback, .clean .chapters, .clean .page-footer,
+    .exporting .masthead, .exporting .playback, .exporting .chapters, .exporting .page-footer,
+    .exporting .export-status { display: none; }
+    .clean .viewport, .exporting .viewport { border: 0; width: 100vw; height: 100dvh; aspect-ratio: auto; }
+    .exporting { cursor: none; overflow: hidden; }
+    @media (min-width: 1600px) { .page { padding: 0 56px; } .masthead { height: 112px; } }
+    @media (max-width: 760px) {
+      .page { padding: 0 20px; }
+      .masthead { height: 81px; gap: 10px; }
+      .brand { font-size: 18px; gap: 8px; }
+      .brand .logo { width: 38px; height: 28px; }
+      .repo-link { font-size: 11px; gap: 7px; }
+      .masthead-actions { gap: 8px; }
+      .download-link { padding: 9px; }
+      .download-link span { display: none; }
+      .playback { gap: 10px; height: 70px; }
+      .timecode { font-size: 9px; }
+      .sound-control { width: 36px; padding: 0; justify-content: center; }
+      .sound-control span { display: none; }
+      .export-control { width: 36px; padding: 0; justify-content: center; }
+      .export-control span { display: none; }
+      .fullscreen-control { width: 32px; }
+      .chapters { gap: 10px; grid-template-columns: repeat(5, 1fr); margin-top: 16px; }
+      .chapter strong { font-size: 10px; }
+      .chapter span { font-size: 8px; }
+      .page-footer { display: block; padding-top: 24px; }
+      .shortcuts { display: none; }
+      .film-title { font-size: 12px; }
+      .film-title span { display: block; margin: 7px 0 0; }
+    }
+    @media (max-width: 420px) {
+      .page { padding: 0 12px; }
+      .playback { gap: 5px; }
+      .play-control { width: 38px; height: 38px; }
+      .timecode { margin: 0 3px; }
+      .chapter strong { font-size: 9px; }
+      .chapters { gap: 7px; }
+    }
+    @media (prefers-reduced-motion: reduce) { .chapter::before { transition: none; } }
+  </style>
+</head>
+<body>
+  <svg xmlns="http://www.w3.org/2000/svg" width="0" height="0" style="position:absolute" aria-hidden="true">
+    <defs>
+      <!-- The split, solid/outlined cloud used by HalfCloud, redrawn for crisp motion. -->
+      <symbol id="halfcloud" viewBox="0 0 100 68">
+        <path fill="currentColor" d="M47 9C35 4 22 12 21 26 10 26 3 34 3 44 3 54 10 61 21 61H47Z"/>
+        <path fill="none" stroke="currentColor" stroke-width="4.6" stroke-linejoin="round" d="M55 10C70 4 83 15 83 29 92 30 98 36 98 45 98 54 91 61 82 61H55Z"/>
+      </symbol>
+      <symbol id="i-arrow" viewBox="0 0 24 24"><path d="M7 17 17 7M7 7h10v10"/></symbol>
+      <symbol id="i-up" viewBox="0 0 24 24"><path d="M12 19V5m-6 6 6-6 6 6"/></symbol>
+      <symbol id="i-lock" viewBox="0 0 24 24"><rect x="5" y="10" width="14" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3m-4 4v3"/></symbol>
+      <symbol id="i-globe" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><ellipse cx="12" cy="12" rx="4.7" ry="10"/><path d="M2 12h20M4 6.5h16M4 17.5h16"/></symbol>
+      <symbol id="i-github" viewBox="0 0 24 24"><path d="M9 19c-4.5 1.4-4.5-2.3-6.3-2.8M15 22v-3.7c0-1 .1-1.6-.5-2.3 3.3-.4 6.7-1.6 6.7-7.1A5.6 5.6 0 0 0 19.7 5c.2-.7.7-2.6-.2-4 0 0-1.3-.4-4.2 1.6a14.5 14.5 0 0 0-7.6 0C4.8.6 3.5 1 3.5 1c-.9 1.4-.4 3.3-.2 4a5.6 5.6 0 0 0-1.5 3.9c0 5.5 3.4 6.7 6.7 7.1-.5.5-.6 1.1-.5 2.3V22" transform="translate(1 0) scale(.92)"/></symbol>
+      <symbol id="i-grid" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></symbol>
+      <symbol id="i-folder" viewBox="0 0 24 24"><path d="M3 7V5h7l2 3h9v12H3Z"/></symbol>
+      <symbol id="i-check" viewBox="0 0 24 24"><path d="m5 12 4 4L19 6"/></symbol>
+      <symbol id="i-terminal" viewBox="0 0 24 24"><path d="m4 6 6 6-6 6m9 0h7"/></symbol>
+      <symbol id="i-box" viewBox="0 0 24 24"><path d="m12 2 9 5v10l-9 5-9-5V7Zm-9 5 9 5 9-5m-9 5v10m-4-17 9 5"/></symbol>
+      <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M20 7v5h-5M4 17v-5h5M5.5 7a7.5 7.5 0 0 1 13-1L20 12M4 12l1.5 6a7.5 7.5 0 0 0 13-1"/></symbol>
+      <symbol id="i-cursor" viewBox="0 0 28 34"><path fill="currentColor" stroke="#faf8f2" stroke-width="1.7" stroke-linejoin="round" d="m3 2 21 19-11 1-5 9Z"/></symbol>
+      <symbol id="i-sound" viewBox="0 0 24 24"><path d="M11 5 6 9H3v6h3l5 4Zm4 3a6 6 0 0 1 0 8m3-11a10 10 0 0 1 0 14"/></symbol>
+      <symbol id="i-muted" viewBox="0 0 24 24"><path d="M11 5 6 9H3v6h3l5 4Zm5 4 5 6m0-6-5 6"/></symbol>
+      <symbol id="i-download" viewBox="0 0 24 24"><path d="M12 3v12m-5-5 5 5 5-5M4 19h16"/></symbol>
+    </defs>
+  </svg>
+
+  <div class="page">
+    <header class="masthead">
+      <a class="brand" href="https://github.com/mbukovy/halfcloud" target="_blank" rel="noopener noreferrer" aria-label="HalfCloud on GitHub">
+        <svg class="logo" aria-hidden="true"><use href="#halfcloud"/></svg>HalfCloud
+      </a>
+      <div class="masthead-actions">
+        <a class="download-link" href="./halfcloud-product-video.mp4?v=2" download="halfcloud-product-video.mp4" aria-label="Download 1080p MP4"><svg class="icon" aria-hidden="true"><use href="#i-download"/></svg><span>DOWNLOAD MP4</span></a>
+        <a class="repo-link" href="https://github.com/mbukovy/halfcloud" target="_blank" rel="noopener noreferrer">Open source <svg class="icon" aria-hidden="true"><use href="#i-arrow"/></svg></a>
+      </div>
+    </header>
+
+    <main>
+      <h1 class="sr-only">From localhost to live. A HalfCloud product film.</h1>
+      <section class="film" id="film" aria-label="30-second HalfCloud product video" data-playing="false" data-muted="true" data-ended="false">
+        <div class="viewport" id="viewport">
+          <div class="stage" id="stage" aria-hidden="true">
+            <div class="film-brand"><svg class="logo"><use href="#halfcloud"/></svg></div>
+
+            <div class="scene" id="hook-scene">
+              <div class="browser hook-browser" id="hook-browser">
+                <div class="browser-chrome"><div class="browser-dots"><i></i><i></i><i></i></div><div class="browser-address"><svg class="icon"><use href="#i-terminal"/></svg>localhost:3000</div><svg class="icon"><use href="#i-refresh"/></svg></div>
+                <div class="app-mount" id="hook-app"></div>
+              </div>
+              <h2 class="headline caption hook-caption" id="hook-caption">You built it. <span class="orange">What now?</span></h2>
+            </div>
+
+            <div class="scene" id="problem-scene">
+              <div class="chaos-card chaos-docker" id="chaos-docker"><div class="terminal-top"><div class="browser-dots"><i></i><i></i><i></i></div></div><div class="terminal-body"><h3><svg class="icon"><use href="#i-box"/></svg>Docker</h3><div class="code-lines"><i></i><i></i></div></div></div>
+              <div class="chaos-card chaos-ssl" id="chaos-ssl"><div class="terminal-top"><div class="browser-dots"><i></i><i></i><i></i></div></div><div class="terminal-body"><h3><svg class="icon"><use href="#i-lock"/></svg>SSL</h3><div class="code-lines"><i></i><i></i></div></div></div>
+              <div class="chaos-card chaos-ports" id="chaos-ports"><div class="terminal-top"><div class="browser-dots"><i></i><i></i><i></i></div></div><div class="terminal-body"><h3><svg class="icon"><use href="#i-terminal"/></svg>Ports</h3><div class="code-lines"><i></i><i></i></div></div></div>
+              <div class="chaos-card chaos-proxy" id="chaos-proxy"><div class="terminal-top"><div class="browser-dots"><i></i><i></i><i></i></div></div><div class="terminal-body"><h3><svg class="icon"><use href="#i-globe"/></svg>Reverse proxy</h3><div class="code-lines"><i></i><i></i></div></div></div>
+            </div>
+
+            <div class="scene" id="chat-scene">
+              <div class="operator" id="operator">
+                <div class="operator-top"><div class="brand"><svg class="logo"><use href="#halfcloud"/></svg>HalfCloud<span class="server-name">my-vps</span></div><i class="health-dot"></i></div>
+                <div class="chat-composer" id="chat-composer"><div class="repo-chip" id="repo-chip"><svg class="icon"><use href="#i-github"/></svg>github.com/you/awesome-app</div><div class="typed-line"><span id="typed-message"></span><i class="typing-caret" id="typing-caret"></i></div><div class="send-button" id="send-button"><svg class="icon"><use href="#i-up"/></svg></div></div>
+              </div>
+            </div>
+
+            <div class="scene" id="deploy-scene">
+              <div class="pipeline" id="pipeline">
+                <svg class="connection-svg" viewBox="0 0 1300 280"><path class="connection-base" d="M284 130H547M753 130H1024"/><path id="repo-wire" class="connection-live" pathLength="1" d="M284 130H547"/><path id="live-wire" class="connection-live" pathLength="1" d="M753 130H1024"/></svg>
+                <div class="node repo-node" id="repo-node"><div class="node-box"><svg class="icon"><use href="#i-github"/></svg></div></div>
+                <div class="node server-node" id="server-node"><div class="server-box"><div class="server-brand"><svg class="logo"><use href="#halfcloud"/></svg></div><div class="server-rack"><i></i><i></i><i></i><i></i><b></b></div><div class="server-rack"><i></i><i></i><i></i><i></i><b></b></div><div class="server-base"></div></div><span class="node-label">Your VPS</span></div>
+                <div class="node globe-node" id="globe-node"><div class="node-box"><svg class="icon"><use href="#i-globe"/></svg></div></div>
+                <div class="https-badge" id="https-badge"><svg class="icon"><use href="#i-lock"/></svg>HTTPS</div>
+                <div class="flying-app" id="flying-app"><i class="awesome-mark"></i><strong>AwesomeApp</strong><div class="mini-chart"><i style="--h:35%"></i><i style="--h:52%"></i><i style="--h:45%"></i><i style="--h:73%"></i><i style="--h:100%"></i></div></div>
+              </div>
+            </div>
+
+            <div class="scene" id="result-scene">
+              <div id="result-group">
+                <div class="browser result-browser" id="result-browser"><div class="browser-chrome"><div class="browser-dots"><i></i><i></i><i></i></div><div class="browser-address"><svg class="icon"><use href="#i-lock"/></svg><span><b>https://</b>awesomeapp.your-domain.com</span></div><svg class="icon"><use href="#i-arrow"/></svg></div><div class="app-mount" id="result-app"></div></div>
+                <div class="phone" id="phone"><div class="phone-top"><span>9:41</span><span>5G</span></div><div class="phone-island"></div><div class="phone-url"><svg class="icon"><use href="#i-lock"/></svg>awesomeapp.your-domain.com</div><div class="phone-brand"><i class="awesome-mark"></i>AwesomeApp</div><div id="phone-app"></div><div class="phone-bottom"></div></div>
+                <div class="visitor visitor-one" id="visitor-one"><svg><use href="#i-cursor"/></svg></div>
+              </div>
+              <h2 class="headline caption result-caption" id="result-caption">Your app. Your server. <span class="online">Online.</span></h2>
+            </div>
+
+            <div class="scene" id="outro-scene">
+              <svg class="outro-mark" id="outro-mark"><use href="#halfcloud"/></svg>
+              <div class="outro-wordmark" id="outro-wordmark">HalfCloud</div>
+              <h2 class="headline caption outro-caption" id="vibe-deploy"><span class="line">You vibe-coded it.</span><span class="line">Now vibe-deploy it.</span></h2>
+              <div class="outro-cta" id="outro-cta"><p>Open source. Try it on your VPS.</p><a id="outro-link" href="https://github.com/mbukovy/halfcloud" target="_blank" rel="noopener noreferrer" tabindex="-1"><svg class="icon"><use href="#i-github"/></svg>github.com/mbukovy/halfcloud<svg class="icon"><use href="#i-arrow"/></svg></a></div>
+            </div>
+            <div class="wave" id="wave"></div>
+          </div>
+        </div>
+
+        <div class="playback">
+          <button class="control play-control" id="play" type="button" aria-label="Play video" title="Play / pause (Space)"><svg class="icon play-icon" viewBox="0 0 24 24"><path d="m8 5 11 7-11 7Z" fill="currentColor" stroke="none"/></svg><svg class="icon pause-icon" viewBox="0 0 24 24"><path d="M8 5v14M16 5v14" stroke-width="3"/></svg><svg class="icon replay-icon" viewBox="0 0 24 24"><path d="M4 10a8 8 0 1 1 0 5m0-11v6h6"/></svg></button>
+          <div class="timecode"><strong id="time">00:00</strong> / 00:30</div>
+          <div class="scrubber"><div class="scrubber-track"><div class="scrubber-fill" id="progress"></div><i class="scrubber-mark" style="left:13.333%"></i><i class="scrubber-mark" style="left:26.667%"></i><i class="scrubber-mark" style="left:60%"></i><i class="scrubber-mark" style="left:80%"></i></div><input class="seek" id="seek" type="range" min="0" max="30" step="0.01" value="0" aria-label="Video position" aria-valuetext="0 seconds of 30 seconds"></div>
+          <button class="control export-control" id="export" type="button" aria-label="Render and download MP4" title="Render MP4"><svg class="icon"><use href="#i-download"/></svg><span>RENDER MP4</span></button>
+          <button class="control sound-control" id="sound" type="button" aria-label="Enable soundtrack" aria-pressed="false" title="Sound on / off (M)"><svg class="icon sound-off-icon"><use href="#i-muted"/></svg><svg class="icon sound-on-icon"><use href="#i-sound"/></svg><span id="sound-label">SOUND OFF</span></button>
+          <button class="control fullscreen-control" id="fullscreen" type="button" aria-label="Enter fullscreen" title="Fullscreen (F)"><svg class="icon" viewBox="0 0 24 24"><path d="M8 3H3v5m13-5h5v5M3 16v5h5m13-5v5h-5"/></svg></button>
+        </div>
+        <nav class="chapters" aria-label="Video chapters">
+          <button class="chapter" type="button" data-time="0" aria-current="step"><span>00:00</span><strong>01 &nbsp; You built it</strong></button>
+          <button class="chapter" type="button" data-time="4"><span>00:04</span><strong>02 &nbsp; The hard part</strong></button>
+          <button class="chapter" type="button" data-time="8"><span>00:08</span><strong>03 &nbsp; Meet HalfCloud</strong></button>
+          <button class="chapter" type="button" data-time="18"><span>00:18</span><strong>04 &nbsp; You're live</strong></button>
+          <button class="chapter" type="button" data-time="24"><span>00:24</span><strong>05 &nbsp; Vibe deploy it</strong></button>
+        </nav>
+      </section>
+      <dialog class="export-dialog" id="export-dialog">
+        <div class="export-dialog-inner">
+          <svg class="logo" aria-hidden="true"><use href="#halfcloud"/></svg>
+          <h2>Render MP4</h2>
+          <p>The film will play once from the beginning and download as a 30-second MP4 with sound. Rendering takes place in real time.</p>
+          <p class="export-dialog-note">In the browser picker, choose <strong>This Tab</strong>. You do not need to share tab audio.</p>
+          <div class="export-dialog-actions"><button class="dialog-button" id="export-cancel" type="button">Cancel</button><button class="dialog-button primary" id="export-start" type="button">Choose tab and render</button></div>
+        </div>
+      </dialog>
+      <p class="sr-only" id="scene-description" role="status" aria-live="polite"></p>
+      <noscript><p>This animated film needs JavaScript. You built an app, but it is stuck on localhost. HalfCloud turns a GitHub link and a simple request into an app running on your own VPS with HTTPS. Your app. Your server. Online. <a href="https://github.com/mbukovy/halfcloud">Try HalfCloud on GitHub.</a></p></noscript>
+    </main>
+    <footer class="page-footer"><p class="film-title">From localhost to live.<span>A 30-second product film. All interfaces are stylized animations.</span></p><span class="shortcuts"><kbd>space</kbd> play / pause <kbd>&larr; &rarr;</kbd> seek <kbd>m</kbd> sound</span></footer>
+  </div>
+  <div class="export-status" id="export-status" role="status" aria-live="polite" hidden></div>
+
+  <template id="app-template">
+    <div class="demo-app">
+      <aside class="app-sidebar"><div class="app-wordmark"><i class="awesome-mark"></i>AwesomeApp</div><div class="app-nav selected"><svg class="icon"><use href="#i-grid"/></svg><b></b></div><div class="app-nav"><svg class="icon"><use href="#i-folder"/></svg><b></b></div><div class="app-nav"><svg class="icon"><use href="#i-check"/></svg><b></b></div></aside>
+      <div class="app-workspace"><h3 class="app-greeting">Overview</h3><div class="app-stats"><div class="app-stat"><label>PROJECTS</label><strong>12</strong></div><div class="app-stat"><label>DONE</label><strong>84</strong></div><div class="app-stat"><label>PROGRESS</label><strong>96<span style="font-size:18px">%</span></strong></div></div><div class="app-projects"><div class="project-card"><div class="chart"><i style="--h:30%"></i><i style="--h:45%"></i><i style="--h:36%"></i><i style="--h:60%"></i><i style="--h:55%"></i><i style="--h:74%"></i><i style="--h:66%"></i><i style="--h:89%"></i><i style="--h:100%"></i></div></div></div></div>
+    </div>
+  </template>
+
+  <script>
+    (() => {
+      'use strict';
+      const $ = (selector) => document.querySelector(selector);
+      const $$ = (selector) => [...document.querySelectorAll(selector)];
+      const duration = 30;
+      const params = new URLSearchParams(location.search);
+      const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)');
+      const film = $('#film');
+      const viewport = $('#viewport');
+      const stage = $('#stage');
+      const seek = $('#seek');
+      const playButton = $('#play');
+      const soundButton = $('#sound');
+      const exportButton = $('#export');
+      const exportDialog = $('#export-dialog');
+      const exportStatus = $('#export-status');
+      const chapters = $$('.chapter');
+      const animations = [];
+      const clamp = (n, min = 0, max = 1) => Math.max(min, Math.min(max, n));
+      const ease = 'cubic-bezier(.4, 0, .2, 1)';
+      let time = clamp(Number(params.get('t')) || 0, 0, duration);
+      let playing = false;
+      let anchor = 0;
+      let frame = 0;
+      let chapterIndex = -1;
+      let audioContext;
+      let soundscape;
+      let soundscapePromise;
+      let audioSource;
+      let muted = true;
+      let soundRequest = 0;
+      let exporting = false;
+
+      if (params.has('clean')) document.body.classList.add('clean');
+      for (const mount of ['#hook-app', '#result-app', '#phone-app']) {
+        $(mount).append($('#app-template').content.cloneNode(true));
+      }
+
+      // All motion is paused Web Animations driven by one seekable clock, not timers.
+      function animate(target, start, end, keyframes, easing = ease) {
+        const element = typeof target === 'string' ? $(target) : target;
+        const animation = element.animate(keyframes, { duration: (end - start) * 1000, fill: 'both', easing });
+        animation.pause();
+        animations.push({ animation, start, end });
+      }
+      function enter(target, start, end, transform = 'translateY(28px)') {
+        animate(target, start, end, [{ opacity: 0, transform }, { opacity: 1, transform: 'none' }]);
+      }
+
+      animate('#hook-browser', 0, 8.35, [
+        { offset: 0, opacity: 0, transform: 'translateY(12px) scale(1.08)', easing: ease },
+        { offset: .14, opacity: 1, transform: 'scale(1.08)', easing: ease },
+        { offset: .38, opacity: 1, transform: 'scale(1)' },
+        { offset: .94, opacity: 1, transform: 'scale(1)' },
+        { offset: 1, opacity: 0, transform: 'scale(1)' },
+      ], 'linear');
+      $$('#hook-app .app-sidebar, #hook-app .app-stats, #hook-app .app-projects').forEach((el, i) => enter(el, .1 + i * .2, 1.3 + i * .2, 'translateY(12px)'));
+      enter('.hook-browser .browser-chrome', 1.25, 2.25, 'translateY(-8px)');
+      animate('#hook-caption', .7, 4.4, [
+        { offset: 0, opacity: 0, transform: 'translateY(12px)', easing: ease },
+        { offset: .3, opacity: 1, transform: 'none' },
+        { offset: .86, opacity: 1, transform: 'none' },
+        { offset: 1, opacity: 0, transform: 'none' },
+      ], 'linear');
+      [
+        ['#chaos-docker', 4.2, 'translate(-80px, 0) rotate(-3deg)', 'rotate(-3deg)'],
+        ['#chaos-ssl', 4.2, 'translate(80px, 0) rotate(3deg)', 'rotate(3deg)'],
+        ['#chaos-ports', 5, 'translate(60px, 40px) rotate(2deg)', 'rotate(2deg)'],
+        ['#chaos-proxy', 5, 'translate(-60px, 40px) rotate(-2deg)', 'rotate(-2deg)'],
+      ].forEach(([target, start, from, to]) => animate(target, start, 8.45, [
+        { offset: 0, opacity: 0, transform: from, easing: ease },
+        { offset: .3, opacity: 1, transform: to },
+        { offset: 1, opacity: 1, transform: to },
+      ], 'linear'));
+      animate('#wave', 7.6, 9.2, [
+        { offset: 0, transform: 'translate(-2390px, 200px) rotate(-25deg)' },
+        { offset: .45, transform: 'translate(-380px, -520px) rotate(-15deg)' },
+        { offset: 1, transform: 'translate(1700px, -1200px) rotate(10deg)' },
+      ], 'cubic-bezier(.65, 0, .35, 1)');
+
+      animate('#operator', 8.65, 13.5, [
+        { offset: 0, opacity: 0, transform: 'translateY(24px)', easing: ease },
+        { offset: .21, opacity: 1, transform: 'none' },
+        { offset: .86, opacity: 1, transform: 'none', easing: ease },
+        { offset: 1, opacity: 0, transform: 'translateY(-12px)' },
+      ], 'linear');
+      enter('#repo-chip', 9.2, 10, 'translateY(6px)');
+      animate('#chat-composer', 12, 12.65, [{ background: '#fffefb' }, { background: '#e7e3d9' }]);
+      animate('#send-button', 12, 12.65, [{ opacity: 1 }, { opacity: 0 }]);
+
+      enter('#pipeline', 13.05, 14.05, 'translateY(12px)');
+      animate('#repo-wire', 13.9, 15.6, [{ strokeDasharray: '1', strokeDashoffset: '1' }, { strokeDasharray: '1', strokeDashoffset: '0' }], 'linear');
+      animate('#live-wire', 15.6, 16.9, [{ strokeDasharray: '1', strokeDashoffset: '1' }, { strokeDasharray: '1', strokeDashoffset: '0' }], 'linear');
+      animate('#flying-app', 13.65, 15.7, [
+        { offset: 0, opacity: 0, transform: 'translate(-80px, 10px) scale(.7)' },
+        { offset: .2, opacity: 1, transform: 'translate(0, -12px) scale(.85)' },
+        { offset: .8, opacity: 1, transform: 'translate(375px, 0) scale(.85)' },
+        { offset: 1, opacity: 0, transform: 'translate(375px, 10px) scale(.6)' },
+      ], 'linear');
+      enter('#https-badge', 16.7, 17.5, 'translateY(6px)');
+      animate('#deploy-scene', 17.75, 18.45, [{ opacity: 1 }, { opacity: 0 }]);
+
+      animate('#result-browser', 18, 19.3, [{ opacity: 0, transform: 'translateY(20px) scale(.92)' }, { opacity: 1, transform: 'none' }]);
+      enter('#phone', 19.1, 20.35, 'translateY(24px)');
+      enter('#visitor-one', 20, 21.3, 'translate(30px, 20px)');
+      animate('#result-caption', 19.5, 24.6, [
+        { offset: 0, opacity: 0, transform: 'translateY(12px)', easing: ease },
+        { offset: .22, opacity: 1, transform: 'none' },
+        { offset: .85, opacity: 1, transform: 'none' },
+        { offset: 1, opacity: 0, transform: 'none' },
+      ], 'linear');
+      animate('#result-group', 23.8, 25.3, [
+        { offset: 0, opacity: 1, transform: 'none', transformOrigin: '800px 450px' },
+        { offset: .65, opacity: .6, transform: 'translateY(-145px) scale(.13)', transformOrigin: '800px 450px' },
+        { offset: 1, opacity: 0, transform: 'translateY(-165px) scale(.03)', transformOrigin: '800px 450px' },
+      ], 'cubic-bezier(.65, 0, .35, 1)');
+      enter('#outro-mark', 24.6, 25.7, 'scale(.7)');
+      enter('#outro-wordmark', 24.9, 25.9, 'translateY(8px)');
+      enter('#vibe-deploy', 25.3, 26.5, 'translateY(12px)');
+      enter('#outro-cta', 26, 27.3, 'translateY(8px)');
+
+      const sceneRanges = [
+        ['#hook-scene', 0, 8.45], ['#problem-scene', 4, 8.45],
+        ['#chat-scene', 8.45, 13.5], ['#deploy-scene', 13.05, 18.45],
+        ['#result-scene', 18, 25.3], ['#outro-scene', 24.6, 30.1],
+      ].map(([selector, start, end]) => ({ element: $(selector), start, end }));
+      const chapterNames = ['THE LOCALHOST PROBLEM', 'THE DEPLOYMENT PART', 'MEET YOUR AI OPERATOR', 'OPEN TO THE WORLD', 'NOW VIBE DEPLOY IT'];
+      const descriptions = [
+        '0 to 4 seconds. A web app assembles, then zooms out to reveal localhost:3000 in a large orange address bar. You built it. What now?',
+        '4 to 8 seconds. Four cards labeled Docker, SSL, Ports, and Reverse proxy cover the app.',
+        '8 to 18 seconds. An orange wave clears the chaos. In HalfCloud, a GitHub link is pasted, followed by: Deploy this app on my server. The app moves from the repository to your VPS and connects to the world with HTTPS.',
+        '18 to 24 seconds. AwesomeApp opens at a public HTTPS address, on desktop and mobile. A visitor cursor appears. Your app. Your server. Online.',
+        '24 to 30 seconds. The app folds into the HalfCloud logo. You vibe-coded it. Now vibe-deploy it. Open source. Try it on your VPS. github.com/mbukovy/halfcloud.',
+      ];
+      const typedMessage = $('#typed-message');
+      const message = 'Deploy this app on my server.';
+      const caret = $('#typing-caret');
+      const wave = $('#wave');
+      const timeDisplay = $('#time');
+      const progress = $('#progress');
+
+      function render() {
+        for (const { animation, start, end } of animations) {
+          animation.currentTime = clamp(time - start, 0, end - start) * 1000;
+        }
+        for (const { element, start, end } of sceneRanges) element.classList.toggle('is-active', time >= start && time < end);
+        wave.style.visibility = time >= 7.6 && time < 9.2 ? 'visible' : 'hidden';
+        const index = time < 4 ? 0 : time < 8 ? 1 : time < 18 ? 2 : time < 24 ? 3 : 4;
+        if (index !== chapterIndex) {
+          chapterIndex = index;
+          $('#scene-description').textContent = descriptions[index];
+          chapters.forEach((chapter, i) => i === index ? chapter.setAttribute('aria-current', 'step') : chapter.removeAttribute('aria-current'));
+        }
+        typedMessage.textContent = message.slice(0, Math.floor(clamp((time - 9.65) / 1.65) * message.length));
+        caret.style.opacity = time > 11.35 || time < 9.65 ? '0' : '1';
+        const seconds = Math.floor(time).toString().padStart(2, '0');
+        timeDisplay.textContent = `00:${seconds}`;
+        seek.value = String(time);
+        seek.setAttribute('aria-valuetext', `${time.toFixed(1)} seconds of 30 seconds. ${chapterNames[index].toLowerCase()}.`);
+        progress.style.width = `${time / duration * 100}%`;
+        film.dataset.ended = String(time >= duration);
+        playButton.setAttribute('aria-label', playing ? 'Pause video' : time >= duration ? 'Replay video' : 'Play video');
+      }
+
+      function resize() {
+        const scale = Math.min(viewport.clientWidth / 1600, viewport.clientHeight / 900);
+        stage.style.transform = `translate(-50%, -50%) scale(${scale})`;
+      }
+      new ResizeObserver(resize).observe(viewport);
+      resize();
+
+      function stopAudio() {
+        if (audioSource) {
+          audioSource.stop();
+          audioSource.disconnect();
+          audioSource = undefined;
+        }
+      }
+      function syncAudio() {
+        stopAudio();
+        if (!muted && playing && soundscape && audioContext?.state === 'running' && time < duration) {
+          audioSource = audioContext.createBufferSource();
+          audioSource.buffer = soundscape;
+          audioSource.connect(audioContext.destination);
+          audioSource.start(0, time);
+        }
+      }
+      function tick(now) {
+        if (!playing) return;
+        time = clamp((now - anchor) / 1000, 0, duration);
+        if (time >= duration) {
+          playing = false;
+          film.dataset.playing = 'false';
+          stopAudio();
+        }
+        render();
+        if (playing) frame = requestAnimationFrame(tick);
+      }
+      function play() {
+        if (playing) return;
+        if (time >= duration) time = 0;
+        playing = true;
+        film.dataset.playing = 'true';
+        anchor = performance.now() - time * 1000;
+        syncAudio();
+        render();
+        frame = requestAnimationFrame(tick);
+      }
+      function pause() {
+        if (playing) time = clamp((performance.now() - anchor) / 1000, 0, duration);
+        playing = false;
+        film.dataset.playing = 'false';
+        cancelAnimationFrame(frame);
+        stopAudio();
+        render();
+      }
+      function setTime(value) {
+        time = clamp(value, 0, duration);
+        anchor = performance.now() - time * 1000;
+        if (time >= duration) pause();
+        else { render(); syncAudio(); }
+      }
+
+      // Sparse synth score and effects, rendered once on demand. The repeating arpeggio is intentionally omitted.
+      async function makeSoundscape() {
+        const offline = new OfflineAudioContext(2, 44100 * duration, 44100);
+        const master = offline.createGain();
+        master.gain.value = .58;
+        const limiter = offline.createDynamicsCompressor();
+        limiter.threshold.value = -16;
+        limiter.ratio.value = 5;
+        master.connect(limiter).connect(offline.destination);
+        const music = offline.createGain();
+        music.connect(master);
+        music.gain.setValueAtTime(.82, 0);
+        music.gain.setValueAtTime(.82, 2.92);
+        music.gain.linearRampToValueAtTime(0, 3.04);
+        music.gain.setValueAtTime(0, 4.05);
+        music.gain.linearRampToValueAtTime(.72, 4.22);
+        music.gain.setValueAtTime(.72, 8);
+        music.gain.linearRampToValueAtTime(1, 8.55);
+        music.gain.setValueAtTime(1, 28.1);
+        music.gain.linearRampToValueAtTime(0, 29.8);
+        const noiseBuffer = offline.createBuffer(1, 44100, 44100);
+        const noiseData = noiseBuffer.getChannelData(0);
+        let seed = 42;
+        for (let i = 0; i < noiseData.length; i++) {
+          seed = (seed * 16807) % 2147483647;
+          noiseData[i] = (seed / 2147483647) * 2 - 1;
+        }
+        function note(at, length, frequency, volume, type = 'sine', destination = music) {
+          const osc = offline.createOscillator();
+          const gain = offline.createGain();
+          osc.type = type;
+          osc.frequency.value = frequency;
+          gain.gain.setValueAtTime(0, at);
+          gain.gain.linearRampToValueAtTime(volume, at + .008);
+          gain.gain.exponentialRampToValueAtTime(.0001, at + length);
+          osc.connect(gain).connect(destination);
+          osc.start(at);
+          osc.stop(at + length + .02);
+        }
+        function noise(at, length, volume, frequency, sweep = false) {
+          const source = offline.createBufferSource();
+          source.buffer = noiseBuffer;
+          source.loop = true;
+          const filter = offline.createBiquadFilter();
+          filter.type = sweep ? 'bandpass' : 'highpass';
+          filter.frequency.setValueAtTime(frequency, at);
+          if (sweep) filter.frequency.exponentialRampToValueAtTime(7000, at + length);
+          const gain = offline.createGain();
+          gain.gain.setValueAtTime(0, at);
+          gain.gain.linearRampToValueAtTime(volume, at + (sweep ? length * .4 : .004));
+          gain.gain.exponentialRampToValueAtTime(.0001, at + length);
+          source.connect(filter).connect(gain).connect(sweep ? master : music);
+          source.start(at);
+          source.stop(at + length);
+        }
+        const beat = 60 / 96;
+        const roots = [130.81, 164.81, 110, 146.83];
+        for (let step = 0; step * beat / 2 < 28.5; step++) {
+          const at = step * beat / 2;
+          const root = roots[Math.floor(step / 16) % roots.length];
+          if (step % 4 === 0) {
+            const kick = offline.createOscillator();
+            const gain = offline.createGain();
+            kick.frequency.setValueAtTime(125, at);
+            kick.frequency.exponentialRampToValueAtTime(42, at + .16);
+            gain.gain.setValueAtTime(.34, at);
+            gain.gain.exponentialRampToValueAtTime(.0001, at + .23);
+            kick.connect(gain).connect(music);
+            kick.start(at);
+            kick.stop(at + .24);
+            note(at, .24, root / 2, .2, 'triangle');
+          }
+          if (step % 4 === 2) noise(at, .06, .025, 7500);
+          if (step % 8 === 0) [1, 1.25, 1.5].forEach((ratio) => note(at, 1.3, root * ratio, .025, 'triangle'));
+        }
+        [4.2, 5].forEach((at) => note(at, .2, 105, .05, 'triangle', master));
+        noise(7.65, 1.2, .08, 280, true);
+        noise(23.96, 1.1, .05, 500, true);
+        note(12.05, .3, 660, .05, 'sine', master);
+        [523.25, 659.25, 783.99].forEach((frequency, i) => note(16.72 + i * .12, .6, frequency, .095, 'sine', master));
+        [261.63, 329.63, 392, 523.25].forEach((frequency, i) => note(26.1 + i * .07, 1.4, frequency, .045, 'sine', master));
+        return offline.startRendering();
+      }
+
+      async function toggleSound() {
+        const request = ++soundRequest;
+        muted = !muted;
+        film.dataset.muted = String(muted);
+        soundButton.setAttribute('aria-pressed', String(!muted));
+        soundButton.setAttribute('aria-label', muted ? 'Enable soundtrack' : 'Mute soundtrack');
+        $('#sound-label').textContent = muted ? 'SOUND OFF' : 'SOUND ON';
+        if (muted) { stopAudio(); return; }
+        try {
+          audioContext ??= new (window.AudioContext || window.webkitAudioContext)();
+          await audioContext.resume();
+          soundscapePromise ??= makeSoundscape();
+          soundscape = await soundscapePromise;
+          if (request === soundRequest) {
+            if (playing) time = clamp((performance.now() - anchor) / 1000, 0, duration);
+            syncAudio();
+          }
+        } catch {
+          if (request !== soundRequest) return;
+          muted = true;
+          film.dataset.muted = 'true';
+          soundButton.setAttribute('aria-pressed', 'false');
+          soundButton.setAttribute('aria-label', 'Sound unavailable in this browser');
+          $('#sound-label').textContent = 'SOUND UNAVAILABLE';
+          $('#scene-description').textContent = 'Sound is unavailable in this browser. The film works without sound.';
+        }
+      }
+
+      function showExportStatus(message, hideAfter = 0) {
+        exportStatus.textContent = message;
+        exportStatus.hidden = false;
+        if (hideAfter) setTimeout(() => { exportStatus.hidden = true; }, hideAfter);
+      }
+
+      function openExportDialog() {
+        const mp4Supported = typeof MediaRecorder !== 'undefined' && MediaRecorder.isTypeSupported('video/mp4');
+        if (!navigator.mediaDevices?.getDisplayMedia || !mp4Supported) {
+          showExportStatus('MP4 rendering is not supported by this browser. Use a current Chrome or Edge release.', 7000);
+          return;
+        }
+        exportDialog.showModal();
+      }
+
+      async function renderMp4() {
+        if (exporting) return;
+        let displayStream;
+        let recorder;
+        let renderAudio;
+        const previousTime = time;
+        const exportStart = $('#export-start');
+        try {
+          exportStart.disabled = true;
+          exportDialog.close();
+          showExportStatus('Choose “This Tab” in the browser picker…');
+          const captureOptions = {
+            video: { width: { ideal: 1920 }, height: { ideal: 1080 }, frameRate: { ideal: 30, max: 30 } },
+            audio: false,
+            preferCurrentTab: true,
+            selfBrowserSurface: 'include',
+            surfaceSwitching: 'exclude',
+          };
+          if (typeof CaptureController !== 'undefined') {
+            const controller = new CaptureController();
+            controller.setFocusBehavior('no-focus-change');
+            captureOptions.controller = controller;
+          }
+          displayStream = await navigator.mediaDevices.getDisplayMedia(captureOptions);
+          const videoTrack = displayStream.getVideoTracks()[0];
+          if (!videoTrack) throw new Error('No video track was selected.');
+          videoTrack.contentHint = 'motion';
+          await videoTrack.applyConstraints({ frameRate: 30 }).catch(() => {});
+
+          exporting = true;
+          pause();
+          document.body.classList.add('exporting');
+          showExportStatus('Preparing video and sound…');
+          await document.fonts.ready;
+          audioContext ??= new (window.AudioContext || window.webkitAudioContext)();
+          await audioContext.resume();
+          soundscapePromise ??= makeSoundscape();
+          soundscape = await soundscapePromise;
+
+          const audioDestination = audioContext.createMediaStreamDestination();
+          renderAudio = audioContext.createBufferSource();
+          renderAudio.buffer = soundscape;
+          renderAudio.connect(audioDestination);
+          const outputStream = new MediaStream([videoTrack, ...audioDestination.stream.getAudioTracks()]);
+          const chunks = [];
+          recorder = new MediaRecorder(outputStream, {
+            mimeType: 'video/mp4',
+            videoBitsPerSecond: 12_000_000,
+            audioBitsPerSecond: 192_000,
+          });
+          recorder.addEventListener('dataavailable', (event) => { if (event.data.size) chunks.push(event.data); });
+          const stopped = new Promise((resolve, reject) => {
+            recorder.addEventListener('stop', resolve, { once: true });
+            recorder.addEventListener('error', () => reject(recorder.error || new Error('MP4 encoding failed.')), { once: true });
+          });
+
+          time = 0;
+          render();
+          await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+          recorder.start(1000);
+          anchor = performance.now();
+          playing = true;
+          film.dataset.playing = 'true';
+          renderAudio.start(0, 0);
+          frame = requestAnimationFrame(tick);
+          await new Promise((resolve) => {
+            const watch = () => !playing && time >= duration ? resolve() : requestAnimationFrame(watch);
+            watch();
+          });
+          recorder.stop();
+          await stopped;
+          const blob = new Blob(chunks, { type: 'video/mp4' });
+          if (blob.size < 100_000) throw new Error('The browser returned an incomplete recording.');
+          const href = URL.createObjectURL(blob);
+          const download = document.createElement('a');
+          download.href = href;
+          download.download = 'halfcloud-product-film.mp4';
+          document.body.append(download);
+          download.click();
+          download.remove();
+          setTimeout(() => URL.revokeObjectURL(href), 60_000);
+          showExportStatus(`MP4 ready · ${(blob.size / 1_000_000).toFixed(1)} MB`, 7000);
+        } catch (error) {
+          if (error?.name === 'NotAllowedError') showExportStatus('Rendering cancelled. Choose “This Tab” to create the MP4.', 7000);
+          else showExportStatus(`Could not render MP4: ${error?.message || 'Unknown error'}`, 9000);
+          setTime(previousTime);
+        } finally {
+          exporting = false;
+          exportStart.disabled = false;
+          document.body.classList.remove('exporting');
+          if (recorder?.state === 'recording') recorder.stop();
+          if (renderAudio) { try { renderAudio.stop(); } catch {} }
+          displayStream?.getTracks().forEach((track) => track.stop());
+          render();
+        }
+      }
+
+      async function toggleFullscreen() {
+        try {
+          if (document.fullscreenElement) await document.exitFullscreen();
+          else if (film.requestFullscreen) await film.requestFullscreen();
+        } catch { $('#scene-description').textContent = 'Fullscreen is unavailable in this browser.'; }
+      }
+      playButton.addEventListener('click', () => playing ? pause() : play());
+      soundButton.addEventListener('click', toggleSound);
+      exportButton.addEventListener('click', openExportDialog);
+      $('#export-cancel').addEventListener('click', () => exportDialog.close());
+      $('#export-start').addEventListener('click', renderMp4);
+      $('#fullscreen').addEventListener('click', toggleFullscreen);
+      if (!document.fullscreenEnabled) $('#fullscreen').hidden = true;
+      document.addEventListener('fullscreenchange', () => $('#fullscreen').setAttribute('aria-label', document.fullscreenElement ? 'Exit fullscreen' : 'Enter fullscreen'));
+      seek.addEventListener('input', () => setTime(Number(seek.value)));
+      chapters.forEach((chapter) => chapter.addEventListener('click', () => setTime(Number(chapter.dataset.time))));
+      viewport.addEventListener('click', (event) => { if (!event.target.closest('a')) playing ? pause() : play(); });
+      document.addEventListener('keydown', (event) => {
+        if (event.altKey || event.ctrlKey || event.metaKey || event.target.closest('input, textarea, select, button, a, [contenteditable]')) return;
+        if (['Space', 'ArrowRight', 'ArrowLeft', 'KeyM', 'KeyF', 'KeyR'].includes(event.code)) event.preventDefault();
+        if (event.code === 'Space') playing ? pause() : play();
+        else if (event.code === 'ArrowRight') setTime(time + 2);
+        else if (event.code === 'ArrowLeft') setTime(time - 2);
+        else if (event.code === 'KeyM') toggleSound();
+        else if (event.code === 'KeyF') toggleFullscreen();
+        else if (event.code === 'KeyR') { setTime(0); play(); }
+      });
+      // Don't silently skip scenes or let the soundtrack run in a background tab.
+      document.addEventListener('visibilitychange', () => { if (document.hidden && playing && !exporting) pause(); });
+      reducedMotion.addEventListener('change', () => { if (reducedMotion.matches) pause(); });
+      render();
+      if (!params.has('paused') && !reducedMotion.matches) play();
+      else if (!params.has('t')) setTime(2.95);
+    })();
+  </script>
+</body>
+</html>

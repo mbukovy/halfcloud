@@ -17,6 +17,7 @@ export class AppBusyError extends Error {
 export class ApplicationService {
   private readonly repositoryOperations = new Set<string>();
   private readonly updatingApps = new Set<string>();
+  private readonly environmentOperations = new Map<string, Promise<void>>();
   private webhookService?: GitHubWebhookService;
 
   constructor(
@@ -844,6 +845,13 @@ export class ApplicationService {
     id: string,
     input: { variableId?: string; name: string; value: string; protectedFromAI?: boolean },
   ) {
+    return this.withEnvironmentOperation(id, () => this.saveEnvironmentVariableUnlocked(id, input));
+  }
+
+  private async saveEnvironmentVariableUnlocked(
+    id: string,
+    input: { variableId?: string; name: string; value: string; protectedFromAI?: boolean },
+  ) {
     assertEnvironmentVariableName(input.name);
     const runtime = await this.docker.getContainerEnvironment(id);
     const previous = await this.environment.list(runtime.name, runtime.environment);
@@ -865,42 +873,63 @@ export class ApplicationService {
     id: string,
     inputs: Array<{ id?: string; name: string; value: string; protectedFromAI: boolean }>,
   ) {
-    const runtime = await this.docker.getContainerEnvironment(id);
-    const previous = await this.environment.list(runtime.name, runtime.environment);
-    const previousById = new Map(previous.map((variable) => [variable.id, variable]));
-    const suppliedIds = inputs.flatMap((input) => input.id ? [input.id] : []);
-    if (new Set(suppliedIds).size !== suppliedIds.length || suppliedIds.some((variableId) => !previousById.has(variableId))) {
-      throw new Error('Environment changed since it was loaded; refresh and try again');
-    }
-    const now = new Date().toISOString();
-    const updated = inputs.map((input) => {
-      assertEnvironmentVariableName(input.name);
-      const existing = input.id ? previousById.get(input.id) : undefined;
-      return existing
-        ? { ...existing, name: input.name, value: input.value, protectedFromAI: input.protectedFromAI, updatedAt: now }
-        : { id: `env_${randomUUID()}`, serviceId: runtime.name, name: input.name, value: input.value, protectedFromAI: input.protectedFromAI, createdAt: now, updatedAt: now };
+    return this.withEnvironmentOperation(id, async () => {
+      const runtime = await this.docker.getContainerEnvironment(id);
+      const previous = await this.environment.list(runtime.name, runtime.environment);
+      const previousById = new Map(previous.map((variable) => [variable.id, variable]));
+      const suppliedIds = inputs.flatMap((input) => input.id ? [input.id] : []);
+      if (new Set(suppliedIds).size !== suppliedIds.length || suppliedIds.some((variableId) => !previousById.has(variableId))) {
+        throw new Error('Environment changed since it was loaded; refresh and try again');
+      }
+      const now = new Date().toISOString();
+      const updated = inputs.map((input) => {
+        assertEnvironmentVariableName(input.name);
+        const existing = input.id ? previousById.get(input.id) : undefined;
+        return existing
+          ? { ...existing, name: input.name, value: input.value, protectedFromAI: input.protectedFromAI, updatedAt: now }
+          : { id: `env_${randomUUID()}`, serviceId: runtime.name, name: input.name, value: input.value, protectedFromAI: input.protectedFromAI, createdAt: now, updatedAt: now };
+      });
+      if (new Set(updated.map((variable) => variable.name)).size !== updated.length) throw new Error('Environment variable names must be unique');
+      await this.applyEnvironment(id, runtime.name, previous, updated);
+      return { variables: updated };
     });
-    if (new Set(updated.map((variable) => variable.name)).size !== updated.length) throw new Error('Environment variable names must be unique');
-    await this.applyEnvironment(id, runtime.name, previous, updated);
-    return { variables: updated };
   }
 
   async deleteEnvironmentVariable(id: string, variableId: string) {
-    const runtime = await this.docker.getContainerEnvironment(id);
-    const previous = await this.environment.list(runtime.name, runtime.environment);
-    const variable = previous.find((candidate) => candidate.id === variableId);
-    if (!variable) throw new Error(`Environment variable ${variableId} was not found`);
-    const updated = previous.filter((candidate) => candidate.id !== variableId);
-    const result = await this.applyEnvironment(id, runtime.name, previous, updated);
-    return { ...result, variableId, deleted: true };
+    return this.withEnvironmentOperation(id, async () => {
+      const runtime = await this.docker.getContainerEnvironment(id);
+      const previous = await this.environment.list(runtime.name, runtime.environment);
+      const variable = previous.find((candidate) => candidate.id === variableId);
+      if (!variable) throw new Error(`Environment variable ${variableId} was not found`);
+      const updated = previous.filter((candidate) => candidate.id !== variableId);
+      const result = await this.applyEnvironment(id, runtime.name, previous, updated);
+      return { ...result, variableId, deleted: true };
+    });
   }
 
   async setEnvironmentVariableForAgent(id: string, name: string, value: string) {
-    const variables = await this.listEnvironment(id);
-    const existing = variables.find((variable) => variable.name === name);
-    if (existing?.protectedFromAI) throw new Error(`${name} is protected from AI and can only be changed in the Environment interface`);
-    const variable = await this.saveEnvironmentVariable(id, { variableId: existing?.id, name, value, protectedFromAI: false });
-    return { serviceId: variable.serviceId, name: variable.name, configured: true, protectedFromAI: false };
+    return this.withEnvironmentOperation(id, async () => {
+      const variables = await this.listEnvironment(id);
+      const existing = variables.find((variable) => variable.name === name);
+      if (existing?.protectedFromAI) throw new Error(`${name} is protected from AI and can only be changed in the Environment interface`);
+      const variable = await this.saveEnvironmentVariableUnlocked(id, { variableId: existing?.id, name, value, protectedFromAI: false });
+      return { serviceId: variable.serviceId, name: variable.name, configured: true, protectedFromAI: false };
+    });
+  }
+
+  private async withEnvironmentOperation<T>(id: string, operation: () => Promise<T>): Promise<T> {
+    const serviceId = (await this.docker.getContainerEnvironment(id)).name;
+    const previous = this.environmentOperations.get(serviceId);
+    let resolve!: () => void;
+    const settled = new Promise<void>((done) => { resolve = done; });
+    this.environmentOperations.set(serviceId, settled);
+    try {
+      await previous;
+      return await operation();
+    } finally {
+      if (this.environmentOperations.get(serviceId) === settled) this.environmentOperations.delete(serviceId);
+      resolve();
+    }
   }
 
   async requestEnvironmentVariable(id: string, name: string, description?: string, additionalTargets: EnvironmentTarget[] = []) {
