@@ -1181,12 +1181,18 @@ export class DockerService {
       && !isServiceInitializationContainer(candidate, labels['halfcloud.app.id']!, labels['halfcloud.service.id']!, name)
       && (candidate.Names?.includes(`/${name}`) || candidate.Labels?.['halfcloud.service.id'] === labels['halfcloud.service.id']));
     const replacement = candidates[0];
+    const claimedBackup = replacementName.exec(replacement?.Labels?.[replacementLabel] ?? '');
+    // Concurrent environment edits could rename the same pending backup twice. Only the
+    // UUID differs; both containers must still belong to this Service and use the same image.
+    const racedEnvironmentEdit = action === 'rollback' && !expectation && currentName === pendingName
+      && replacement?.ImageID === inspection.Image && claimedBackup?.[1] === name
+      && claimedBackup[2] !== match[2] && claimedBackup[3] === match[3] && claimedBackup[4] === 'pending';
     if (candidates.length > 1 || (replacement && (
       !replacement.Names?.includes(`/${name}`)
       || replacement.Labels?.['halfcloud.managed'] !== 'true'
       || replacement.Labels['halfcloud.app.id'] !== labels['halfcloud.app.id']
       || replacement.Labels['halfcloud.service.id'] !== labels['halfcloud.service.id']
-      || replacement.Labels[replacementLabel] !== pendingName
+      || (replacement.Labels[replacementLabel] !== pendingName && !racedEnvironmentEdit)
     ))) throw new Error(`Replacement for ${name} has mismatched identity; refusing recovery`);
     if (expectation && replacement && replacement.ImageID !== expectation.updateImageId) throw new Error(`Replacement for ${name} has an unexpected image; refusing recovery`);
     if (action === 'retain') {

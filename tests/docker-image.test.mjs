@@ -493,6 +493,44 @@ for (const running of [true, false]) {
   });
 }
 
+for (const running of [true, false]) {
+  test(`startup recovers a pending environment edit whose backup was renamed by a parallel edit (running=${running})`, async () => {
+    const { service, containers, inspection } = replacementFixture({ running });
+    await service.beginContainerImageReplacement(serviceId, 'halfcloud/web:latest');
+    const backup = containers.get(inspection.Id);
+    // Simulate the interrupted second edit renaming the same backup after the first
+    // replacement was created, leaving its label pointing to the first pending name.
+    const original = (await backup.inspect()).Name.slice(1);
+    const raced = original.replace(/-halfcloud-replacement-v1-[a-f0-9-]+-/, '-halfcloud-replacement-v1-00000000-0000-4000-8000-000000000000-');
+    assert.notEqual(raced, original);
+    await backup.rename({ name: raced });
+    const replacement = await containers.get('new-container').inspect();
+    replacement.Image = inspection.Image;
+    assert.equal(replacement.Config.Labels['halfcloud.replacement.backup'], original);
+    await service.recoverContainerReplacements();
+    assert.deepEqual([...containers.keys()], [inspection.Id]);
+    assert.equal((await backup.inspect()).Name, inspection.Name);
+    assert.equal((await service.inspectContainer(serviceId)).state, running ? 'running' : 'exited');
+  });
+}
+
+test('mismatched pending backup labels remain fatal for different images and committed or Git-claimed updates', async () => {
+  for (const variation of ['image', 'committed', 'claimed']) {
+    const fixture = replacementFixture({ running: false });
+    const { service, containers, inspection, events } = fixture;
+    await service.beginContainerImageReplacement(serviceId, 'halfcloud/web:latest');
+    const backup = containers.get(inspection.Id);
+    const original = (await backup.inspect()).Name.slice(1);
+    await backup.rename({ name: original.replace(/-halfcloud-replacement-v1-[a-f0-9-]+-/, '-halfcloud-replacement-v1-00000000-0000-4000-8000-000000000000-') });
+    if (variation === 'committed') await backup.rename({ name: (await backup.inspect()).Name.slice(1).replace(/-pending$/, '-committed') });
+    if (variation !== 'image') (await containers.get('new-container').inspect()).Image = inspection.Image;
+    const before = events.length;
+    await assert.rejects(service.recoverContainerReplacements(variation === 'claimed' ? recoveryPlan(fixture, 'rollback') : undefined), /mismatched identity/);
+    assert.equal(events.length, before);
+    assert.equal(containers.size, 2);
+  }
+});
+
 for (const interrupted of [false, true]) {
   test(`a journal-committed two-Service group recovers pending replacements forward (interrupted=${interrupted})`, async () => {
     const fixtures = [replacementFixture(), replacementFixture({ suffix: '-two' })];
