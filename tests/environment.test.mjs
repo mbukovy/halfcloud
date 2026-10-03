@@ -134,6 +134,45 @@ test('generated environment secrets are protected and never returned to the agen
   assert.match(result.valueLocation, /Environment table.*Show/);
 });
 
+test('copies selected protected values to an existing Service in one recreation without disclosing them', async (t) => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'halfcloud-environment-copy-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const store = new EnvironmentStore(directory);
+  const environments = new Map([
+    ['service_web', { DATABASE_URL: 'protected-db-url', SLACK_SIGNING_SECRET: 'protected-slack-secret', NODE_ENV: 'production' }],
+    ['service_next', { SOCIAL_VIDEO_DIR: '/app/data/social-videos' }],
+    ['service_other', {}],
+  ]);
+  const services = [...environments.keys()].map((serviceId) => ({ id: `container_${serviceId}`, serviceId,
+    appId: serviceId === 'service_other' ? 'app_other' : 'app_web', name: serviceId, ports: [] }));
+  const replacements = [];
+  const docker = {
+    listContainers: async () => services,
+    getContainerEnvironment: async (id) => ({ name: id, environment: environments.get(id) }),
+    replaceContainerEnvironment: async (id, environment) => { replacements.push(id); environments.set(id, environment); return { containerId: id }; },
+  };
+  const applications = new ApplicationService(docker, { sync: async () => undefined }, { get: async () => [] }, store);
+  const names = ['DATABASE_URL', 'SLACK_SIGNING_SECRET'];
+  const source = await applications.listEnvironment('service_web');
+  const result = await applications.copyEnvironmentVariables('service_web', 'service_next', names);
+  assert.deepEqual(replacements, ['service_next']);
+  assert.deepEqual(environments.get('service_next'), { SOCIAL_VIDEO_DIR: '/app/data/social-videos', DATABASE_URL: 'protected-db-url', SLACK_SIGNING_SECRET: 'protected-slack-secret' });
+  assert.deepEqual(await applications.listEnvironment('service_web'), source);
+  const copied = await applications.listEnvironment('service_next');
+  for (const name of names) {
+    const variable = copied.find((entry) => entry.name === name);
+    assert.equal(variable.protectedFromAI, true);
+    assert.notEqual(variable.id, source.find((entry) => entry.name === name).id);
+    assert.equal(JSON.stringify(result).includes(variable.value), false);
+  }
+  await assert.rejects(applications.copyEnvironmentVariables('service_web', 'service_next', names), /already configured/);
+  await assert.rejects(applications.copyEnvironmentVariables('service_web', 'service_other', names), /same App/);
+  await assert.rejects(applications.copyEnvironmentVariables('service_web', 'service_next', ['MISSING'], true), /not configured/);
+  assert.equal(replacements.length, 1);
+  await applications.copyEnvironmentVariables('service_web', 'service_next', names, true);
+  assert.equal(replacements.length, 2);
+});
+
 test('generated environment secrets preserve existing values unless replacement is explicit', async (t) => {
   const directory = await mkdtemp(path.join(tmpdir(), 'halfcloud-environment-'));
   t.after(() => rm(directory, { recursive: true, force: true }));

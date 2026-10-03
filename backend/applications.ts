@@ -233,7 +233,8 @@ export class ApplicationService {
       const runtime = await this.getApp(app.id, false);
       const repositoryPrefix = `halfcloud/app-${app.id.slice(4).replaceAll('-', '')}:`;
       if (runtime.services.some((service) => service.image.startsWith(repositoryPrefix) && !previousUpdates.some((recipe) => recipe.serviceId === service.serviceId))) {
-        throw new Error('Every repository-built Service needs a verified update recipe before updating the App');
+        const missing = runtime.services.filter((service) => service.image.startsWith(repositoryPrefix) && !previousUpdates.some((recipe) => recipe.serviceId === service.serviceId));
+        throw new Error(`Every repository-built Service needs a verified update recipe before updating the App. Missing recipes: ${missing.map((service) => service.name).join(', ')}. Refresh, build and deploy all repository Services at the same commit, then verifyGitDeployment. No Services were changed.`);
       }
       if (runtime.services.some((service) => service.state !== 'running')) throw new Error('All Services must be running before a deterministic update; repair or start the App first');
       for (const recipe of previousUpdates) {
@@ -754,20 +755,27 @@ export class ApplicationService {
         if (selected && !services.some((service) => service.serviceId === selected.serviceId)) throw new Error('The selected Service is not built from this repository');
         const previous = await this.repositories.getServiceUpdates(app.id);
         const updates: ServiceUpdateRecipe[] = [];
+        const mismatches: string[] = [];
         for (const service of services) {
           const build = await this.repositories.getBuild(app.id, service.image);
-          if (!build || build.commit !== appRecord.source?.resolvedCommit) throw new Error('Build and deploy every repository Service at this commit before verification; existing Apps need a one-time verified recipe');
+          if (!build || build.commit !== appRecord.source?.resolvedCommit) {
+            mismatches.push(`${service.name}: ${build ? `built at ${build.commit}` : 'no recorded successful build'}`);
+            continue;
+          }
           const saved = previous.find((recipe) => recipe.serviceId === service.serviceId);
           const path = service.ports.some((port) => port.protocol === 'tcp')
             ? paths.get(service.serviceId!) ?? paths.get(service.name) ?? (selected?.serviceId === service.serviceId ? healthPath : saved?.healthPath ?? '/')
             : null;
           updates.push({ ...build, serviceId: service.serviceId!, healthPath: path });
         }
+        if (mismatches.length) throw new Error(`Build and deploy every repository Service at this commit before verification; existing Apps need a one-time verified recipe. Expected checkout commit: ${appRecord.source?.resolvedCommit}. Services needing deployment: ${mismatches.join('; ')}. Selecting one Service does not exclude the others. Refresh the repository if this is not the intended commit; stopping Services or running updateGitApp will not repair missing recipes.`);
         await Promise.all(updates.map((update) => this.waitForService(app.id, update.serviceId, update.imageId, update.healthPath)));
         await Promise.all(updates.map((update) => this.waitForService(app.id, update.serviceId, update.imageId, update.healthPath, true)));
         await this.repositories.saveServiceUpdates(app.id, updates);
         const updated = await this.repositories.markDeployed(app.id);
-        return { appId: app.id, commit: updated.source?.currentCommit, verified: true, updateRecipesSaved: updates.length };
+        return { appId: app.id, commit: updated.source?.currentCommit, verified: true, updateRecipesSaved: updates.length,
+          firstDeployment: !appRecord.source?.currentCommit,
+          provider: appRecord.source?.provider ?? (/^https:\/\/github\.com\//i.test(appRecord.source?.url ?? '') ? 'github' : undefined) };
       } catch (error) {
         await this.repositories.fail(appRecord.id, 'verifying', error);
         throw error;
@@ -923,6 +931,38 @@ export class ApplicationService {
       if (existing?.protectedFromAI) throw new Error(`${name} is protected from AI and can only be changed in the Environment interface`);
       const variable = await this.saveEnvironmentVariableUnlocked(id, { variableId: existing?.id, name, value, protectedFromAI: false });
       return { serviceId: variable.serviceId, name: variable.name, configured: true, protectedFromAI: false };
+    });
+  }
+
+  async copyEnvironmentVariables(sourceId: string, targetId: string, names: string[], replaceExisting = false) {
+    if (!names.length || names.length > 100 || new Set(names).size !== names.length) throw new Error('Select 1 to 100 unique environment variable names');
+    names.forEach(assertEnvironmentVariableName);
+    const source = await this.application(sourceId);
+    const target = await this.application(targetId);
+    if (!source.appId || source.appId !== target.appId) throw new Error('Environment values can only be copied between Services in the same App');
+    const sourceKey = source.serviceId ?? source.name;
+    const targetKey = target.serviceId ?? target.name;
+    if (sourceKey === targetKey) throw new Error('Select a different target Service');
+    const sourceVariables = await this.listEnvironment(sourceKey);
+    const selected = names.map((name) => {
+      const variable = sourceVariables.find((entry) => entry.name === name);
+      if (!variable) throw new Error(`Source environment variable ${name} is not configured`);
+      return variable;
+    });
+    return this.withEnvironmentOperation(targetKey, async () => {
+      const previous = await this.listEnvironment(targetKey);
+      const updated = [...previous];
+      const now = new Date().toISOString();
+      for (const variable of selected) {
+        const existing = previous.find((entry) => entry.name === variable.name);
+        if (existing && !replaceExisting) throw new Error(`${variable.name} is already configured on the target Service; use replaceExisting only when the user requests replacement`);
+        const copied = { ...variable, id: existing?.id ?? `env_${randomUUID()}`, serviceId: targetKey,
+          protectedFromAI: variable.protectedFromAI || Boolean(existing?.protectedFromAI), createdAt: existing?.createdAt ?? now, updatedAt: now };
+        if (existing) updated[updated.findIndex((entry) => entry.id === existing.id)] = copied;
+        else updated.push(copied);
+      }
+      await this.applyEnvironment(targetKey, targetKey, previous, updated);
+      return { sourceServiceId: sourceKey, serviceId: targetKey, variables: selected.map(({ name }) => ({ name, configured: true })) };
     });
   }
 

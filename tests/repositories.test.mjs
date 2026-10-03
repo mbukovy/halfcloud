@@ -91,6 +91,7 @@ test('refreshes the tracked public branch in place while retaining deployment fi
   assert.equal(result.changed, true);
   assert.equal(result.source.branch, 'main');
   assert.equal(result.source.resolvedCommit, latest);
+  assert.equal(result.checkoutCommit, latest);
   assert.equal(result.source.currentCommit, previousCommit);
   assert.equal((await exec('git', ['symbolic-ref', '--short', 'HEAD'], { cwd: checkout })).stdout.trim(), 'main');
   assert.equal(await readFile(path.join(checkout, 'README.md'), 'utf8'), 'Latest main');
@@ -128,6 +129,26 @@ test('refreshes private repositories with the existing deploy key and pinned hos
   assert.match(await readFile(path.join(root, 'ssh_config'), 'utf8'), /StrictHostKeyChecking yes/);
   assert.equal(JSON.stringify(result).includes(key), false);
   assert.equal((await apps.get(app.id)).source.currentCommit, app.source.currentCommit);
+});
+
+test('refresh repairs a stale checkout even when the recorded commit already matches the remote', async (t) => {
+  const { apps, app, service, commit, checkout } = await refreshFixture(t);
+  const latest = await commit('Latest recorded commit');
+  await apps.update(app.id, { source: { ...app.source, resolvedCommit: latest } });
+  const result = await service.refresh(app.id);
+  assert.equal(result.changed, false);
+  assert.equal(result.checkoutCommit, latest);
+  assert.equal((await exec('git', ['rev-parse', 'HEAD'], { cwd: checkout })).stdout.trim(), latest);
+  assert.equal(result.source.currentCommit, app.source.currentCommit);
+});
+
+test('refresh refuses to report success when checkout HEAD does not reach the fetched commit', async (t) => {
+  const { apps, app, service, commit, previousCommit } = await refreshFixture(t);
+  const latest = await commit('Not checked out');
+  const git = service.git;
+  service.git = (args, ...rest) => args.includes('checkout') ? Promise.resolve({ stdout: '', stderr: '' }) : git(args, ...rest);
+  await assert.rejects(service.refresh(app.id), (error) => error.message.includes(latest) && error.message.includes(previousCommit) && /checkout HEAD/.test(error.message));
+  assert.deepEqual(await apps.get(app.id), app);
 });
 
 test('refreshes to the exact remote branch tip even after its history was replaced', async (t) => {

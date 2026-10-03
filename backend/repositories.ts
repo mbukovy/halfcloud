@@ -611,12 +611,15 @@ export class RepositoryService {
     if (usage.bytes > maxBuildBytes || usage.files > maxBuildFiles) throw new Error('Repository checkout exceeds HalfCloud safety limits');
     // Do not reset or clean: retain generated build files and refuse conflicting local edits.
     await git(['checkout', '--no-overwrite-ignore', '--no-recurse-submodules', '-B', branch, resolvedCommit]);
+    const { stdout: head } = await git(['rev-parse', 'HEAD']);
+    const checkoutCommit = head.trim().toLowerCase();
+    if (checkoutCommit !== resolvedCommit) throw new Error(`Repository refresh did not reach the fetched commit ${resolvedCommit}; checkout HEAD is ${checkoutCommit}. No deployment commit was recorded.`);
     const changed = resolvedCommit !== app.source!.resolvedCommit;
     const updated = changed ? await this.apps.update(app.id, {
       source: { ...app.source!, resolvedCommit },
       deployment: { status: 'in_progress', stage: 'inspecting', message: 'Refreshed repository', buildAttempts: 0, updatedAt: new Date().toISOString() },
     }) : app;
-    return { appId: app.id, appName: app.name, source: updated.source, changed };
+    return { appId: app.id, appName: app.name, source: updated.source, checkoutCommit, changed };
   }
 
   async inspect(appIdOrName: string): Promise<RepositoryInspection> {

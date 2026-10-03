@@ -356,7 +356,7 @@ function toolLabel(part: Record<string, unknown>) {
   }
   const labels: Record<string, string> = {
     searchContainerImages: 'Finding the right software',
-    updateGitApp: 'Updating App', refreshGitRepository: 'Fetching latest Git changes', deployRepositoryImage: 'Updating Service',
+    updateGitApp: 'Updating App', refreshGitRepository: 'Fetching latest Git changes', deployRepositoryImage: 'Updating Service', copyEnvironmentVariables: 'Copying application environment',
     listApps: 'Inspecting Apps', createApp: 'Creating App', createGitApp: 'Cloning repository', inspectRepository: 'Inspecting repository', listRepositoryDirectory: 'Browsing repository', readRepositoryFile: 'Reading project file', writeRepositoryDeploymentFile: 'Preparing Docker configuration', buildRepositoryImage: 'Building application', addService: 'Adding Service', renameApp: 'Renaming App',
     startApp: 'Starting App', stopApp: 'Stopping App', restartApp: 'Restarting App', recreateApp: 'Recreating App', startService: 'Starting Service', stopService: 'Stopping Service', restartService: 'Restarting Service', recreateService: 'Recreating Service', removeService: 'Removing Service', deleteApp: 'Deleting App',
     getAppLogs: 'Reading App logs', getServiceLogs: 'Reading Service logs', runServiceInitializationCommand: 'Initializing Service', verifyGitDeployment: 'Verifying application', getApp: 'Inspecting App', getHostStatus: 'Inspecting host',
@@ -419,6 +419,28 @@ function githubWebhookSetup(part: Record<string, unknown>) {
   const name = toolName(part);
   if (name !== 'requestGitHubWebhookSetup' && name !== 'getGitHubWebhookSetup') return undefined;
   return safeGitHubWebhookSetup(part.output);
+}
+
+function automaticDeployOffer(part: Record<string, unknown>) {
+  if (toolName(part) !== 'verifyGitDeployment' || part.state !== 'output-available') return undefined;
+  const output = recordValue(part.output);
+  if (output?.verified !== true || output.firstDeployment !== true || typeof output.appId !== 'string') return undefined;
+  return { appId: output.appId, provider: output.provider, choice: output.automaticDeployChoice };
+}
+
+async function chooseAutomaticDeploy(part: Record<string, unknown>, choice: 'yes' | 'no') {
+  const offer = automaticDeployOffer(part);
+  if (!offer || offer.choice || chatBusy.value || (choice === 'yes' && !settings.value?.llmReady)) return;
+  part.output = { ...recordValue(part.output), automaticDeployChoice: choice };
+  await persistConversation();
+  if (choice === 'no') return;
+  try {
+    if (!activeConversationId.value) activeConversationId.value = conversationId();
+    await sendMessage({ text: `Yes, set up automatic deployments for App ${offer.appId}. Use the GitHub webhook setup if supported; if not, explain the limitation. Do not enable it until I complete the setup widget.` });
+  } catch {
+    part.output = { ...recordValue(part.output), automaticDeployChoice: undefined };
+    await persistConversation();
+  }
 }
 
 function updateGitHubWebhookSetup(part: Record<string, unknown>, value: GitHubWebhookSetupInfo) {
@@ -1405,13 +1427,23 @@ onBeforeUnmount(() => {
                     <li v-for="(detail, detailIndex) in toolGroupDetails(group.parts)" :key="detailIndex"><a v-if="detail.href" :href="detail.href" target="_blank" rel="noopener noreferrer">{{ detail.text }}</a><template v-else>{{ detail.text }}</template></li>
                   </ul>
                    <template v-for="(part, partIndex) in group.parts" :key="partIndex">
-                   <GitHubWebhookSetup
+                    <GitHubWebhookSetup
                      v-if="githubWebhookSetup(part)"
                      :key="`${activeConversationId}:${message.id}:${part.toolCallId ?? partIndex}`"
                      :setup="githubWebhookSetup(part)!"
                      :scope="githubWebhookScope.signal"
                      @update="updateGitHubWebhookSetup(part, $event)"
-                   />
+                    />
+                    <div v-if="automaticDeployOffer(part)" class="environment-request-widget automatic-deploy-offer">
+                      <strong>Set up automatic deployments?</strong>
+                      <p v-if="automaticDeployOffer(part)!.provider === 'github'">Deploy new changes automatically when you push to GitHub. Setup requires a few steps in GitHub; nothing turns on until you finish them.</p>
+                      <p v-else>Automatic deployments currently require a GitHub repository.</p>
+                      <p v-if="automaticDeployOffer(part)!.choice">{{ automaticDeployOffer(part)!.choice === 'no' ? 'Not now. You can ask to set this up later.' : automaticDeployOffer(part)!.provider === 'github' ? 'Setup requested. Follow the GitHub setup below.' : 'Setup is not available for this repository yet.' }}</p>
+                      <div v-else class="repository-setup-actions">
+                        <button class="button primary" type="button" :disabled="chatBusy || !settings?.llmReady" @click="chooseAutomaticDeploy(part, 'yes')">Yes</button>
+                        <button class="button" type="button" :disabled="chatBusy" @click="chooseAutomaticDeploy(part, 'no')">No</button>
+                      </div>
+                    </div>
                    <div v-if="repositorySetup(part)" class="environment-request-widget repository-setup-widget">
                      <template v-if="repositorySetup(part)!.status === 'verified'">
                        <strong>Repository access confirmed</strong>

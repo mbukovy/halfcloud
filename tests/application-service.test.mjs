@@ -304,7 +304,10 @@ test('verification rejects another Service on an old repository image and comple
   await applications.addService(app.id, { name: 'scheduler', image: oldImage, ports: {} });
   await applications.startService(app.id, 'scheduler');
 
-  await assert.rejects(applications.verifyGitDeployment(app.id), /Build and deploy every repository Service at this commit/);
+  await assert.rejects(applications.verifyGitDeployment(app.id, worker.serviceId), (error) =>
+    /Build and deploy every repository Service at this commit/.test(error.message)
+    && error.message.includes(nextCommit) && /scheduler: no recorded successful build/.test(error.message)
+    && /Selecting one Service does not exclude the others/.test(error.message));
   const failed = await apps.get(app.id);
   assert.equal(failed.deployment.status, 'failed');
   assert.equal(failed.deployment.errorCode, 'verification_failed');
@@ -313,7 +316,7 @@ test('verification rejects another Service on an old repository image and comple
   assert.equal((await apps.get(app.id)).source.currentCommit, currentCommit);
   assert.equal(runtime.services.every((service) => service.ports.length === 0), true);
 
-  assert.deepEqual(await applications.verifyGitDeployment(app.id), { appId: app.id, commit: nextCommit, verified: true, updateRecipesSaved: 2 });
+  assert.deepEqual(await applications.verifyGitDeployment(app.id), { appId: app.id, commit: nextCommit, verified: true, updateRecipesSaved: 2, firstDeployment: false, provider: 'github' });
   const verified = await apps.get(app.id);
   assert.equal(verified.deployment.status, 'running');
   assert.equal(verified.deployment.stage, 'running');

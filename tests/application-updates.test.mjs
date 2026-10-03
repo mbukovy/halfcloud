@@ -201,7 +201,7 @@ test('first verified deployment records distinct per-Service recipes and images 
     });
   }
   const result = await f.applications.verifyGitDeployment(f.app.name, undefined, '/ready');
-  assert.deepEqual(result, { appId: f.app.id, commit: currentCommit, verified: true, updateRecipesSaved: 2 });
+  assert.deepEqual(result, { appId: f.app.id, commit: currentCommit, verified: true, updateRecipesSaved: 2, firstDeployment: true, provider: 'github' });
   assertSafeResult(result);
   const persisted = new RepositoryService(new AppStore(f.directory), f.repositoriesDir);
   assert.deepEqual(await persisted.getServiceUpdates(f.app.id), f.built.map((built, index) => ({
@@ -210,6 +210,7 @@ test('first verified deployment records distinct per-Service recipes and images 
   })));
   assert.equal((await f.apps.get(f.app.id)).source.currentCommit, currentCommit);
   assert.deepEqual(f.events, ['health:web', 'health:worker', 'probe:web', 'probe:worker', 'saveServiceUpdates']);
+  assert.equal((await f.applications.verifyGitDeployment(f.app.id, undefined, '/ready')).firstDeployment, false);
   assertSafeResult(await f.applications.getApp(f.app.id, false));
 });
 
@@ -391,12 +392,12 @@ test('deterministic update builds and records every saved recipe before swapping
   assert.equal(result.commit, nextCommit);
   assertSafeResult(result);
   assert.deepEqual(f.events.filter((event) => !/^(health|probe):/.test(event)), [
-    'git:fetch', 'git:commit', 'git:checkout', 'build:web', 'record:web', 'build:worker', 'record:worker',
+    'git:fetch', 'git:commit', 'git:checkout', 'git:commit', 'build:web', 'record:web', 'build:worker', 'record:worker',
     'journal:applying', 'swap:web', 'swap:worker', 'routes',
     'journal:committed', 'saveServiceUpdates', 'commit', 'recover:forward', 'cleanup:web', 'cleanup:worker', 'routes', 'clearUpdateRun',
   ]);
-  assert.deepEqual(f.events.slice(11, 13).sort(), ['health:web', 'health:worker']);
-  assert.deepEqual(f.events.slice(13, 15).sort(), ['probe:web', 'probe:worker']);
+  assert.deepEqual(f.events.slice(12, 14).sort(), ['health:web', 'health:worker']);
+  assert.deepEqual(f.events.slice(14, 16).sort(), ['probe:web', 'probe:worker']);
   const updates = await f.repositories.getServiceUpdates(f.app.id);
   assert.deepEqual(f.wait.mock.calls.map((call) => call.arguments), [
     ...updates.map(({ serviceId, imageId, healthPath }) => [f.app.id, serviceId, imageId, healthPath]),
@@ -500,7 +501,7 @@ test('a verified same-commit update is a no-op without builds, swaps or plan wri
   assert.deepEqual(await f.repositories.getServiceUpdates(f.app.id), f.previousUpdates);
   assert.deepEqual(f.runtime.services, f.previousServices);
   assert.deepEqual(f.events, []);
-  assert.equal(f.git.mock.callCount(), 3);
+  assert.equal(f.git.mock.callCount(), 4);
 });
 
 test('final group verification rolls back every replacement if an early-ready web or dependency fails during worker warmup', async (t) => {
