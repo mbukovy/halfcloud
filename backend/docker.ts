@@ -4,6 +4,7 @@ import { constants } from 'node:fs';
 import { cp, lstat, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { Readable } from 'node:stream';
 import { isDeepStrictEqual } from 'node:util';
 import Docker from 'dockerode';
 
@@ -79,6 +80,13 @@ interface PreparedContainerReplacement {
   hostConfig: Docker.HostConfig;
   endpoints: Docker.EndpointsConfig;
   expectedImageId?: string;
+}
+
+interface ContainerChanges {
+  environment?: Record<string, string>;
+  image?: string;
+  additionalMount?: Docker.MountSettings;
+  beforeCreate?: (source: Docker.Container) => Promise<void>;
 }
 
 class MissingContainerReplacementError extends Error {
@@ -699,6 +707,70 @@ export class DockerService {
     return this.replaceContainerEnvironment(id, runtime.environment);
   }
 
+  async addContainerStorage(id: string, localName: string, target: string) {
+    if (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$/.test(localName)) throw new Error('Invalid named volume name');
+    if (!target.startsWith('/') || target.endsWith('/') || path.posix.normalize(target) !== target || /[\x00-\x1f\x7f\\:]/.test(target)) {
+      throw new Error('Storage target must be a normalized absolute directory path other than /');
+    }
+    const inspection = await (await this.managedContainer(id)).inspect();
+    const appId = inspection.Config.Labels?.['halfcloud.app.id'];
+    const serviceId = inspection.Config.Labels?.['halfcloud.service.id'];
+    if (!appId || !serviceId) throw new Error('Managed Service is missing ownership labels');
+    const existingTargets = [
+      ...inspection.Mounts.map((mount) => mount.Destination),
+      ...Object.keys(inspection.HostConfig.Tmpfs ?? {}),
+      ...Object.keys(inspection.Config.Volumes ?? {}),
+    ];
+    if (existingTargets.some((value) => {
+      const existing = path.posix.normalize(value);
+      return existing === target || existing.startsWith(`${target}/`) || target.startsWith(`${existing}/`);
+    })) throw new Error('Storage target overlaps an existing mount; existing storage must be preserved');
+    const volumeName = `halfcloud-${serviceId}-${localName}`;
+    if (volumeName.length > 255) throw new Error('Named volume name is too long');
+    const existingVolume = await this.docker.getVolume(volumeName).inspect().catch((error: { statusCode?: number }) => {
+      if (error.statusCode === 404) return undefined;
+      throw error;
+    });
+    if (existingVolume) throw new Error('This volume already exists. Inspect retained storage and use a new local name to avoid overwriting data');
+    const transaction = await this.replaceContainer(id, {
+      additionalMount: { Type: 'volume', Source: volumeName, Target: target, VolumeOptions: { NoCopy: true, Labels: {}, DriverConfig: { Name: 'local', Options: {} } } },
+      beforeCreate: async (source) => {
+        await createOrReuseManagedVolume(this.docker, serviceId, localName, appId);
+        // Copy from the stopped original, including its writable layer, rather than from image defaults.
+        const archive = await source.getArchive({ path: `${target}/.` }).catch((error: { statusCode?: number }) => {
+          if (error.statusCode === 404) return undefined;
+          throw error;
+        });
+        if (!archive) {
+          await this.initializeStorageOwnership(inspection.Image, inspection.Config.User ?? '', [{ type: 'volume', source: volumeName }]);
+          return;
+        }
+        try {
+          const helper = await this.docker.createContainer({
+            Image: inspection.Image,
+            User: '0:0',
+            Entrypoint: ['/bin/true'],
+            Labels: { 'halfcloud.operation': 'storage-copy' },
+            HostConfig: {
+              NetworkMode: 'none', LogConfig: { Type: 'none', Config: {} },
+              SecurityOpt: ['no-new-privileges'],
+              Mounts: [{ Type: 'volume', Source: volumeName, Target: '/halfcloud-storage', VolumeOptions: { NoCopy: true, Labels: {}, DriverConfig: { Name: 'local', Options: {} } } }],
+            },
+          });
+          try {
+            await helper.putArchive(archive, { path: '/halfcloud-storage', noOverwriteDirNonDir: true, copyUIDGID: true });
+          } finally {
+            await helper.remove({ force: true, v: false });
+          }
+        } finally {
+          (archive as Readable).destroy();
+        }
+      },
+    });
+    await transaction.commit();
+    return { serviceId, volumeName, target, containerId: transaction.containerId, state: transaction.state, added: true };
+  }
+
   async deleteContainer(id: string) {
     const container = await this.managedContainer(id);
     const inspection = await container.inspect();
@@ -933,7 +1005,7 @@ export class DockerService {
     return this.replaceContainer(id, { image });
   }
 
-  private async replaceContainer(id: string, changes: { environment?: Record<string, string>; image?: string }): Promise<ContainerReplacement> {
+  private async replaceContainer(id: string, changes: ContainerChanges): Promise<ContainerReplacement> {
     const container = await this.managedContainer(id);
     const inspection = await container.inspect();
     const name = inspection.Name.replace(/^\//, '');
@@ -959,6 +1031,7 @@ export class DockerService {
     try {
       await container.rename({ name: backupName });
       if (wasRunning) await container.stop({ t: 10 });
+      await changes.beforeCreate?.(container);
       replacement = await this.docker.createContainer({
         ...prepared.config,
         Labels: { ...prepared.config.Labels, [replacementLabel]: backupName },
@@ -1050,7 +1123,7 @@ export class DockerService {
     if ((await this.docker.getImage(image).inspect()).Id !== imageId) throw new Error('The committed image is not available at its recorded tag');
   }
 
-  private async prepareContainerReplacement(inspection: Docker.ContainerInspectInfo, name: string, changes: { environment?: Record<string, string>; image?: string }): Promise<PreparedContainerReplacement> {
+  private async prepareContainerReplacement(inspection: Docker.ContainerInspectInfo, name: string, changes: ContainerChanges): Promise<PreparedContainerReplacement> {
     const appId = inspection.Config.Labels?.['halfcloud.app.id'];
     if (!appId) throw new Error('Managed service is missing its App ID');
     const serviceId = inspection.Config.Labels?.['halfcloud.service.id'];
@@ -1058,6 +1131,10 @@ export class DockerService {
     // Keep existing environment values, even if they match image defaults: they may be intentional secrets or overrides.
     const config: Docker.ContainerCreateOptions = { ...inspection.Config };
     let expectedImageId: string | undefined;
+    if (changes.additionalMount) {
+      await this.assertImageIdentity(inspection.Config.Image, inspection.Image);
+      expectedImageId = inspection.Image;
+    }
     if (changes.image !== undefined) {
       const nextImage = await this.docker.getImage(changes.image).inspect();
       expectedImageId = nextImage.Id;
@@ -1085,6 +1162,7 @@ export class DockerService {
         { ...configured, Type: 'volume', Source: mount.Name, Target: mount.Destination, ReadOnly: !mount.RW },
       ];
     }
+    if (changes.additionalMount) hostConfig.Mounts = [...(hostConfig.Mounts ?? []), changes.additionalMount];
     const endpoints: Docker.EndpointsConfig = Object.fromEntries(Object.entries(inspection.NetworkSettings.Networks).map(([network, endpoint]) => [
       network, { IPAMConfig: endpoint.IPAMConfig, Links: endpoint.Links, Aliases: endpoint.Aliases, DriverOpts: (endpoint as Docker.EndpointSettings).DriverOpts },
     ]));

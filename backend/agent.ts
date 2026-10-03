@@ -251,6 +251,7 @@ Rules:
 - Use volumes, which are bind mounts inside the application's HalfCloud-managed directory, only for configuration or other files that intentionally need host filesystem access. Do not use a bind mount merely out of habit.
 - Never replace persistent data with an ephemeral container directory to work around permissions. Preserve persistence and fix the volume, mount target, ownership, or image configuration instead. Never use chmod 777 as a generic permissions fix.
 - Before changing existing storage, inspect what is already deployed. Do not delete data, replace a volume, or perform a destructive migration without clearly explaining the risk and obtaining the user's approval.
+- To add persistence to an existing Service during requested storage changes or explicit deployment preparation, use addServiceStorage. It stops the Service, copies the target directory from the original container into a new named volume, and recreates the same Service with its configuration and existing mounts preserved. Explain the brief interruption and call the approval-requiring tool. Add storage BEFORE changing environment variables or replacing the image, since those operations recreate the container and discard data in its writable layer. The tool refuses overlapping mounts and existing volume names; inspect retained volumes after a failure and use a fresh name rather than deleting data. Then configure required non-sensitive directory variables and run only documented approved migrations as part of explicit preparation. Do not treat missing storage support as a blocker when this tool is available.
 - Use the managed storage tools to inspect or reconcile storage. Volume deletion and ownership repair require explicit approval. Ownership repair is restricted to storage already mounted by the selected HalfCloud application.
 - When the user asks about data retained after deleting an App, search managed volumes by its exact appId, not its display name. If the appId is unavailable or that search is empty, list all orphaned volumes and use their returned appId and serviceId labels to identify candidates. Never conclude retained data is absent after searching only by App name or Service ID.
 - When the user asks for all volumes, dangling volumes, unused volumes, or wants to reclaim storage space, use listDockerVolumes. Managed-volume listing intentionally excludes anonymous and legacy unlabeled volumes. Explain that unidentified volumes may not have been created by HalfCloud. Before deleting, explain that the data will be permanently removed, then call deleteUnusedVolume for each unused volume the user wants removed so the interface can collect approval.
@@ -456,6 +457,11 @@ export async function createChatResponse(
     stopService: tool({ description: 'Stop only one Service in an App.', inputSchema: z.object({ appId, serviceId }), execute: ({ appId, serviceId }) => docker.stopService(appId, serviceId) }),
     restartService: tool({ description: 'Restart only one Service in an App.', inputSchema: z.object({ appId, serviceId }), execute: ({ appId, serviceId }) => docker.restartService(appId, serviceId) }),
     recreateService: tool({ description: 'Recreate only one Service in an App while preserving managed volumes.', inputSchema: z.object({ appId, serviceId }), execute: ({ appId, serviceId }) => docker.recreateService(appId, serviceId) }),
+    addServiceStorage: tool({
+      description: 'Add a new persistent named volume to an existing Service. Briefly stops it, copies existing target-directory data from its original container, and recreates the same Service preserving environment, identity, ports and existing storage. Restores the original container on failure and retains any new volume. Refuses existing volume names or overlapping mounts. Use before environment/image changes during explicit deployment preparation. Requires approval.',
+      inputSchema: z.object({ appId, serviceId, localName: z.string().min(1).max(128), target: z.string().startsWith('/').max(4096).describe('Absolute application data directory to preserve') }),
+      execute: ({ appId, serviceId, localName, target }) => withProgress(() => docker.addServiceStorage(appId, serviceId, localName, target)),
+    }),
     removeService: tool({ description: 'Remove one Service from a multi-Service App while retaining managed data. Requires approval.', inputSchema: z.object({ appId, serviceId }), execute: ({ appId, serviceId }) => docker.removeService(appId, serviceId) }),
     deleteApp: tool({
       description: 'Delete an App and its runtime Services/network. Data is retained unless deleteData is explicitly true. Requires approval.',
@@ -640,7 +646,7 @@ export async function createChatResponse(
     model: createLanguageModel(settings),
     instructions: SYSTEM_PROMPT,
     tools,
-    toolApproval: { deleteApp: 'user-approval', removeService: 'user-approval', runServiceInitializationCommand: 'user-approval', deleteManagedVolume: 'user-approval', deleteUnusedVolume: 'user-approval', pruneUnusedImages: 'user-approval', repairStorageOwnership: 'user-approval', removeRouteProtection: 'user-approval' },
+    toolApproval: { deleteApp: 'user-approval', removeService: 'user-approval', addServiceStorage: 'user-approval', runServiceInitializationCommand: 'user-approval', deleteManagedVolume: 'user-approval', deleteUnusedVolume: 'user-approval', pruneUnusedImages: 'user-approval', repairStorageOwnership: 'user-approval', removeRouteProtection: 'user-approval' },
   });
   const onError = (error: unknown) => {
     const details = redactProviderError(error, settings.apiKey);

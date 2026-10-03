@@ -719,6 +719,20 @@ export class ApplicationService {
     await this.syncRoutes();
     return result;
   }
+  async addServiceStorage(appIdOrName: string, serviceIdOrName: string, localName: string, target: string) {
+    const app = await this.apps.get(appIdOrName);
+    const add = async () => {
+      const service = await this.service(app.id, serviceIdOrName);
+      return this.withEnvironmentOperation(service.serviceId!, async () => {
+        this.assertAppNotUpdating(app.id);
+        const current = await this.service(app.id, service.serviceId!);
+        const result = await this.docker.addContainerStorage(current.id, localName, target);
+        await this.syncRoutes();
+        return { appId: app.id, ...result };
+      });
+    };
+    return app.source ? this.withRepositoryOperation(app.id, add) : add();
+  }
   async removeService(appIdOrName: string, serviceIdOrName: string) {
     const app = await this.getApp(appIdOrName, false);
     if (app.services.length === 1) throw new Error('Delete the App instead of removing its only Service');

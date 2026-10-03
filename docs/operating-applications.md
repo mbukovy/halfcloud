@@ -142,6 +142,10 @@ Removing protection makes the selected hostname public and requires explicit app
 
 Container filesystems are ephemeral. Data that must survive Service recreation needs managed storage.
 
+For an existing Service, ask HalfCloud to add persistent storage for its application data directory. The approved `addServiceStorage` action stops the Service, copies that directory (including files in the original container's writable layer) into a new named volume, and recreates the same Service with its settings and existing storage preserved. A previously stopped Service remains stopped. If copying or recreation fails, the original container is restored and the new volume is retained for inspection. Existing volume names and paths overlapping existing mounts are refused to avoid overwriting data.
+
+Add persistence **before** changing environment variables or deploying another image, because those operations recreate the container and discard unmounted writable-layer files. During explicit Git deployment preparation, configure required directory variables after adding storage, then run documented approved migrations. Ordinary Git updates do not perform this preparation or run migrations.
+
 HalfCloud supports:
 
 - **Named volumes** for databases, uploads, application state, and persistent caches.

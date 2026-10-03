@@ -167,6 +167,106 @@ function addInitializationHelper({ containers }, state = 'running') {
   return inspection;
 }
 
+function storageFixture(options) {
+  const fixture = replacementFixture(options);
+  const { service, inspection, containers, events } = fixture;
+  const volumes = new Map();
+  const archived = [];
+  const extracted = [];
+  const original = containers.get(inspection.Id);
+  original.getArchive = async (options) => {
+    assert.equal((await original.inspect()).State.Running, false, 'writes must stop before copying');
+    events.push('archive');
+    archived.push(options);
+    return Readable.from([Buffer.from('existing files with ownership')]);
+  };
+  service.docker.getImage = () => ({ inspect: async () => ({ Id: inspection.Image, Config: fixture.previousConfig }) });
+  service.docker.getVolume = (name) => ({ inspect: async () => {
+    if (!volumes.has(name)) throw Object.assign(new Error('not found'), { statusCode: 404 });
+    return volumes.get(name);
+  } });
+  service.docker.createVolume = async (options) => { volumes.set(options.Name, { ...options }); };
+  const create = service.docker.createContainer;
+  service.docker.createContainer = async (options) => {
+    if (options.Labels?.['halfcloud.operation'] === 'storage-copy') {
+      events.push('create-copy-helper');
+      assert.equal(options.Image, inspection.Image);
+      assert.equal(options.HostConfig.NetworkMode, 'none');
+      assert.equal(options.HostConfig.Mounts[0].VolumeOptions.NoCopy, true);
+      return {
+        async putArchive(stream, options) {
+          const buffers = [];
+          for await (const chunk of stream) buffers.push(chunk);
+          extracted.push({ data: Buffer.concat(buffers).toString(), options });
+          if (fixture.failures.has('copy')) throw new Error('copy failed');
+          events.push('copied');
+        },
+        async remove(options) { assert.deepEqual(options, { force: true, v: false }); events.push('remove-copy-helper'); },
+      };
+    }
+    const container = await create(options);
+    const inspect = container.inspect;
+    container.inspect = async () => ({ ...await inspect(), Image: inspection.Image });
+    return container;
+  };
+  return { ...fixture, volumes, archived, extracted };
+}
+
+test('adding storage copies stopped-container data and preserves Service configuration and existing mounts', async () => {
+  const f = storageFixture();
+  const result = await f.service.addContainerStorage(serviceId, 'videos', '/app/videos');
+  assert.equal(result.added, true);
+  assert.equal(result.state, 'running');
+  assert.deepEqual(f.archived, [{ path: '/app/videos/.' }]);
+  assert.deepEqual(f.extracted, [{ data: 'existing files with ownership', options: { path: '/halfcloud-storage', noOverwriteDirNonDir: true, copyUIDGID: true } }]);
+  const created = f.creates[0];
+  assert.deepEqual(created.Env, f.inspection.Config.Env);
+  assert.equal(created.Image, f.inspection.Config.Image);
+  assert.deepEqual(created.HostConfig.Binds, f.inspection.HostConfig.Binds);
+  assert.deepEqual(created.HostConfig.PortBindings, f.inspection.HostConfig.PortBindings);
+  assert.deepEqual(created.HostConfig.Mounts.slice(0, -1), f.inspection.HostConfig.Mounts);
+  assert.equal(created.HostConfig.Mounts.at(-1).Target, '/app/videos');
+  assert.equal(created.HostConfig.Mounts.at(-1).VolumeOptions.NoCopy, true);
+  assert.equal(f.volumes.get(result.volumeName).Labels['halfcloud.app.id'], appId);
+  assert.ok(f.events.indexOf('copied') < f.events.indexOf('start-new'));
+  assert.ok(!JSON.stringify(result).includes('protected-secret'));
+});
+
+for (const failure of ['copy', 'create', 'start']) {
+  test(`adding storage restores original writable data and retains new storage when ${failure} fails`, async () => {
+    const f = storageFixture({ failure });
+    await assert.rejects(f.service.addContainerStorage(serviceId, 'videos', '/app/videos'), new RegExp(`${failure} failed`));
+    const restored = await f.containers.get(f.inspection.Id).inspect();
+    assert.equal(restored.Name, f.inspection.Name);
+    assert.equal(restored.State.Running, true);
+    assert.equal(f.containers.size, 1);
+    assert.equal(f.volumes.size, 1, 'partially copied data must never be deleted automatically');
+    await assert.rejects(f.service.addContainerStorage(serviceId, 'videos', '/app/videos'), /already exists/);
+  });
+}
+
+test('adding storage rejects invalid paths, overlapping mounts and existing volumes before stopping the Service', async () => {
+  const f = storageFixture();
+  for (const target of ['/', 'relative', '/app/../data', '/app/', '/data', '/data/videos', '/config', '/tmp/files']) {
+    await assert.rejects(f.service.addContainerStorage(serviceId, 'videos', target), /target|overlaps/);
+  }
+  await assert.rejects(f.service.addContainerStorage(serviceId, '../videos', '/app/videos'), /volume name/);
+  f.volumes.set(`halfcloud-${serviceId}-videos`, { Labels: {} });
+  await assert.rejects(f.service.addContainerStorage(serviceId, 'videos', '/app/videos'), /already exists/);
+  assert.deepEqual(f.events, []);
+});
+
+test('adding storage to a stopped Service leaves it stopped and initializes a previously absent directory', async () => {
+  const f = storageFixture({ running: false });
+  f.containers.get(f.inspection.Id).getArchive = async () => { throw Object.assign(new Error('directory absent'), { statusCode: 404 }); };
+  let ownership;
+  f.service.initializeStorageOwnership = async (...args) => { ownership = args; };
+  const result = await f.service.addContainerStorage(serviceId, 'videos', '/app/videos');
+  assert.equal(result.state, 'exited');
+  assert.deepEqual(ownership, [f.inspection.Image, f.inspection.Config.User, [{ type: 'volume', source: result.volumeName }]]);
+  assert.ok(!f.events.includes('start-new'));
+});
+
 test('image replacement preserves identity, protected environment and runtime configuration while using new defaults', async () => {
   const { service, inspection, nextConfig, events, creates } = replacementFixture();
   const original = structuredClone(inspection);

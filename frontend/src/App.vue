@@ -365,7 +365,7 @@ function toolLabel(part: Record<string, unknown>) {
     listManagedVolumes: 'Inspecting managed storage', listDockerVolumes: 'Inspecting all storage', inspectManagedVolume: 'Inspecting managed volume',
     reconcileManagedVolume: 'Reconciling managed volume', deleteManagedVolume: 'Deleting managed volume', deleteUnusedVolume: 'Deleting unused volume',
     listUnusedImages: 'Finding removable software', pruneUnusedImages: 'Removing unused software',
-    repairStorageOwnership: 'Repairing storage ownership',
+    repairStorageOwnership: 'Repairing storage ownership', addServiceStorage: 'Adding persistent storage',
     listServiceDomains: 'Inspecting service domains', addServiceDomain: 'Adding service domain',
     removeServiceDomain: 'Removing service domain', setPrimaryServiceDomain: 'Changing primary domain',
     listHostnameRedirects: 'Inspecting hostname redirects', addHostnameRedirect: 'Adding hostname redirect',
@@ -595,6 +595,8 @@ function toolDetails(part: Record<string, unknown>) {
   if (name === 'runServiceInitializationCommand') details.push({ text: input?.networkMode === 'service' ? 'Network: live Service localhost' : 'Network: private App network' });
   if (typeof input?.volumeName === 'string') details.push({ text: `Volume: ${input.volumeName}` });
   if (typeof input?.mountTarget === 'string') details.push({ text: `Mount: ${input.mountTarget}` });
+  if (name === 'addServiceStorage' && typeof input?.target === 'string') details.push({ text: `Data directory: ${input.target}` });
+  if (name === 'addServiceStorage' && typeof input?.localName === 'string') details.push({ text: `New storage: ${input.localName}` });
   if (typeof input?.hostname === 'string' && name.includes('ServiceDomain')) details.push({ text: `Domain: ${input.hostname}` });
   if (typeof input?.routeId === 'string') {
     const match = apps.value.flatMap((app) => app.services.flatMap((service) => service.domains)).find((domain) => domain.id === input.routeId);
@@ -688,6 +690,7 @@ function approvalCopy(part: Record<string, unknown>) {
   if (name === 'pruneUnusedImages') return { title: 'Remove all unused software?', detail: 'Apps and saved data will remain. Removed software will be downloaded again if it is needed later.', targets };
   if (name === 'removeService') return { title: 'Remove this Service?', detail: 'The Service will be removed from its App. Managed persistent data will remain.', targets };
   if (name === 'repairStorageOwnership') return { title: 'Repair this storage ownership?', detail: 'The application may be briefly stopped while ownership is changed recursively.', targets };
+  if (name === 'addServiceStorage') return { title: 'Add persistent storage to this Service?', detail: 'The Service will be briefly stopped while its existing data directory is copied into new persistent storage. Its settings and existing storage will be preserved.', targets };
   if (name === 'runServiceInitializationCommand') {
     const sharesServiceNetwork = recordValue(part.input)?.networkMode === 'service';
     return {

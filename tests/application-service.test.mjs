@@ -17,6 +17,7 @@ class FakeDocker {
   started = [];
   restarted = [];
   initializationCommands = [];
+  storageAdded = [];
   networksDeleted = [];
   replaced = [];
   builds = new Map();
@@ -97,6 +98,10 @@ class FakeDocker {
     return { serviceId: this.services.find((service) => service.id === id)?.serviceId, exitCode: 0, completed: true };
   }
   async deleteContainer(id) { this.services = this.services.filter((service) => service.id !== id); }
+  async addContainerStorage(id, localName, target) {
+    this.storageAdded.push({ id, localName, target });
+    return { serviceId: this.services.find((service) => service.id === id)?.serviceId, added: true };
+  }
   async deleteAppNetwork(id) { this.networksDeleted.push(id); return { deleted: true }; }
   async listManagedVolumes() { return []; }
 }
@@ -149,6 +154,14 @@ test('deploys WordPress and MySQL as Services in one App and adds Redis to it', 
   const initialized = await applications.runServiceInitializationCommand('Company Website', 'redis', ['redis-cli', '--cluster', 'fix'], 'service');
   assert.equal(initialized.completed, true);
   assert.deepEqual(runtime.initializationCommands, [{ id: 'container-3', command: ['redis-cli', '--cluster', 'fix'], networkMode: 'service' }]);
+  const storage = await applications.addServiceStorage('Company Website', 'redis', 'data', '/data');
+  assert.equal(storage.appId, app.id);
+  assert.equal(storage.added, true);
+  assert.deepEqual(runtime.storageAdded, [{ id: 'container-3', localName: 'data', target: '/data' }]);
+  applications.updatingApps.add(app.id);
+  await assert.rejects(applications.addServiceStorage(app.id, 'redis', 'other', '/other'), /update or its recovery/);
+  assert.equal(runtime.storageAdded.length, 1);
+  applications.updatingApps.clear();
 });
 
 test('deleting a private Git App removes credentials before metadata and returns the remote cleanup URL', async (t) => {
