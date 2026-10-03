@@ -181,16 +181,65 @@ test('revalidates public DNS on refresh and never contacts a private address', a
   assert.deepEqual(await apps.get(app.id), app);
 });
 
-test('does not overwrite an ignored local deployment file introduced by the remote', async (t) => {
+test('archives a HalfCloud-generated ignored deployment file introduced by the remote', async (t) => {
   const { apps, app, service, commit, remote, checkout } = await refreshFixture(t);
   await writeFile(path.join(checkout, '.git', 'info', 'exclude'), 'Dockerfile.halfcloud\n');
   await service.writeDeploymentFile(app.id, 'Dockerfile.halfcloud', 'FROM local-image\n');
-  const before = await apps.get(app.id);
   await writeFile(path.join(remote, 'Dockerfile.halfcloud'), 'FROM upstream-image\n');
-  await commit('Add upstream Dockerfile');
+  const latest = await commit('Add upstream Dockerfile');
+
+  assert.equal((await service.refresh(app.id)).checkoutCommit, latest);
+  assert.equal(await readFile(path.join(checkout, 'Dockerfile.halfcloud'), 'utf8'), 'FROM upstream-image\n');
+  const root = path.dirname(checkout);
+  const archive = (await readdir(root)).find((name) => name.startsWith('deployment-conflicts-'));
+  assert.equal(await readFile(path.join(root, archive, 'Dockerfile.halfcloud'), 'utf8'), 'FROM local-image\n');
+  assert.equal((await apps.get(app.id)).source.currentCommit, app.source.currentCommit);
+});
+
+test('refresh handles legacy generated dockerignore collisions using the saved recipe', async (t) => {
+  const { app, service, commit, remote, root, checkout, previousCommit } = await refreshFixture(t);
+  await mkdir(path.join(checkout, 'web'));
+  await writeFile(path.join(checkout, 'web', '.dockerignore'), 'node_modules\n');
+  const recipe = { contextPath: 'web', dockerfilePath: 'Dockerfile.halfcloud', dockerfileContent: 'FROM scratch\n', dockerignoreContent: 'node_modules\n' };
+  await service.saveServiceUpdates(app.id, [{ serviceId: 'web', image: 'halfcloud/web:old', imageId, commit: previousCommit, healthPath: null, recipe }]);
+  await mkdir(path.join(remote, 'web'));
+  await writeFile(path.join(remote, 'web', '.dockerignore'), '.git\n');
+  const latest = await commit('Add upstream ignore');
+
+  assert.equal((await service.refresh(app.id)).checkoutCommit, latest);
+  assert.equal(await readFile(path.join(checkout, 'web', '.dockerignore'), 'utf8'), '.git\n');
+  assert.deepEqual((await service.getServiceUpdates(app.id))[0].recipe, recipe);
+  const archive = (await readdir(root)).find((name) => name.startsWith('deployment-conflicts-'));
+  assert.equal(await readFile(path.join(root, archive, 'web', '.dockerignore'), 'utf8'), 'node_modules\n');
+});
+
+for (const generated of [false, true]) {
+  test(`refresh preserves ${generated ? 'edited generated' : 'unmanaged'} dockerignore conflicts`, async (t) => {
+    const { apps, app, service, commit, remote, checkout } = await refreshFixture(t);
+    if (generated) await service.writeDeploymentFile(app.id, '.dockerignore', 'node_modules\n');
+    await writeFile(path.join(checkout, '.dockerignore'), 'local changes\n');
+    const before = await apps.get(app.id);
+    await writeFile(path.join(remote, '.dockerignore'), '.git\n');
+    await commit('Conflicting upstream ignore');
+
+    await assert.rejects(service.refresh(app.id), /overwritten|Aborting/i);
+    assert.equal(await readFile(path.join(checkout, '.dockerignore'), 'utf8'), 'local changes\n');
+    assert.deepEqual(await apps.get(app.id), before);
+  });
+}
+
+test('restores archived deployment files when another local edit blocks checkout', async (t) => {
+  const { apps, app, service, commit, remote, checkout, previousCommit } = await refreshFixture(t);
+  await service.writeDeploymentFile(app.id, '.dockerignore', 'node_modules\n');
+  await writeFile(path.join(checkout, 'README.md'), 'local changes');
+  const before = await apps.get(app.id);
+  await writeFile(path.join(remote, '.dockerignore'), '.git\n');
+  await commit('Conflicting source and new ignore');
 
   await assert.rejects(service.refresh(app.id), /overwritten|Aborting/i);
-  assert.equal(await readFile(path.join(checkout, 'Dockerfile.halfcloud'), 'utf8'), 'FROM local-image\n');
+  assert.equal(await readFile(path.join(checkout, '.dockerignore'), 'utf8'), 'node_modules\n');
+  assert.equal(await readFile(path.join(checkout, 'README.md'), 'utf8'), 'local changes');
+  assert.equal((await exec('git', ['rev-parse', 'HEAD'], { cwd: checkout })).stdout.trim(), previousCommit);
   assert.deepEqual(await apps.get(app.id), before);
 });
 

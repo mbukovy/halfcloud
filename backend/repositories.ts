@@ -106,6 +106,13 @@ const recipeSchema = z.object({
   dockerfileContent: dockerfileContentSchema,
   dockerignoreContent: recipeContentSchema,
 }).strict();
+const deploymentWritesSchema = z.object({
+  version: z.literal(1),
+  files: z.array(z.object({
+    path: z.string().transform((value) => safeRelativePath(value)),
+    sha256: z.string().regex(/^[a-f0-9]{64}$/),
+  }).strict()).max(1000),
+}).strict();
 const savedBuildSchema = z.object({
   image: z.string().min(1).max(256).regex(/^[A-Za-z0-9][A-Za-z0-9/@_.:-]*$/),
   imageId: z.string().regex(/^sha256:[a-f0-9]{64}$/),
@@ -609,8 +616,21 @@ export class RepositoryService {
     if (!/^[a-f0-9]{40}$/.test(resolvedCommit)) throw new Error('Git repository did not provide a commit');
     const usage = await directoryUsage(checkout);
     if (usage.bytes > maxBuildBytes || usage.files > maxBuildFiles) throw new Error('Repository checkout exceeds HalfCloud safety limits');
-    // Do not reset or clean: retain generated build files and refuse conflicting local edits.
-    await git(['checkout', '--no-overwrite-ignore', '--no-recurse-submodules', '-B', branch, resolvedCommit]);
+    // Archive only proven HalfCloud writes that collide with incoming tracked files.
+    // Keep all other local edits protected by Git's normal checkout checks.
+    const archived = await this.archiveDeploymentConflicts(app.id, checkout, resolvedCommit, git);
+    try {
+      await git(['checkout', '--no-overwrite-ignore', '--no-recurse-submodules', '-B', branch, resolvedCommit]);
+    } catch (error) {
+      for (const { destination, backup } of archived) {
+        const existing = await lstat(destination).catch((failure: NodeJS.ErrnoException) => {
+          if (failure.code !== 'ENOENT') throw failure;
+          return undefined;
+        });
+        if (!existing) await rename(backup, destination);
+      }
+      throw error;
+    }
     const { stdout: head } = await git(['rev-parse', 'HEAD']);
     const checkoutCommit = head.trim().toLowerCase();
     if (checkoutCommit !== resolvedCommit) throw new Error(`Repository refresh did not reach the fetched commit ${resolvedCommit}; checkout HEAD is ${checkoutCommit}. No deployment commit was recorded.`);
@@ -690,8 +710,69 @@ export class RepositoryService {
     const temporary = `${destination}.${randomUUID()}.tmp`;
     await writeFile(temporary, content, { mode: 0o600 });
     await rename(temporary, destination);
+    const root = await this.appRoot(app.id, true);
+    const stored = await this.readRecipeJson(root, 'deployment-writes.json');
+    const files = stored === undefined ? [] : deploymentWritesSchema.parse(stored).files;
+    const sha256 = createHash('sha256').update(content).digest('hex');
+    const writes = deploymentWritesSchema.parse({ version: 1, files: [...files.filter((file) => file.path !== relative), { path: relative, sha256 }] });
+    await this.writeRecipeJson(root, 'deployment-writes.json', writes, true);
     await this.setStage(app.id, 'preparing', `Prepared ${relative}`);
-    return { appId: app.id, path: relative, bytes: Buffer.byteLength(content), sha256: createHash('sha256').update(content).digest('hex') };
+    return { appId: app.id, path: relative, bytes: Buffer.byteLength(content), sha256 };
+  }
+
+  private async archiveDeploymentConflicts(appId: string, checkout: string, commit: string,
+    git: (args: string[]) => Promise<{ stdout: string; stderr: string }>) {
+    const root = await this.appRoot(appId);
+    const stored = await this.readRecipeJson(root, 'deployment-writes.json');
+    const candidates = new Map<string, Set<string>>();
+    const add = (relative: string, sha256: string) => {
+      const basename = path.posix.basename(relative);
+      if (basename !== '.dockerignore' && !/^Dockerfile(?:\.[A-Za-z0-9._-]+)?$/.test(basename)) return;
+      const hashes = candidates.get(relative) ?? new Set<string>();
+      hashes.add(sha256);
+      candidates.set(relative, hashes);
+    };
+    if (stored !== undefined) {
+      for (const file of deploymentWritesSchema.parse(stored).files) add(file.path, file.sha256);
+    }
+    // Older checkouts have no write manifest, but verified recipes provide exact content.
+    for (const { recipe } of await this.getServiceUpdates(appId)) {
+      const prefix = recipe.contextPath === '.' ? '' : `${recipe.contextPath}/`;
+      add(`${prefix}${recipe.dockerfilePath}`, createHash('sha256').update(recipe.dockerfileContent).digest('hex'));
+      add(`${prefix}.dockerignore`, createHash('sha256').update(recipe.dockerignoreContent).digest('hex'));
+    }
+    const conflicts: string[] = [];
+    if (!candidates.size) return [];
+    const { stdout: tree } = await git(['ls-tree', '-r', '-z', commit]);
+    const incomingFiles = new Set(tree.split('\0').filter((entry) => /^100(?:644|755) blob /.test(entry))
+      .map((entry) => entry.slice(entry.indexOf('\t') + 1)));
+    for (const [relative, hashes] of candidates) {
+      if (!incomingFiles.has(relative)) continue;
+      const { stdout: tracked } = await git(['ls-files', '-z', '--', `:(literal)${relative}`]);
+      if (tracked) continue;
+      try {
+        const { content, truncated } = await this.readText(checkout, relative, maxReadBytes);
+        if (!truncated && hashes.has(createHash('sha256').update(content).digest('hex'))) conflicts.push(relative);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      }
+    }
+    const archived: Array<{ destination: string; backup: string }> = [];
+    if (!conflicts.length) return archived;
+    const directory = await mkdtemp(path.join(root, 'deployment-conflicts-'));
+    try {
+      for (const relative of conflicts) {
+        const destination = path.join(checkout, relative);
+        const backup = path.join(directory, relative);
+        await mkdir(path.dirname(backup), { recursive: true, mode: 0o700 });
+        await rename(destination, backup);
+        archived.push({ destination, backup });
+      }
+    } catch (error) {
+      for (const { destination, backup } of archived) await rename(backup, destination);
+      throw error;
+    }
+    return archived;
   }
 
   async prepareGeneratedBuildContext(appIdOrName: string, contextPath: string, dockerfileContent: string, dockerignoreContent: string) {

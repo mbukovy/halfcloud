@@ -49,7 +49,9 @@ async function fixture(t, { verify = true } = {}) {
     await writeFile(path.join(context, '.env'), `API_KEY=${secret}\n`);
   }
   const git = t.mock.fn(async (args) => {
-    events.push(args.includes('rev-parse') ? 'git:commit' : args.includes('fetch') ? 'git:fetch' : 'git:checkout');
+    if (!args.includes('ls-tree') && !args.includes('ls-files')) {
+      events.push(args.includes('rev-parse') ? 'git:commit' : args.includes('fetch') ? 'git:fetch' : 'git:checkout');
+    }
     return { stdout: args.includes('rev-parse') ? `${nextCommit}\n` : '', stderr: '' };
   });
   const resolveHost = async () => [{ address: '8.8.8.8' }];
@@ -501,7 +503,7 @@ test('a verified same-commit update is a no-op without builds, swaps or plan wri
   assert.deepEqual(await f.repositories.getServiceUpdates(f.app.id), f.previousUpdates);
   assert.deepEqual(f.runtime.services, f.previousServices);
   assert.deepEqual(f.events, []);
-  assert.equal(f.git.mock.callCount(), 4);
+  assert.equal(f.git.mock.callCount(), 5);
 });
 
 test('final group verification rolls back every replacement if an early-ready web or dependency fails during worker warmup', async (t) => {
