@@ -258,6 +258,48 @@ export interface ManagedVolumeFilter {
 
 export type ServiceCommandNetworkMode = 'app' | 'service';
 
+const storageReaderImage = 'node:22-alpine';
+// Runs only trusted reader code, with one read-only mount and no App environment or network.
+const storageReaderScript = String.raw`
+const fs = require('node:fs');
+try {
+  const relative = process.argv[1];
+  const limit = Number(process.argv[2]);
+  const flags = fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK;
+  let directory = fs.openSync('/halfcloud-storage', flags | fs.constants.O_DIRECTORY);
+  let fd;
+  try {
+    const segments = relative.split('/');
+    for (const segment of segments.slice(0, -1)) {
+      // Anchor each lookup to an open directory so concurrent symlink swaps cannot escape.
+      const next = fs.openSync('/proc/self/fd/' + directory + '/' + segment, flags | fs.constants.O_DIRECTORY);
+      fs.closeSync(directory);
+      directory = next;
+    }
+    fd = fs.openSync('/proc/self/fd/' + directory + '/' + segments.at(-1), flags);
+  } finally { fs.closeSync(directory); }
+  try {
+    const details = fs.fstatSync(fd);
+    if (!details.isFile()) throw new Error('Storage path is not a regular file');
+    const buffer = Buffer.alloc(limit + 1);
+    let length = 0;
+    while (length < buffer.length) {
+      const count = fs.readSync(fd, buffer, length, buffer.length - length, null);
+      if (!count) break;
+      length += count;
+    }
+    const truncated = length > limit;
+    const data = buffer.subarray(0, Math.min(length, limit));
+    if (data.includes(0)) throw new Error('Storage file is not UTF-8 text');
+    const content = new TextDecoder('utf-8', { fatal: true }).decode(data, { stream: truncated });
+    process.stdout.write(JSON.stringify({ content, bytes: details.size, truncated }));
+  } finally { fs.closeSync(fd); }
+} catch {
+  process.stderr.write('Cannot read storage file: it must be an accessible regular UTF-8 file without symbolic links');
+  process.exitCode = 1;
+}
+`;
+
 export class DockerService {
   private readonly docker: Docker;
   private readonly appsDir: string;
@@ -943,6 +985,84 @@ export class DockerService {
       if (wasRunning) await container.start();
     }
     return { containerId: container.id, mountTarget, owner: inspection.Config.User, repaired: true, state: wasRunning ? 'running' : 'exited' };
+  }
+
+  async readStorageFile(id: string, mountTarget: string, relativePath: string, maxBytes = 16_384) {
+    if (!mountTarget.startsWith('/') || mountTarget === '/' || mountTarget.includes('\0') || path.posix.normalize(mountTarget) !== mountTarget) throw new Error('Invalid container mount target');
+    if (!relativePath || relativePath.length > 4096 || relativePath.includes('\\') || relativePath.includes('\0') || relativePath.split('/').some((part) => !part || part === '.' || part === '..')) throw new Error('Storage file path must be relative without traversal');
+    if (!Number.isInteger(maxBytes) || maxBytes < 1 || maxBytes > 65_536) throw new Error('Storage read limit must be between 1 and 65536 bytes');
+    const sensitive = relativePath.split('/').some((part) => /^(?:\.env(?:\..*)?|\.ssh|\.git|\.git-credentials|\.netrc|id_rsa|id_dsa|id_ecdsa|id_ed25519)$/i.test(part) || /\.(?:pem|key|p12|pfx)$/i.test(part));
+    if (sensitive) throw new Error('Sensitive storage paths cannot be read');
+
+    const container = await this.managedContainer(id);
+    const inspection = await container.inspect();
+    const appId = inspection.Config.Labels?.['halfcloud.app.id'];
+    if (!appId) throw new Error('Managed App label is missing');
+    appNetworkName(appId);
+    const mount = inspection.Mounts.find((candidate) => candidate.Destination === mountTarget);
+    if (!mount) throw new Error(`Service does not have storage mounted at ${mountTarget}`);
+    let source: string;
+    if (mount.Type === 'volume' && mount.Name) {
+      const volume = await this.managedVolume(mount.Name);
+      if (volume.Labels['halfcloud.app.id'] !== appId) throw new Error('Storage volume is not owned by this App');
+      source = volume.Name;
+    } else if (mount.Type === 'bind') {
+      const appRoot = await realpath(path.join(this.appsDir, appId));
+      source = await realpath(mount.Source);
+      if (source === appRoot || !source.startsWith(`${appRoot}${path.sep}`)) throw new Error('Bind mount is outside the managed App directory');
+    } else {
+      throw new Error('Only managed bind mounts and named volumes can be read');
+    }
+
+    try {
+      await this.docker.getImage(storageReaderImage).inspect();
+    } catch (error) {
+      if ((error as { statusCode?: number }).statusCode !== 404) throw error;
+      const stream = await this.docker.pull(storageReaderImage);
+      await new Promise<void>((resolve, reject) => this.docker.modem.followProgress(stream, (failure) => failure ? reject(failure) : resolve()));
+    }
+    const helper = await this.docker.createContainer({
+      Image: storageReaderImage,
+      User: '0:0',
+      Entrypoint: ['node'],
+      Cmd: ['-e', storageReaderScript, '--', relativePath, String(maxBytes)],
+      Env: [],
+      WorkingDir: '/',
+      Labels: { 'halfcloud.operation': 'storage-read' },
+      HostConfig: {
+        NetworkMode: 'none', ReadonlyRootfs: true, SecurityOpt: ['no-new-privileges'],
+        CapDrop: ['ALL'], CapAdd: ['DAC_OVERRIDE'], PidsLimit: 32, Memory: 128 * 1024 * 1024, NanoCpus: 500_000_000,
+        Mounts: [{ Type: mount.Type, Source: source, Target: '/halfcloud-storage', ReadOnly: true,
+          ...(mount.Type === 'volume' ? { VolumeOptions: { NoCopy: true, Labels: {}, DriverConfig: { Name: 'local', Options: {} } } } : {}) }],
+      },
+    });
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const result = await Promise.race([
+        (async () => { await helper.start(); return helper.wait(); })(),
+        new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error('Storage file read timed out')), 15_000); }),
+      ]);
+      if (result.StatusCode !== 0) throw new Error('Cannot read storage file: it must be an accessible regular UTF-8 file without symbolic links');
+      const output = await helper.logs({ stdout: true, stderr: false, tail: 1 });
+      const file = JSON.parse(this.cleanDockerLog(Buffer.isBuffer(output) ? output : Buffer.from(String(output)))) as { content: string; bytes: number; truncated: boolean };
+      const secrets = (inspection.Config.Env ?? []).map((entry) => entry.slice(entry.indexOf('=') + 1)).filter((value) => value.length >= 4);
+      for (const secret of secrets) {
+        file.content = file.content.replaceAll(secret, '[REDACTED]');
+        // Do not expose a secret prefix split by the byte limit.
+        if (file.truncated) {
+          for (let length = Math.min(secret.length - 1, file.content.length); length > 0; length--) {
+            if (file.content.endsWith(secret.slice(0, length))) {
+              file.content = `${file.content.slice(0, -length)}[REDACTED]`;
+              break;
+            }
+          }
+        }
+      }
+      return { containerId: container.id, mountTarget, path: relativePath, ...file };
+    } finally {
+      clearTimeout(timer);
+      await helper.remove({ force: true, v: false });
+    }
   }
 
   async getContainerEnvironment(id: string) {

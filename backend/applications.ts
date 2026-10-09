@@ -862,6 +862,7 @@ export class ApplicationService {
   }
   reconcileManagedVolume(application: string, localName: string) { return this.docker.reconcileManagedVolume(application, localName); }
   repairStorageOwnership(id: string, mountTarget: string) { return this.docker.repairStorageOwnership(id, mountTarget); }
+  readStorageFile(id: string, mountTarget: string, relativePath: string, maxBytes?: number) { return this.docker.readStorageFile(id, mountTarget, relativePath, maxBytes); }
 
   async listEnvironment(id: string) {
     const runtime = await this.docker.getContainerEnvironment(id);

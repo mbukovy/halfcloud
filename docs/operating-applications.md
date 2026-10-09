@@ -155,6 +155,8 @@ Storage belongs to an App and is attached to a specific Service. Generated volum
 
 HalfCloud restricts what the AI can mount. It cannot mount arbitrary host paths. It initializes newly created managed bind directories for images that declare a non-root user, and ownership repair is available with explicit approval.
 
+Ask HalfCloud to read a specific text file in mounted storage, for example, "Read `config/settings.json` from the web Service's `/data` mount." The `readStorageFile` tool supports managed bind directories and named volumes, including volumes shared within the App. It works while the Service is stopped and needs no approval: an isolated helper mounts only the selected storage read-only, without App environment variables or network access. The first read downloads the `node:22-alpine` helper image if needed. Reads return up to 16 KiB by default (64 KiB maximum), with file size and truncation status. Traversal, symlinks, non-regular files, non-UTF-8 content, and sensitive paths such as `.env` and private keys are rejected; configured environment values are redacted from the returned text.
+
 Deleting an App removes its Services, private network, active routes, and registry entry. Persistent named volumes and managed bind data are retained by default. Deleting persistent data requires an explicit request and approval. Images are not removed automatically.
 
 ## Environment variables
