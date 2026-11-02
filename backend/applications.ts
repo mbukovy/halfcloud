@@ -7,7 +7,7 @@ import { DomainStore, normalizeHostname, type ServiceDomain } from './domains.js
 import { EnvironmentStore, assertEnvironmentVariableName, environmentRequestTargets, serializeEnvironmentForAgent, type EnvironmentTarget, type EnvironmentVariable } from './environment.js';
 import { RouteAccessRequestStore, assertBasicAuthPassword, assertBasicAuthUsername, hashBasicAuthPassword } from './route-access.js';
 import { RedirectStore } from './redirects.js';
-import { GitRepositoryError, RepositoryService, normalizeRepositoryUrl, type RepositoryUpdateRun, type ServiceUpdateRecipe } from './repositories.js';
+import { deploymentCommandSchema, GitRepositoryError, RepositoryService, normalizeRepositoryUrl, type RepositoryUpdateRun, type ServiceUpdateRecipe } from './repositories.js';
 import { GitHubWebhookService, GitHubWebhookError, type GitHubWebhookTarget } from './github-webhooks.js';
 
 export class AppBusyError extends Error {
@@ -19,6 +19,8 @@ export class ApplicationService {
   private readonly updatingApps = new Set<string>();
   private readonly environmentOperations = new Map<string, Promise<void>>();
   private webhookService?: GitHubWebhookService;
+  private readonly deploymentRoutes = new Map<string, Map<string, string>>();
+  private routeOperation: Promise<void> = Promise.resolve();
 
   constructor(
     private readonly docker: DockerService,
@@ -218,7 +220,7 @@ export class ApplicationService {
         const updates = await this.repositories.getServiceUpdates(app.id);
         await this.repositories.saveServiceUpdates(app.id, [
           ...updates.filter((recipe) => recipe.serviceId !== service.serviceId),
-          { ...build, serviceId: service.serviceId!, healthPath: service.ports.some((port) => port.protocol === 'tcp') ? healthPath ?? saved?.healthPath ?? '/' : null },
+          { ...build, serviceId: service.serviceId!, healthPath: service.ports.some((port) => port.protocol === 'tcp') ? healthPath ?? saved?.healthPath ?? '/' : null, ...(saved?.preDeployCommand ? { preDeployCommand: saved.preDeployCommand } : {}), ...(saved?.deploymentStrategy ? { deploymentStrategy: saved.deploymentStrategy } : {}) },
         ]);
       }
       return { appId: app.id, serviceId: service.serviceId, image, containerId: replacement.containerId, state: replacement.state };
@@ -240,10 +242,11 @@ export class ApplicationService {
       for (const recipe of previousUpdates) {
         const service = await this.service(app.id, recipe.serviceId);
         if ((await this.docker.inspectContainer(service.id)).imageId !== recipe.imageId) throw new Error(`The running image for ${service.name} differs from its verified update recipe`);
+        if (recipe.deploymentStrategy === 'blue-green' && (recipe.healthPath === null || !service.domains.length || service.ports.some((port) => port.protocol !== 'tcp'))) throw new Error('Blue/green deployments require an HTTP Service with a readiness path and TCP ports');
       }
       this.updatingApps.add(app.id);
       let run: RepositoryUpdateRun | undefined;
-      let failedStage: 'cloning' | 'building' | 'deploying' | 'verifying' = 'cloning';
+      let failedStage: 'cloning' | 'building' | 'initializing' | 'deploying' | 'verifying' = 'cloning';
       let recovered = true;
       let commitDecisionUncertain = false;
       const replacements: ContainerReplacement[] = [];
@@ -271,24 +274,65 @@ export class ApplicationService {
             await build.cleanup?.();
           }
         }
-        run = { phase: 'applying', commit, previousUpdates, updates };
+        const stagedContainers = updates.filter((update) => update.deploymentStrategy === 'blue-green').map((update) => ({
+          serviceId: update.serviceId, previousContainerId: runtime.services.find((service) => service.serviceId === update.serviceId)!.id,
+        }));
+        run = { phase: 'applying', commit, previousUpdates, updates, ...(stagedContainers.length ? { stagedContainers } : {}) };
         await this.repositories.saveUpdateRun(app.id, run);
+        if (run.stagedContainers) {
+          await this.setDeploymentRoutes(app.id, this.previousDeploymentRoutes(run));
+          failedStage = 'deploying';
+          onProgress?.({ phase: 'activity', label: 'Staging new application containers' });
+          for (const staged of run.stagedContainers) {
+            const update = updates.find((entry) => entry.serviceId === staged.serviceId)!;
+            replacements.push(await this.docker.beginContainerImageReplacement(staged.previousContainerId, update.image, true));
+          }
+        }
+        // Run every saved migration before starting any candidate Service. Old
+        // application containers and supporting dependencies remain available.
+        for (const update of updates) {
+          if (!update.preDeployCommand) continue;
+          failedStage = 'initializing';
+          const service = await this.service(app.id, update.serviceId);
+          const label = `Running pre-deploy command for ${service.name}`;
+          onProgress?.({ phase: 'activity', label });
+          await this.repositories.setStage(app.id, 'initializing', label);
+          await this.docker.assertImageIdentity(update.image, update.imageId);
+          run = { ...run, preDeployCommandsStarted: true };
+          await this.repositories.saveUpdateRun(app.id, run);
+          await this.docker.runServiceInitializationCommand(service.id, update.preDeployCommand, 'app', update.imageId);
+        }
         failedStage = 'deploying';
-        await this.repositories.setStage(app.id, 'deploying', 'Replacing application Services');
+        await this.repositories.setStage(app.id, 'deploying', 'Starting updated application Services');
         onProgress?.({ phase: 'activity', label: 'Updating application Services' });
         for (const update of updates) {
           const service = await this.service(app.id, update.serviceId);
-          replacements.push(await this.docker.beginContainerImageReplacement(service.id, update.image));
+          if (update.deploymentStrategy === 'blue-green') await this.docker.startContainer(service.id);
+          else replacements.push(await this.docker.beginContainerImageReplacement(service.id, update.image));
         }
         await this.syncRoutes();
         failedStage = 'verifying';
         await this.repositories.setStage(app.id, 'verifying', 'Checking updated Services');
         onProgress?.({ phase: 'activity', label: 'Checking the updated App' });
-        await Promise.all(updates.map((update) => this.waitForService(app.id, update.serviceId, update.imageId, update.healthPath)));
+        await Promise.all(updates.map((update) => update.deploymentStrategy === 'blue-green'
+          ? this.waitForService(app.id, update.serviceId, update.imageId, update.healthPath, false, true)
+          : this.waitForService(app.id, update.serviceId, update.imageId, update.healthPath)));
+        if (run.stagedContainers) {
+          for (const staged of run.stagedContainers) await this.docker.activateStagedContainer((await this.service(app.id, staged.serviceId)).id);
+        }
         // Recheck the whole group: an early-ready Service may have failed while another warmed up.
-        await Promise.all(updates.map((update) => this.waitForService(app.id, update.serviceId, update.imageId, update.healthPath, true)));
+        await Promise.all(updates.map((update) => update.deploymentStrategy === 'blue-green'
+          ? this.waitForService(app.id, update.serviceId, update.imageId, update.healthPath, true, true)
+          : this.waitForService(app.id, update.serviceId, update.imageId, update.healthPath, true)));
         const ready = await this.getApp(app.id, false);
         if (ready.services.some((service) => service.state !== 'running')) throw new Error('A Service stopped during update verification');
+        if (run.stagedContainers) {
+          onProgress?.({ phase: 'activity', label: 'Switching traffic to healthy application containers' });
+          run = { ...run, trafficSwitchStarted: true };
+          await this.repositories.saveUpdateRun(app.id, run);
+          await this.setDeploymentRoutes(app.id, undefined);
+          await Promise.all(updates.map((update) => this.waitForService(app.id, update.serviceId, update.imageId, update.healthPath, true)));
+        }
         // This durable App-wide decision precedes deleting ANY previous container.
         const committed = { ...run, phase: 'committed' as const };
         commitDecisionUncertain = true;
@@ -298,6 +342,7 @@ export class ApplicationService {
         await this.finishUpdate(app.id, committed);
         return { appId: app.id, commit, updated: true, services: updates.map(({ serviceId, image }) => ({ serviceId, image })) };
       } catch (error) {
+        if (run?.preDeployCommandsStarted) error = new Error(`${error instanceof Error ? error.message : String(error)}. Pre-deploy commands may have changed persistent data; container recovery does not undo those changes.`);
         if (commitDecisionUncertain) {
           try {
             const persisted = await this.repositories.getUpdateRun(app.id);
@@ -313,6 +358,10 @@ export class ApplicationService {
           throw new Error('The update passed verification and was committed, but finalization is pending. Recover this App update to finish safely; do not rebuild or replace the App.');
         }
         try {
+          // Caddy may have accepted a load even if the response was lost. Restore
+          // old routes successfully BEFORE removing a possibly live candidate.
+          if (run?.stagedContainers) await this.setDeploymentRoutes(app.id, this.previousDeploymentRoutes(run));
+          if (run?.trafficSwitchStarted) await this.drainDeployment();
           for (const replacement of replacements.reverse()) await replacement.rollback();
           if (run) {
             this.assertContainerRecoveryComplete(await this.docker.recoverContainerReplacements(this.updateRecoveryPlan(app.id, run), app.id));
@@ -321,6 +370,7 @@ export class ApplicationService {
           await this.syncRoutes();
           await this.repositories.fail(app.id, failedStage, error);
           if (run) await this.repositories.clearUpdateRun(app.id);
+          this.deploymentRoutes.delete(app.id);
         } catch (rollbackError) {
           recovered = false;
           throw new AggregateError([error, rollbackError], 'Update failed and recovery is incomplete. Previous containers were retained; recover this App update before trying again.');
@@ -335,6 +385,16 @@ export class ApplicationService {
 
   private async finishUpdate(appId: string, run: RepositoryUpdateRun) {
     if (await this.updateRuntimeGeneration(appId, run) !== 'committed') throw new Error('The running Services do not match the committed update');
+    if (run.stagedContainers) {
+      await this.setDeploymentRoutes(appId, undefined);
+      await this.drainDeployment();
+      try {
+        await Promise.all(run.updates.map((update) => this.waitForService(appId, update.serviceId, update.imageId, update.healthPath, true, true)));
+      } catch (error) {
+        await this.restoreAvailableDeploymentRoutes(appId, run);
+        throw error;
+      }
+    }
     await this.repositories.saveServiceUpdates(appId, run.updates);
     const app = await this.apps.get(appId);
     await this.apps.update(appId, {
@@ -353,6 +413,7 @@ export class ApplicationService {
     this.updatingApps.add(app.id);
     try {
       const run = app.source?.type === 'git' ? await this.repositories.getUpdateRun(app.id) : undefined;
+      if (run?.stagedContainers) return await this.recoverStagedUpdate(app.id, run);
       const plan = run ? this.updateRecoveryPlan(app.id, run) : new Map();
       let issues = await this.docker.recoverContainerReplacements(plan, app.id);
       const claimedServiceIds = new Set(plan.get(app.id)?.keys() ?? []);
@@ -380,14 +441,14 @@ export class ApplicationService {
         }
         if (generation === 'previous') {
           await this.restorePreviousUpdateBaseline(app.id, run);
-          return { appId: app.id, recovered: true, result: 'rolled_back' as const };
+          return { appId: app.id, recovered: true, result: 'rolled_back' as const, ...(run.preDeployCommandsStarted ? { preDeployCommandsStarted: true } : {}) };
         }
         await this.repositories.fail(app.id, 'deploying', new Error('Running Services match neither the previous nor committed update generation'));
         throw new Error('The running Services cannot be reconciled with either saved update generation. No recovery state was removed.');
       }
       if (await this.updateRuntimeGeneration(app.id, run) !== 'previous') throw new Error('The rolled-back Services do not match the previous update generation');
       await this.restorePreviousUpdateBaseline(app.id, run);
-      return { appId: app.id, recovered: true, result: 'rolled_back' as const };
+      return { appId: app.id, recovered: true, result: 'rolled_back' as const, ...(run.preDeployCommandsStarted ? { preDeployCommandsStarted: true } : {}) };
     } finally {
       await this.releaseUpdateGuardIfSettled(app.id);
       this.repositoryOperations.delete(app.id);
@@ -438,7 +499,7 @@ export class ApplicationService {
       imageIds.set(serviceId, (await this.docker.inspectContainer(service.id)).imageId);
     }
     const matches = (updates: ServiceUpdateRecipe[]) => updates.every((update) => imageIds.get(update.serviceId) === update.imageId);
-    if (matches(run.updates)) return 'committed';
+    if (matches(run.updates)) return run.phase === 'applying' && matches(run.previousUpdates) ? 'previous' : 'committed';
     if (matches(run.previousUpdates)) return 'previous';
     return 'mixed';
   }
@@ -450,9 +511,62 @@ export class ApplicationService {
     await this.apps.update(appId, {
       source: { ...app.source!, ...(previousCommits.size === 1 ? { currentCommit: [...previousCommits][0] } : {}) },
     });
-    await this.repositories.fail(appId, 'deploying', new Error('Interrupted update was restored to the previous verified Services'));
+    await this.repositories.fail(appId, 'deploying', new Error(`Interrupted update was restored to the previous verified Services${run.preDeployCommandsStarted ? '; pre-deploy commands may have changed persistent data, which was not rolled back' : ''}`));
     await this.syncRoutes();
     await this.repositories.clearUpdateRun(appId);
+    this.deploymentRoutes.delete(appId);
+  }
+
+  private previousDeploymentRoutes(run: RepositoryUpdateRun) {
+    return new Map(run.stagedContainers!.map(({ serviceId, previousContainerId }) => [serviceId, previousContainerId]));
+  }
+
+  private async drainDeployment() {
+    const configured = Number(process.env.HALFCLOUD_DEPLOY_DRAIN_MS ?? 30_000);
+    await delay(Number.isFinite(configured) ? Math.min(300_000, Math.max(0, configured)) : 30_000);
+  }
+
+  private async restoreAvailableDeploymentRoutes(appId: string, run: RepositoryUpdateRun) {
+    const fallback = new Map<string, string>();
+    for (const staged of run.stagedContainers ?? []) {
+      const previous = await this.docker.inspectContainer(staged.previousContainerId).catch(() => undefined);
+      if (previous?.state === 'running') fallback.set(staged.serviceId, staged.previousContainerId);
+    }
+    if (fallback.size) await this.setDeploymentRoutes(appId, fallback);
+  }
+
+  private async recoverStagedUpdate(appId: string, run: RepositoryUpdateRun) {
+    if (run.phase === 'applying') {
+      await this.setDeploymentRoutes(appId, this.previousDeploymentRoutes(run));
+      if (run.trafficSwitchStarted) await this.drainDeployment();
+      this.assertContainerRecoveryComplete(await this.docker.recoverContainerReplacements(this.updateRecoveryPlan(appId, run), appId));
+      if (await this.updateRuntimeGeneration(appId, run) !== 'previous') throw new Error('Recovered Services do not match the previous update generation');
+      await this.restorePreviousUpdateBaseline(appId, run);
+      return { appId, recovered: true, result: 'rolled_back' as const, ...(run.preDeployCommandsStarted ? { preDeployCommandsStarted: true } : {}) };
+    }
+    // Inspect without finalizing: retained containers may still be handling
+    // traffic. Repairs use the committed image and never replay migrations.
+    try {
+      const plan = new Map([[appId, new Map([...this.updateRecoveryPlan(appId, run).get(appId)!].map(([serviceId, expectation]) => [serviceId, { ...expectation, action: 'check' as const }]))]]);
+      const issues = await this.docker.recoverContainerReplacements(plan, appId);
+      for (const issue of issues) {
+        const update = run.updates.find((entry) => entry.serviceId === issue.serviceId);
+        if (!update) throw new Error('Unrelated replacement requires separate recovery');
+        await this.docker.assertImageIdentity(update.image, update.imageId);
+        await this.docker.recreateMissingContainerReplacement(issue, update.image, update.imageId, update.deploymentStrategy === 'blue-green');
+      }
+      await Promise.all(run.updates.map((update) => this.waitForService(appId, update.serviceId, update.imageId, update.healthPath, false, true)));
+      for (const staged of run.stagedContainers!) {
+        const service = await this.service(appId, staged.serviceId);
+        await this.docker.activateStagedContainer(service.id);
+      }
+      await Promise.all(run.updates.map((update) => this.waitForService(appId, update.serviceId, update.imageId, update.healthPath, true, true)));
+      await this.finishUpdate(appId, run);
+      return { appId, recovered: true, result: 'completed' as const };
+    } catch (error) {
+      await this.restoreAvailableDeploymentRoutes(appId, run);
+      throw error;
+    }
   }
 
   private async repairCommittedUpdate(appId: string, run: RepositoryUpdateRun, issues: ContainerRecoveryIssue[], onProgress?: (progress: DeploymentProgress) => void) {
@@ -510,10 +624,37 @@ export class ApplicationService {
       }
     }
     const recoveryPlan = new Map(runs.map(({ appId, run }) => [appId, this.updateRecoveryPlan(appId, run).get(appId)!]));
+    const stagedApps = new Set<string>();
+    for (const { appId, run } of runs) {
+      if (!run.stagedContainers) continue;
+      if (run.phase === 'applying') this.deploymentRoutes.set(appId, this.previousDeploymentRoutes(run));
+      else {
+        const retained = new Map<string, string>();
+        for (const staged of run.stagedContainers) {
+          const previous = await this.docker.inspectContainer(staged.previousContainerId).catch(() => undefined);
+          if (previous?.state === 'running') retained.set(staged.serviceId, staged.previousContainerId);
+        }
+        if (retained.size) this.deploymentRoutes.set(appId, retained);
+      }
+    }
+    // Reconcile proxy traffic before legacy container recovery can delete either
+    // generation. Defer unresolved staged Apps in the global backup sweep.
+    for (const { appId, run } of runs) {
+      if (!run.stagedContainers) continue;
+      stagedApps.add(appId);
+      recoveryPlan.set(appId, new Map([...recoveryPlan.get(appId)!].map(([serviceId, expectation]) => [serviceId, { ...expectation, action: 'defer' as const }])));
+      try {
+        await this.recoverStagedUpdate(appId, run);
+        this.updatingApps.delete(appId);
+      } catch (error) {
+        await this.repositories.fail(appId, 'deploying', error);
+      }
+    }
     const issues = await this.docker.recoverContainerReplacements(recoveryPlan);
     const unresolvedApps = new Set(issues.map(({ appId }) => appId));
     for (const appId of unresolvedApps) await this.markUpdateRecoveryRequired(appId, issues.filter((issue) => issue.appId === appId));
     for (const { appId, run } of runs) {
+      if (stagedApps.has(appId)) continue;
       if (unresolvedApps.has(appId)) continue;
       if (run.phase === 'committed') {
         const generation = await this.updateRuntimeGeneration(appId, run);
@@ -628,7 +769,8 @@ export class ApplicationService {
         const copied = (await this.service(app.id, normalized)).serviceId!;
         await this.environment.replaceVariables(copied, variables.map((variable) => ({ ...variable, id: `env_${randomUUID()}`, serviceId: copied })));
         if (recipe) await this.repositories.saveServiceUpdates(app.id, [...updates, {
-          ...recipe, serviceId: copied,
+          ...recipe, preDeployCommand: undefined, serviceId: copied,
+          ...(recipe.deploymentStrategy && !Object.keys(ports).length ? { deploymentStrategy: 'recreate' as const } : {}),
           healthPath: Object.values(ports).some((target) => !target.includes('/') || target.endsWith('/tcp')) ? recipe.healthPath : null,
         }]);
         return { appId: app.id, serviceId: copied, name: normalized, state: 'stopped', updateRecipeCopied: Boolean(recipe) };
@@ -763,6 +905,32 @@ export class ApplicationService {
     return this.docker.runServiceInitializationCommand(service.id, command, networkMode);
   }
 
+  async configureServiceUpdateCommand(appIdOrName: string, serviceIdOrName: string, command: string[] | null) {
+    const validated = command === null ? undefined : deploymentCommandSchema.parse(command);
+    return this.withRepositoryOperation(appIdOrName, async (app) => {
+      const service = await this.service(app.id, serviceIdOrName);
+      const updates = await this.repositories.getServiceUpdates(app.id);
+      const saved = updates.find((recipe) => recipe.serviceId === service.serviceId);
+      if (!saved) throw new Error('Verify the Service deployment before configuring its update command');
+      if (saved.commit !== app.source?.currentCommit || (await this.docker.inspectContainer(service.id)).imageId !== saved.imageId) throw new Error('The Service must match its verified deployment before configuring an update command');
+      await this.repositories.saveServiceUpdates(app.id, updates.map((recipe) => recipe.serviceId === saved.serviceId ? { ...recipe, preDeployCommand: validated } : recipe));
+      return { appId: app.id, serviceId: service.serviceId, preDeployCommand: validated ?? null, configured: Boolean(validated) };
+    });
+  }
+
+  async configureServiceDeploymentStrategy(appIdOrName: string, serviceIdOrName: string, strategy: 'blue-green' | 'recreate') {
+    if (!['blue-green', 'recreate'].includes(strategy)) throw new Error('Invalid deployment strategy');
+    return this.withRepositoryOperation(appIdOrName, async (app) => {
+      const service = await this.service(app.id, serviceIdOrName);
+      const updates = await this.repositories.getServiceUpdates(app.id);
+      const saved = updates.find((recipe) => recipe.serviceId === service.serviceId);
+      if (!saved || saved.commit !== app.source?.currentCommit || (await this.docker.inspectContainer(service.id)).imageId !== saved.imageId) throw new Error('Verify the Service deployment before configuring its deployment strategy');
+      if (strategy === 'blue-green' && (saved.healthPath === null || !service.domains.length || service.ports.some((port) => port.protocol !== 'tcp'))) throw new Error('Blue/green deployments require an HTTP Service with a readiness path and TCP ports');
+      await this.repositories.saveServiceUpdates(app.id, updates.map((recipe) => recipe.serviceId === saved.serviceId ? { ...recipe, deploymentStrategy: strategy } : recipe));
+      return { appId: app.id, serviceId: service.serviceId, deploymentStrategy: strategy };
+    });
+  }
+
   async verifyGitDeployment(appIdOrName: string, serviceIdOrName?: string, healthPath = '/', serviceHealthPaths: Record<string, string> = {}) {
     return this.withRepositoryOperation(appIdOrName, async (appRecord) => {
       if (!/^\/[^\x00-\x1f\x7f]*$/.test(healthPath) || healthPath.length > 500) throw new Error('Health path must be a bounded absolute URL path');
@@ -794,7 +962,7 @@ export class ApplicationService {
           const path = service.ports.some((port) => port.protocol === 'tcp')
             ? paths.get(service.serviceId!) ?? paths.get(service.name) ?? (selected?.serviceId === service.serviceId ? healthPath : saved?.healthPath ?? '/')
             : null;
-          updates.push({ ...build, serviceId: service.serviceId!, healthPath: path });
+          updates.push({ ...build, serviceId: service.serviceId!, healthPath: path, ...(saved?.preDeployCommand ? { preDeployCommand: saved.preDeployCommand } : {}), ...(saved?.deploymentStrategy ? { deploymentStrategy: saved.deploymentStrategy } : {}) });
         }
         if (mismatches.length) throw new Error(`Build and deploy every repository Service at this commit before verification; existing Apps need a one-time verified recipe. Expected checkout commit: ${appRecord.source?.resolvedCommit}. Services needing deployment: ${mismatches.join('; ')}. Selecting one Service does not exclude the others. Refresh the repository if this is not the intended commit; stopping Services or running updateGitApp will not repair missing recipes.`);
         await Promise.all(updates.map((update) => this.waitForService(app.id, update.serviceId, update.imageId, update.healthPath)));
@@ -811,7 +979,7 @@ export class ApplicationService {
     });
   }
 
-  private async waitForService(appId: string, serviceId: string, imageId: string, healthPath: string | null, singleProbe = false) {
+  private async waitForService(appId: string, serviceId: string, imageId: string, healthPath: string | null, singleProbe = false, candidateOnly = false) {
     const service = await this.service(appId, serviceId);
     const domain = service.domains.find((candidate) => candidate.managed) ?? service.domains.find((candidate) => candidate.primary) ?? service.domains[0];
     const started = Date.now();
@@ -833,10 +1001,12 @@ export class ApplicationService {
           const response = await fetch(`http://127.0.0.1:${port.hostPort}${healthPath}`, { redirect: 'manual', signal: AbortSignal.timeout(3_000) });
           await response.body?.cancel();
           if (response.status < 200 || response.status >= 400) throw new Error(`Application health check returned HTTP ${response.status}`);
-          const publicResponse = await fetch(`https://${domain.hostname}${healthPath}`, { redirect: 'manual', signal: AbortSignal.timeout(3_000) });
-          await publicResponse.body?.cancel();
-          const protectedRoute = domain.access.type === 'basic_auth' && publicResponse.status === 401;
-          if (!protectedRoute && (publicResponse.status < 200 || publicResponse.status >= 400)) throw new Error(`Public health check returned HTTP ${publicResponse.status}`);
+          if (!candidateOnly) {
+            const publicResponse = await fetch(`https://${domain.hostname}${healthPath}`, { redirect: 'manual', signal: AbortSignal.timeout(3_000) });
+            await publicResponse.body?.cancel();
+            const protectedRoute = domain.access.type === 'basic_auth' && publicResponse.status === 401;
+            if (!protectedRoute && (publicResponse.status < 200 || publicResponse.status >= 400)) throw new Error(`Public health check returned HTTP ${publicResponse.status}`);
+          }
         }
         if (++successes >= (singleProbe ? 1 : 3)) return;
       } catch (error) {
@@ -1180,8 +1350,35 @@ export class ApplicationService {
     return app?.source ? this.withRepositoryOperation(app.id, remove) : remove();
   }
 
-  async syncRoutes() {
-    const containers = await this.docker.listContainers(false);
+  private queueRouteOperation(operation: () => Promise<void>) {
+    const pending = this.routeOperation.then(operation);
+    this.routeOperation = pending.catch(() => undefined);
+    return pending;
+  }
+
+  private setDeploymentRoutes(appId: string, routes: Map<string, string> | undefined) {
+    return this.queueRouteOperation(async () => {
+      if (routes) this.deploymentRoutes.set(appId, routes);
+      else this.deploymentRoutes.delete(appId);
+      await this.loadRoutes();
+    });
+  }
+
+  syncRoutes() { return this.queueRouteOperation(() => this.loadRoutes()); }
+
+  private async loadRoutes() {
+    const containers: Array<{ id: string; appId?: string; serviceId?: string; name: string; hostname?: string; state: string; ports: Array<{ host: number; protocol: string }> }> = await this.docker.listContainers(false);
+    for (const [appId, routes] of this.deploymentRoutes) {
+      for (const [serviceId, containerId] of routes) {
+        const inspection = await this.docker.inspectContainer(containerId);
+        if (inspection.appId !== appId || inspection.serviceId !== serviceId) throw new Error('Deployment route container identity does not match');
+        const previous = { id: containerId, appId, serviceId, name: inspection.name, state: inspection.state,
+          ports: inspection.ports.map((port) => ({ host: Number(port.hostPort), protocol: port.target.split('/')[1]! })) };
+        const index = containers.findIndex((container) => container.appId === appId && container.serviceId === serviceId);
+        if (index === -1) containers.push(previous);
+        else containers[index] = previous;
+      }
+    }
     const [applications, redirects] = await Promise.all([
       Promise.all(containers.map(async (container) => ({
         ...container,

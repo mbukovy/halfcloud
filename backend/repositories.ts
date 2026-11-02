@@ -78,6 +78,8 @@ export interface SavedRepositoryBuild {
 export interface ServiceUpdateRecipe extends SavedRepositoryBuild {
   serviceId: string;
   healthPath: string | null;
+  preDeployCommand?: string[];
+  deploymentStrategy?: 'blue-green' | 'recreate';
 }
 
 export interface RepositoryUpdateRun {
@@ -86,6 +88,9 @@ export interface RepositoryUpdateRun {
   previousUpdates: ServiceUpdateRecipe[];
   updates: ServiceUpdateRecipe[];
   repairingServiceIds?: string[];
+  preDeployCommandsStarted?: boolean;
+  stagedContainers?: Array<{ serviceId: string; previousContainerId: string }>;
+  trafficSwitchStarted?: boolean;
 }
 
 export interface RepositoryBuildContext {
@@ -119,9 +124,12 @@ const savedBuildSchema = z.object({
   commit: z.string().regex(/^[a-f0-9]{40}$/),
   recipe: recipeSchema,
 }).strict();
+export const deploymentCommandSchema = z.array(z.string().min(1).max(4096).refine((value) => !value.includes('\0'), 'Command arguments cannot contain NUL')).min(1).max(32);
 const serviceUpdatesSchema = z.array(savedBuildSchema.extend({
   serviceId: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/),
   healthPath: z.string().max(500).regex(/^\/[^\x00-\x1f\x7f]*$/).nullable(),
+  preDeployCommand: deploymentCommandSchema.optional(),
+  deploymentStrategy: z.enum(['blue-green', 'recreate']).optional(),
 }).strict()).max(100).refine((entries) => new Set(entries.map((entry) => entry.serviceId)).size === entries.length, 'Duplicate Service update recipe');
 const servicePlanSchema = z.object({ version: z.literal(1), generation: z.uuid(), entries: serviceUpdatesSchema }).strict();
 const legacyUpdateRunSchema = z.object({
@@ -131,11 +139,19 @@ const legacyUpdateRunSchema = z.object({
   updates: serviceUpdatesSchema,
 }).strict();
 const updateRunSchema = legacyUpdateRunSchema.extend({
+  preDeployCommandsStarted: z.boolean().optional(),
+  trafficSwitchStarted: z.boolean().optional(),
+  stagedContainers: z.array(z.object({
+    serviceId: serviceUpdatesSchema.element.shape.serviceId,
+    previousContainerId: z.string().min(1).max(128).regex(/^[A-Za-z0-9_-]+$/),
+  }).strict()).min(1).max(100).refine((entries) => new Set(entries.map((entry) => entry.serviceId)).size === entries.length, 'Duplicate staged Service').optional(),
   repairingServiceIds: z.array(serviceUpdatesSchema.element.shape.serviceId).max(100)
     .refine((entries) => new Set(entries).size === entries.length, 'Duplicate repairing Service ID').optional(),
 }).strict().refine(({ phase, updates, repairingServiceIds }) => !repairingServiceIds
   || (phase === 'committed' && repairingServiceIds.every((serviceId) => updates.some((update) => update.serviceId === serviceId))),
-'Only committed update Services may be repaired');
+'Only committed update Services may be repaired').refine(({ updates, previousUpdates, stagedContainers }) => !stagedContainers
+  || stagedContainers.every(({ serviceId }) => updates.some((update) => update.serviceId === serviceId && update.deploymentStrategy === 'blue-green' && update.healthPath !== null)
+    && previousUpdates.some((update) => update.serviceId === serviceId)), 'Staged containers must identify blue/green update Services');
 const updateRunFileSchema = z.union([
   z.object({ version: z.literal(1), run: legacyUpdateRunSchema }).strict(),
   z.object({ version: z.literal(2), run: updateRunSchema }).strict(),

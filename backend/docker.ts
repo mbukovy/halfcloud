@@ -66,7 +66,7 @@ export interface ContainerRecoveryIssue {
 }
 
 export interface ContainerRecoveryExpectation {
-  action: 'commit' | 'rollback' | 'retain';
+  action: 'commit' | 'rollback' | 'retain' | 'defer' | 'check';
   previousImageId: string;
   updateImageId: string;
 }
@@ -87,6 +87,7 @@ interface ContainerChanges {
   image?: string;
   additionalMount?: Docker.MountSettings;
   beforeCreate?: (source: Docker.Container) => Promise<void>;
+  staged?: boolean;
 }
 
 class MissingContainerReplacementError extends Error {
@@ -98,6 +99,7 @@ class MissingContainerReplacementError extends Error {
 // The rename is a durable journal: record running state before stopping, and commit before cleanup.
 const replacementName = /^\/?([a-zA-Z0-9][a-zA-Z0-9_.-]{0,127})-halfcloud-replacement-v1-([a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12})-(running|stopped)-(pending|committed)$/;
 const replacementLabel = 'halfcloud.replacement.backup';
+const stagedNetworksLabel = 'halfcloud.replacement.staged-networks';
 
 function isServiceInitializationContainer(container: Docker.ContainerInfo, appId: string, serviceId: string, serviceName: string) {
   return container.Labels?.['halfcloud.operation'] === 'service-initialization'
@@ -657,13 +659,28 @@ export class DockerService {
     return { containerId: container.id, state: 'running' };
   }
 
-  async runServiceInitializationCommand(id: string, command: string[], networkMode: ServiceCommandNetworkMode = 'app') {
+  async runServiceInitializationCommand(id: string, command: string[], networkMode: ServiceCommandNetworkMode = 'app', updateImageId?: string) {
     if (!command.length || command.length > 32 || command.some((part) => !part || part.length > 4096 || part.includes('\0'))) {
       throw new Error('Initialization command must contain 1-32 bounded arguments');
     }
     if (networkMode !== 'app' && networkMode !== 'service') throw new Error('Initialization network mode must be app or service');
     const source = await this.managedContainer(id);
     const inspection = await source.inspect();
+    // Update commands use the candidate image's runtime defaults, with the same
+    // environment precedence as image replacement. The caller passes an immutable ID.
+    let runtimeConfig = inspection.Config;
+    if (updateImageId !== undefined) {
+      if (!/^sha256:[a-f0-9]{64}$/.test(updateImageId) || networkMode !== 'app') throw new Error('Update commands require an immutable image and App networking');
+      const image = await this.docker.getImage(updateImageId).inspect();
+      if (image.Id !== updateImageId) throw new Error('Update command image identity does not match');
+      const previousImage = await this.docker.getImage(inspection.Image).inspect();
+      const environment = new Map<string, string>();
+      for (const entry of [...image.Config.Env ?? [], ...inspection.Config.Env ?? []]) environment.set(entry.split('=', 1)[0]!, entry);
+      runtimeConfig = { ...inspection.Config, Env: [...environment.values()] };
+      for (const key of ['User', 'WorkingDir'] as const) {
+        if (isDeepStrictEqual(inspection.Config[key] ?? null, previousImage.Config[key] ?? null)) runtimeConfig[key] = image.Config[key];
+      }
+    }
     const appId = inspection.Config.Labels?.['halfcloud.app.id'];
     const serviceId = inspection.Config.Labels?.['halfcloud.service.id'];
     const serviceName = inspection.Config.Labels?.['halfcloud.service.name'];
@@ -674,6 +691,9 @@ export class DockerService {
 
     let operation: Docker.Container;
     try {
+      const operations = await this.docker.listContainers({ all: true });
+      if (operations.some((candidate) => isServiceInitializationContainer(candidate, appId, serviceId, inspection.Name?.replace(/^\//, '') ?? serviceName)
+        && !['exited', 'dead'].includes(candidate.State))) throw new Error(`An initialization command is already running for Service ${serviceName}`);
       const networkName = appNetworkName(appId);
       if (!inspection.NetworkSettings.Networks?.[networkName]) throw new Error(`Managed Service is not connected to its App network ${networkName}`);
       await this.ensureAppNetwork(appId);
@@ -697,12 +717,12 @@ export class DockerService {
       }
 
       operation = await this.docker.createContainer({
-        Image: inspection.Image,
+        Image: updateImageId ?? inspection.Image,
         Entrypoint: [command[0]!],
         Cmd: command.slice(1),
-        WorkingDir: inspection.Config.WorkingDir,
-        User: inspection.Config.User,
-        Env: inspection.Config.Env,
+        WorkingDir: runtimeConfig.WorkingDir,
+        User: runtimeConfig.User,
+        Env: runtimeConfig.Env,
         Labels: {
           'halfcloud.operation': 'service-initialization',
           'halfcloud.app.id': appId,
@@ -1149,10 +1169,75 @@ export class DockerService {
     return { containerId: transaction.containerId, name: transaction.name, state: transaction.state };
   }
 
-  async beginContainerImageReplacement(id: string, image: string): Promise<ContainerReplacement> {
+  async beginContainerImageReplacement(id: string, image: string, staged = false): Promise<ContainerReplacement> {
     image = image.trim();
     if (!image || image.length > 255) throw new Error('Invalid image name');
-    return this.replaceContainer(id, { image });
+    return this.replaceContainer(id, { image, staged });
+  }
+
+  private reservedStagingPorts = new Set<number>();
+
+  private async reserveStagingPort() {
+    // Reservations cover the interval before Docker has persisted PortBindings.
+    const reserved = this.reservedStagingPorts ??= new Set<number>();
+    for (let port = minimumHostPort; port <= maximumHostPort; port++) {
+      if (reserved.has(port)) continue;
+      reserved.add(port);
+      try {
+        if (!await this.portConflict(port)) return port;
+      } catch (error) {
+        reserved.delete(port);
+        throw error;
+      }
+      reserved.delete(port);
+    }
+    throw new Error('No free managed host port is available for a staged deployment');
+  }
+
+  async activateStagedContainer(id: string) {
+    const container = await this.managedContainer(id);
+    const inspection = await container.inspect();
+    const saved = inspection.Config.Labels?.[stagedNetworksLabel];
+    if (!saved) throw new Error('Container is not a staged deployment');
+    const networks = JSON.parse(saved) as Record<string, { Aliases?: string[]; DriverOpts?: Record<string, string> }>;
+    for (const [name, endpoint] of Object.entries(networks)) {
+      const current = inspection.NetworkSettings.Networks[name];
+      if (current && (endpoint.Aliases ?? []).every((alias) => current.Aliases?.includes(alias))) continue;
+      const network = this.docker.getNetwork(name);
+      if (current) await network.disconnect({ Container: inspection.Id });
+      await network.connect({ Container: inspection.Id, EndpointConfig: endpoint });
+    }
+  }
+
+  private async prepareStagedContainer(inspection: Docker.ContainerInspectInfo, prepared: PreparedContainerReplacement) {
+    if (Object.keys(prepared.hostConfig.PortBindings ?? {}).some((port) => !port.endsWith('/tcp'))) throw new Error('Blue/green deployment supports HTTP TCP ports only');
+    const reservedPorts: number[] = [];
+    try {
+      const bindings: Record<string, Array<{ HostIp: string; HostPort: string }>> = {};
+      for (const [target, values] of Object.entries(prepared.hostConfig.PortBindings ?? {}) as Array<[string, Array<{ HostIp: string; HostPort: string }>]>) {
+        bindings[target] = [];
+        for (const _value of values) {
+          const port = await this.reserveStagingPort();
+          reservedPorts.push(port);
+          bindings[target]!.push({ HostIp: '127.0.0.1', HostPort: String(port) });
+        }
+      }
+      prepared.hostConfig.PortBindings = bindings;
+      prepared.hostConfig.PublishAllPorts = false;
+      const networks = Object.fromEntries(Object.entries(prepared.endpoints).map(([network, endpoint]) => [network, {
+        Aliases: (endpoint.Aliases ?? []).filter((alias) => !inspection.Id.startsWith(alias)), DriverOpts: endpoint.DriverOpts,
+      }]));
+      prepared.config.Labels = { ...prepared.config.Labels, [stagedNetworksLabel]: JSON.stringify(networks) };
+      // No Service aliases or fixed IPs until readiness: private callers must
+      // continue reaching the old generation while the candidate warms up.
+      prepared.endpoints = Object.fromEntries(Object.entries(networks).map(([network, endpoint]) => [network, {
+        DriverOpts: endpoint.DriverOpts, Aliases: [`candidate-${randomUUID()}`],
+      }]));
+      return reservedPorts;
+    } catch (error) {
+      for (const port of reservedPorts) this.reservedStagingPorts.delete(port);
+      throw error;
+    }
   }
 
   private async replaceContainer(id: string, changes: ContainerChanges): Promise<ContainerReplacement> {
@@ -1170,17 +1255,19 @@ export class DockerService {
       throw new Error(`Service ${serviceId} already has a pending replacement or cleanup`);
     }
     const prepared = await this.prepareContainerReplacement(inspection, name, changes);
-    const operations = await this.docker.listContainers({ all: true });
-    if (this.initializingServices.has(serviceId) || operations.some((candidate) =>
-      isServiceInitializationContainer(candidate, appId, serviceId, name) && !['exited', 'dead'].includes(candidate.State),
-    )) throw new Error(`Cannot replace Service ${serviceId} while an initialization command is active`);
+    if (changes.staged && !inspection.State.Running) throw new Error('Blue/green deployment requires a running Service');
     const wasRunning = inspection.State.Running;
     const backupName = `${name}-halfcloud-replacement-v1-${randomUUID()}-${wasRunning ? 'running' : 'stopped'}-pending`;
     if (!replacementName.test(backupName)) throw new Error('Invalid replacement container name');
+    const reservedPorts = changes.staged ? await this.prepareStagedContainer(inspection, prepared) : [];
     let replacement: Docker.Container | undefined;
     try {
+      const operations = await this.docker.listContainers({ all: true });
+      if (this.initializingServices.has(serviceId) || operations.some((candidate) =>
+        isServiceInitializationContainer(candidate, appId, serviceId, name) && !['exited', 'dead'].includes(candidate.State),
+      )) throw new Error(`Cannot replace Service ${serviceId} while an initialization command is active`);
       await container.rename({ name: backupName });
-      if (wasRunning) await container.stop({ t: 10 });
+      if (wasRunning && !changes.staged) await container.stop({ t: 10 });
       await changes.beforeCreate?.(container);
       replacement = await this.docker.createContainer({
         ...prepared.config,
@@ -1191,7 +1278,7 @@ export class DockerService {
       });
       // Keep the tag for service.image matching, but never start an image if that tag moved during creation.
       if (prepared.expectedImageId && (await replacement.inspect()).Image !== prepared.expectedImageId) throw new Error('Replacement image tag changed during container creation');
-      if (wasRunning) await replacement.start();
+      if (wasRunning && !changes.staged) await replacement.start();
       if (changes.environment !== undefined) {
         const appDir = path.join(this.appsDir, appId);
         await writeFile(path.join(appDir, '.env'), `${Object.entries(changes.environment).map(([key, value]) => `${key}=${value.replace(/\n/g, '\\n')}`).join('\n')}${Object.keys(changes.environment).length ? '\n' : ''}`, { mode: 0o600 });
@@ -1203,6 +1290,8 @@ export class DockerService {
         throw new AggregateError([error, rollbackError], `Container replacement failed; rollback failed: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`);
       }
       throw error;
+    } finally {
+      for (const port of reservedPorts) this.reservedStagingPorts.delete(port);
     }
     let completed: 'commit' | 'rollback' | undefined;
     let busy = false;
@@ -1219,13 +1308,13 @@ export class DockerService {
       }
     };
     return {
-      containerId: replacement.id, name, state: wasRunning ? 'running' : 'exited',
+      containerId: replacement.id, name, state: wasRunning && !changes.staged ? 'running' : 'exited',
       commit: () => finish('commit'),
       rollback: () => finish('rollback'),
     };
   }
 
-  async recreateMissingContainerReplacement(issue: ContainerRecoveryIssue, image: string, imageId: string) {
+  async recreateMissingContainerReplacement(issue: ContainerRecoveryIssue, image: string, imageId: string, staged = false) {
     image = image.trim();
     if (!image || image.length > 255) throw new Error('Invalid image name');
     const container = this.docker.getContainer(issue.backupId);
@@ -1250,8 +1339,9 @@ export class DockerService {
     if (prepared.expectedImageId !== imageId) throw new Error(`The committed image for ${issue.name} is no longer available`);
     let replacement: Docker.Container | undefined;
     const backupWasRunning = inspection.State.Running;
+    const reservedPorts = staged ? await this.prepareStagedContainer(inspection, prepared) : [];
     try {
-      if (backupWasRunning) await container.stop({ t: 10 });
+      if (backupWasRunning && !staged) await container.stop({ t: 10 });
       replacement = await this.docker.createContainer({
         ...prepared.config,
         Labels: { ...prepared.config.Labels, [replacementLabel]: pendingName },
@@ -1264,8 +1354,10 @@ export class DockerService {
       return { containerId: replacement.id, serviceId: issue.serviceId, name: issue.name };
     } catch (error) {
       if (replacement) await replacement.remove({ force: true, v: false }).catch(() => undefined);
-      if (backupWasRunning) await container.start().catch(() => undefined);
+      if (backupWasRunning && !staged) await container.start().catch(() => undefined);
       throw error;
+    } finally {
+      for (const port of reservedPorts) this.reservedStagingPorts.delete(port);
     }
   }
 
@@ -1340,6 +1432,7 @@ export class DockerService {
       const serviceId = containers.find((container) => container.Id === backup.id)?.Labels?.['halfcloud.service.id'];
       const expectation = backup.appId !== undefined && serviceId !== undefined ? plan.get(backup.appId)?.get(serviceId) : undefined;
       const action = expectation?.action ?? (backup.name.endsWith('-committed') ? 'commit' : 'rollback');
+      if (action === 'defer') continue;
       try {
         await this.finishContainerReplacement(backup.id, backup.name, action, expectation);
       } catch (error) {
@@ -1383,7 +1476,7 @@ export class DockerService {
     }
   }
 
-  private async finishContainerReplacement(id: string, backupName: string, action: 'commit' | 'rollback' | 'retain', expectation?: ContainerRecoveryExpectation): Promise<void> {
+  private async finishContainerReplacement(id: string, backupName: string, action: 'commit' | 'rollback' | 'retain' | 'check', expectation?: ContainerRecoveryExpectation): Promise<void> {
     const match = replacementName.exec(backupName);
     if (!match) throw new Error('Invalid replacement backup name');
     const name = match[1]!;
@@ -1429,13 +1522,15 @@ export class DockerService {
         code: 'missing_replacement', appId: labels['halfcloud.app.id'], serviceId: labels['halfcloud.service.id'],
         name, backupId: id, backupName: currentName,
       });
-    } else if (action === 'commit') {
+    } else if (action === 'commit' || action === 'check') {
       if (!replacement) throw new MissingContainerReplacementError({
         code: 'missing_replacement', appId: labels['halfcloud.app.id'], serviceId: labels['halfcloud.service.id'],
         name, backupId: id, backupName: currentName,
       });
+      if (action === 'check') return;
       // Once renamed, a cleanup failure must never turn a successful update into a rollback.
       if (currentName !== committedName) await container.rename({ name: committedName });
+      if (replacement.Labels[stagedNetworksLabel] && inspection.State.Running) await container.stop({ t: 10 });
       await container.remove({ force: true, v: false });
     } else {
       if (replacement) await this.docker.getContainer(replacement.Id).remove({ force: true, v: false });
@@ -1582,6 +1677,10 @@ export class DockerService {
     const containers = await this.docker.listContainers({ all: true });
     const owner = containers.find((container) => container.Ports?.some((binding) => binding.PublicPort === port));
     if (owner) return `container ${owner.Names?.[0]?.replace(/^\//, '') ?? owner.Id.slice(0, 12)}`;
+    for (const container of containers.filter((candidate) => candidate.State !== 'running')) {
+      const inspection = await this.docker.getContainer(container.Id).inspect();
+      if ((Object.values(inspection.HostConfig.PortBindings ?? {}) as Array<Array<{ HostPort: string }>>).some((bindings) => bindings.some((binding) => Number(binding.HostPort) === port))) return `container ${container.Id.slice(0, 12)}`;
+    }
     const free = await new Promise<boolean>((resolve) => {
       const server = net.createServer().unref();
       server.once('error', () => resolve(false));

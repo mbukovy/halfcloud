@@ -104,7 +104,7 @@ async function fixture(t, { verify = true } = {}) {
       return { containerId: id, deleted: true };
     },
     async inspectContainer(id) {
-      const service = this.services.find((candidate) => candidate.id === id);
+      const service = this.services.find((candidate) => candidate.id === id) ?? [...this.backups.values()].find((backup) => backup.previous?.id === id)?.previous;
       assert.ok(service, `Unknown container ${id}`);
       return { ...service, imageId: this.builds.get(service.image), health: null, ports: service.ports.map((port) => ({ hostPort: port.host, target: `${port.container}/tcp` })) };
     },
@@ -112,14 +112,16 @@ async function fixture(t, { verify = true } = {}) {
     async pruneUnusedImages() { return { deleted: 0, spaceReclaimed: 0 }; },
     async assertImageIdentity() {},
     async hasContainerReplacements(appId) { return [...this.backups.values()].some((backup) => backup.appId === appId); },
-    async beginContainerImageReplacement(id, image) {
+    async activateStagedContainer(id) { events.push(`activate:${this.services.find((service) => service.id === id).name}`); },
+    async beginContainerImageReplacement(id, image, staged = false) {
       const index = this.services.findIndex((service) => service.id === id);
       assert.notEqual(index, -1);
       const previous = structuredClone(this.services[index]);
       assert.ok(!this.backups.has(previous.serviceId));
       assert.ok(this.builds.has(image));
-      events.push(`swap:${previous.name}`);
-      const replacement = { ...previous, id: `${id}-replacement`, image };
+      events.push(`${staged ? 'stage' : 'swap'}:${previous.name}`);
+      const replacement = { ...previous, id: `${id}-replacement`, image,
+        ...(staged ? { state: 'exited', ports: previous.ports.map((port) => ({ ...port, host: port.host + 100 })) } : {}) };
       this.services[index] = replacement;
       const transaction = {
         containerId: replacement.id, name: replacement.runtimeName, state: replacement.state,
@@ -133,7 +135,7 @@ async function fixture(t, { verify = true } = {}) {
           this.backups.delete(previous.serviceId);
         },
       };
-      this.backups.set(previous.serviceId, { appId: previous.appId, transaction });
+      this.backups.set(previous.serviceId, { appId: previous.appId, previous, transaction });
       return transaction;
     },
     async recoverContainerReplacements(plan = new Map(), appId) {
@@ -141,6 +143,7 @@ async function fixture(t, { verify = true } = {}) {
       for (const [serviceId, backup] of [...this.backups]) {
         if (appId && backup.appId !== appId) continue;
         const action = plan.get(backup.appId)?.get(serviceId)?.action ?? 'rollback';
+        if (action === 'defer' || action === 'check') continue;
         await backup.transaction[action === 'commit' ? 'commit' : 'rollback']();
       }
       return [];
@@ -153,6 +156,7 @@ async function fixture(t, { verify = true } = {}) {
     runtime, caddy, domains, environment, new RouteAccessRequestStore(directory), async () => 'hash', store, repositoryService,
   );
   const applications = makeApplications();
+  t.mock.method(applications, 'drainDeployment', async () => { events.push('drain'); });
   const wait = t.mock.method(applications, 'waitForService', async (_appId, serviceId, imageId, healthPath, singleProbe = false) => {
     const service = await applications.service(app.id, serviceId);
     assert.equal((await runtime.inspectContainer(service.id)).imageId, imageId);
@@ -191,6 +195,354 @@ async function fixture(t, { verify = true } = {}) {
   caddy.sync.mock.resetCalls();
   return { directory, repositoriesDir, checkout, apps, app, repositories, runtime, domains, environment, applications, makeApplications, git, resolveHost, events, built, previousUpdates, previousServices, caddy, wait };
 }
+
+test('blue/green stages stopped candidates, migrates, checks private readiness and switches before draining old containers', async (t) => {
+  const f = await fixture(t);
+  await f.applications.configureServiceDeploymentStrategy(f.app.id, 'web', 'blue-green');
+  await f.applications.configureServiceUpdateCommand(f.app.id, 'web', ['npm', 'run', 'db:migrate']);
+  let live;
+  t.mock.method(f.caddy, 'sync', async (routes) => {
+    live = routes.find((route) => route.name === 'web');
+    assert.equal((await f.runtime.inspectContainer(live.id)).state, 'running', 'proxy never targets a stopped container');
+    f.events.push(`traffic:${live.id}`);
+  });
+  const start = f.runtime.startContainer.bind(f.runtime);
+  t.mock.method(f.runtime, 'startContainer', async (id) => { f.events.push('start:candidate'); return start(id); });
+  f.runtime.runServiceInitializationCommand = async (id, command, network, imageId) => {
+    const candidate = f.runtime.services.find((service) => service.id === id);
+    assert.equal(candidate.state, 'exited');
+    assert.equal(live.id, f.previousServices[0].id);
+    assert.equal(imageId, f.runtime.builds.get(candidate.image));
+    assert.deepEqual(command, ['npm', 'run', 'db:migrate']);
+    assert.equal(network, 'app');
+    f.events.push('migrate');
+    // An unrelated route edit cannot prematurely expose a staged container.
+    await f.applications.syncRoutes();
+    assert.equal(live.id, f.previousServices[0].id);
+  };
+  t.mock.method(f.applications, 'waitForService', async (_appId, serviceId, _imageId, _path, single = false, candidateOnly = false) => {
+    const service = f.runtime.services.find((entry) => entry.serviceId === serviceId);
+    if (service.name !== 'web') return;
+    assert.equal(service.state, 'running');
+    const committed = (await f.repositories.getUpdateRun(f.app.id))?.phase === 'committed';
+    assert.equal(live.id, candidateOnly && !committed ? f.previousServices[0].id : service.id);
+    f.events.push(single ? 'ready:probe' : 'ready:stable');
+  });
+  t.mock.method(f.applications, 'drainDeployment', async () => {
+    assert.equal(live.id, f.runtime.services[0].id);
+    assert.equal((await f.runtime.inspectContainer(f.previousServices[0].id)).state, 'running');
+    assert.equal((await f.repositories.getUpdateRun(f.app.id)).phase, 'committed');
+    f.events.push('drain');
+  });
+  f.events.length = 0;
+  await f.applications.updateGitApp(f.app.id);
+  const index = (event) => f.events.indexOf(event);
+  assert.ok(index('record:worker') < index('stage:web'));
+  assert.ok(index('stage:web') < index('migrate'));
+  assert.ok(index('migrate') < index('start:candidate'));
+  assert.ok(index('ready:stable') < index('activate:web'));
+  assert.ok(index('activate:web') < index(`traffic:${f.runtime.services[0].id}`));
+  assert.ok(index(`traffic:${f.runtime.services[0].id}`) < index('drain'));
+  assert.ok(index('drain') < index('cleanup:web'));
+  assert.equal(live.ports[0].host, 10101);
+  assert.equal(f.runtime.backups.size, 0);
+  assert.equal((await f.repositories.getServiceUpdates(f.app.id))[0].deploymentStrategy, 'blue-green');
+});
+
+for (const failure of ['migration', 'health', 'cutover']) test(`blue/green ${failure} failure keeps the old route and restores containers`, async (t) => {
+  const f = await fixture(t);
+  await f.applications.configureServiceDeploymentStrategy(f.app.id, 'web', 'blue-green');
+  await f.applications.configureServiceUpdateCommand(f.app.id, 'web', ['npm', 'run', 'db:migrate']);
+  let live;
+  let failed = false;
+  t.mock.method(f.caddy, 'sync', async (routes) => {
+    live = routes.find((route) => route.name === 'web');
+    if (failure === 'cutover' && live.id !== f.previousServices[0].id && !failed) {
+      failed = true;
+      throw new Error('cutover response lost after load');
+    }
+  });
+  f.runtime.runServiceInitializationCommand = async () => { if (failure === 'migration') throw new Error('migration failed'); };
+  if (failure === 'health') t.mock.method(f.applications, 'waitForService', async () => { throw new Error('health failed'); });
+  const begin = f.runtime.beginContainerImageReplacement.bind(f.runtime);
+  t.mock.method(f.runtime, 'beginContainerImageReplacement', async (...args) => {
+    const transaction = await begin(...args);
+    const rollback = transaction.rollback;
+    transaction.rollback = async () => {
+      assert.equal(live.id, f.previousServices[0].id, 'restore routing before deleting a candidate');
+      return rollback();
+    };
+    return transaction;
+  });
+  await assert.rejects(f.applications.updateGitApp(f.app.id), new RegExp(failure));
+  assert.deepEqual(f.runtime.services, f.previousServices);
+  assert.equal(live.id, f.previousServices[0].id);
+  assert.equal(await f.repositories.getUpdateRun(f.app.id), undefined);
+});
+
+test('blue/green refuses to delete either generation when restoring proxy traffic fails', async (t) => {
+  const f = await fixture(t);
+  await f.applications.configureServiceDeploymentStrategy(f.app.id, 'web', 'blue-green');
+  let cutover = false;
+  t.mock.method(f.caddy, 'sync', async (routes) => {
+    if (routes.find((route) => route.name === 'web').id !== f.previousServices[0].id) cutover = true;
+    if (cutover) throw new Error('proxy unavailable');
+  });
+  await assert.rejects(f.applications.updateGitApp(f.app.id), /recovery is incomplete/);
+  assert.equal(f.runtime.backups.size, 2);
+  assert.equal((await f.runtime.inspectContainer(f.previousServices[0].id)).state, 'running');
+  assert.equal((await f.repositories.getUpdateRun(f.app.id)).phase, 'applying');
+  assert.ok(!f.events.some((event) => event.startsWith('rollback:')));
+  t.mock.method(f.caddy, 'sync', async () => {});
+  assert.equal((await f.applications.recoverGitAppUpdate(f.app.id)).result, 'rolled_back');
+  assert.deepEqual(f.runtime.services, f.previousServices);
+});
+
+for (const phase of ['applying', 'committed']) test(`startup reconciles ${phase} blue/green traffic before container cleanup`, async (t) => {
+  const f = await fixture(t);
+  await f.applications.configureServiceDeploymentStrategy(f.app.id, 'web', 'blue-green');
+  const previousUpdates = await f.repositories.getServiceUpdates(f.app.id);
+  const updates = [];
+  await f.applications.refreshGitRepository(f.app.id);
+  for (const recipe of previousUpdates) {
+    const result = await f.applications.buildRepositoryImage(f.app.id, recipe.recipe.contextPath, recipe.recipe.dockerfilePath);
+    updates.push({ ...recipe, image: result.image, imageId: result.imageId, commit: nextCommit });
+  }
+  const run = { phase, commit: nextCommit, previousUpdates, updates, stagedContainers: [{ serviceId: previousUpdates[0].serviceId, previousContainerId: f.previousServices[0].id }] };
+  await f.repositories.saveUpdateRun(f.app.id, run);
+  for (const [index, update] of updates.entries()) {
+    const replacement = await f.runtime.beginContainerImageReplacement(f.previousServices[index].id, update.image, index === 0);
+    if (index === 0) await f.runtime.startContainer(replacement.containerId);
+  }
+  const restarted = f.makeApplications();
+  t.mock.method(restarted, 'waitForService', async () => {});
+  t.mock.method(restarted, 'drainDeployment', async () => { f.events.push('drain'); });
+  let routeId;
+  t.mock.method(f.caddy, 'sync', async (routes) => { routeId = routes.find((route) => route.name === 'web').id; });
+  for (const backup of f.runtime.backups.values()) {
+    const action = phase === 'committed' ? 'commit' : 'rollback';
+    const finish = backup.transaction[action];
+    backup.transaction[action] = async () => {
+      assert.equal(routeId, phase === 'committed' ? `${f.previousServices[0].id}-replacement` : f.previousServices[0].id);
+      return finish();
+    };
+  }
+  await restarted.recoverUpdates();
+  assert.equal(f.runtime.backups.size, 0);
+  assert.equal(await f.repositories.getUpdateRun(f.app.id), undefined);
+  assert.equal((await f.apps.get(f.app.id)).source.currentCommit, phase === 'committed' ? nextCommit : currentCommit);
+});
+
+test('deployment strategy requires a verified HTTP Service and survives recipe verification', async (t) => {
+  const f = await fixture(t, { verify: false });
+  await assert.rejects(f.applications.configureServiceDeploymentStrategy(f.app.id, 'web', 'blue-green'), /Verify/);
+  await f.applications.verifyGitDeployment(f.app.id, 'web', '/ready');
+  await assert.rejects(f.applications.configureServiceDeploymentStrategy(f.app.id, 'worker', 'blue-green'), /HTTP/);
+  await f.applications.configureServiceDeploymentStrategy(f.app.id, 'web', 'blue-green');
+  await f.applications.verifyGitDeployment(f.app.id, 'web', '/ready');
+  assert.equal((await f.repositories.getServiceUpdates(f.app.id))[0].deploymentStrategy, 'blue-green');
+  const copy = await f.applications.copyService(f.app.id, 'web', 'private-copy');
+  assert.equal((await f.repositories.getServiceUpdates(f.app.id)).find((entry) => entry.serviceId === copy.serviceId).deploymentStrategy, 'recreate');
+  await f.applications.configureServiceDeploymentStrategy(f.app.id, 'web', 'recreate');
+  assert.equal((await f.repositories.getServiceUpdates(f.app.id))[0].deploymentStrategy, 'recreate');
+});
+
+test('multiple blue/green HTTP Services switch in one proxy load without mixed generations', async (t) => {
+  const f = await fixture(t);
+  await f.applications.configureServiceDeploymentStrategy(f.app.id, 'web', 'blue-green');
+  const copied = await f.applications.copyService(f.app.id, 'web', 'api', { 10002: '3000' });
+  await f.applications.startService(f.app.id, copied.serviceId);
+  const previous = new Map(f.runtime.services.filter((service) => ['web', 'api'].includes(service.name)).map((service) => [service.serviceId, service.id]));
+  t.mock.method(f.applications, 'waitForService', async () => {});
+  t.mock.method(f.applications, 'drainDeployment', async () => {});
+  const generations = [];
+  t.mock.method(f.caddy, 'sync', async (routes) => {
+    const targets = routes.filter((route) => previous.has(route.serviceId));
+    assert.equal(targets.length, 2);
+    const changed = targets.filter((route) => route.id !== previous.get(route.serviceId)).length;
+    assert.ok(changed === 0 || changed === 2, 'all HTTP targets move together');
+    generations.push(changed);
+    for (const target of targets) assert.equal((await f.runtime.inspectContainer(target.id)).state, 'running');
+  });
+  await f.applications.updateGitApp(f.app.id);
+  assert.equal(generations[0], 0);
+  assert.equal(generations.at(-1), 2);
+  assert.equal(generations.filter((generation, index) => index && generation !== generations[index - 1]).length, 1);
+});
+
+test('blue/green retains the previous generation if the new process fails while old requests drain', async (t) => {
+  const f = await fixture(t);
+  await f.applications.configureServiceDeploymentStrategy(f.app.id, 'web', 'blue-green');
+  let live;
+  let drained = false;
+  t.mock.method(f.caddy, 'sync', async (routes) => { live = routes.find((route) => route.name === 'web').id; });
+  t.mock.method(f.applications, 'drainDeployment', async () => { drained = true; });
+  t.mock.method(f.applications, 'waitForService', async () => { if (drained) throw new Error('candidate crashed during draining'); });
+  await assert.rejects(f.applications.updateGitApp(f.app.id), /finalization is pending/);
+  assert.equal(live, f.previousServices[0].id);
+  assert.equal(f.runtime.backups.size, 2);
+  assert.equal((await f.repositories.getUpdateRun(f.app.id)).phase, 'committed');
+  assert.ok(!f.events.some((event) => event.startsWith('cleanup:')));
+});
+
+test('candidate readiness probes the new loopback target rather than a healthy old public route', async (t) => {
+  const f = await fixture(t);
+  const calls = [];
+  t.mock.method(globalThis, 'fetch', async (url) => {
+    calls.push(String(url));
+    assert.match(String(url), /^http:\/\/127\.0\.0\.1:10001\/ready$/);
+    return new Response('ready');
+  });
+  const web = f.previousUpdates[0];
+  await ApplicationService.prototype.waitForService.call(f.applications, f.app.id, web.serviceId, web.imageId, '/ready', true, true);
+  assert.equal(calls.length, 1);
+  t.mock.method(globalThis, 'fetch', async () => new Response('starting', { status: 503 }));
+  await assert.rejects(ApplicationService.prototype.waitForService.call(f.applications, f.app.id, web.serviceId, web.imageId, '/ready', true, true), /503/);
+});
+
+test('an in-flight unrelated proxy reload cannot overwrite a later blue/green cutover', async (t) => {
+  const f = await fixture(t);
+  await f.applications.configureServiceDeploymentStrategy(f.app.id, 'web', 'blue-green');
+  const entered = Promise.withResolvers();
+  const release = Promise.withResolvers();
+  let block = false;
+  let live;
+  let active = 0;
+  t.mock.method(f.caddy, 'sync', async (routes) => {
+    assert.equal(++active, 1, 'proxy writes are serialized');
+    if (block) { block = false; entered.resolve(); await release.promise; }
+    live = routes.find((route) => route.name === 'web').id;
+    active--;
+  });
+  let unrelated;
+  t.mock.method(f.applications, 'waitForService', async (_app, _service, _image, _path, single = false) => {
+    if (!single && !unrelated) {
+      block = true;
+      unrelated = f.applications.syncRoutes();
+      await entered.promise;
+    }
+  });
+  t.mock.method(f.applications, 'drainDeployment', async () => {});
+  const updating = f.applications.updateGitApp(f.app.id);
+  await entered.promise;
+  assert.equal(live, f.previousServices[0].id);
+  release.resolve();
+  await unrelated;
+  await updating;
+  assert.equal(live, f.runtime.services[0].id);
+});
+
+test('saved migrations run against new images after every build and before any replacement', async (t) => {
+  const f = await fixture(t);
+  const command = ['npm', 'run', 'db:migrate'];
+  await f.applications.configureServiceUpdateCommand(f.app.name, 'web', command);
+  const persisted = new RepositoryService(new AppStore(f.directory), f.repositoriesDir);
+  assert.deepEqual((await persisted.getServiceUpdates(f.app.id))[0].preDeployCommand, command);
+  let migrated = 0;
+  f.runtime.runServiceInitializationCommand = async (id, args, network, imageId) => {
+    migrated++;
+    const run = await persisted.getUpdateRun(f.app.id);
+    assert.equal(run.preDeployCommandsStarted, true);
+    assert.equal(run.phase, 'applying');
+    assert.equal(f.runtime.buildInputs.length, 2);
+    assert.deepEqual(f.runtime.services, f.previousServices);
+    assert.equal(id, f.previousServices[0].id);
+    assert.deepEqual(args, command);
+    assert.equal(network, 'app');
+    assert.equal(imageId, run.updates[0].imageId);
+    assert.notEqual(imageId, f.previousUpdates[0].imageId);
+    await assert.rejects(f.applications.configureServiceUpdateCommand(f.app.id, 'web', null), /update or its recovery is in progress/);
+    f.events.push('migrate:web');
+  };
+  f.events.length = 0;
+  const result = await f.applications.updateGitApp(f.app.id);
+  assert.equal(result.updated, true);
+  assert.equal(migrated, 1);
+  assert.ok(f.events.indexOf('record:worker') < f.events.indexOf('migrate:web'));
+  assert.ok(f.events.indexOf('migrate:web') < f.events.indexOf('swap:web'));
+  assert.deepEqual((await persisted.getServiceUpdates(f.app.id))[0].preDeployCommand, command);
+  f.git.mock.mockImplementation(async () => ({ stdout: `${nextCommit}\n`, stderr: '' }));
+  assert.equal((await f.applications.updateGitApp(f.app.id)).updated, false);
+  assert.equal(migrated, 1, 'an up-to-date App does not rerun migrations');
+});
+
+test('migration failure leaves old containers and recipes intact and reports persistent data effects', async (t) => {
+  const f = await fixture(t);
+  await f.applications.configureServiceUpdateCommand(f.app.id, 'web', ['npm', 'run', 'db:migrate']);
+  const baseline = await f.repositories.getServiceUpdates(f.app.id);
+  let writes = 0;
+  f.runtime.runServiceInitializationCommand = async () => { writes++; throw new Error('Initialization command failed with exit code 23'); };
+  await assert.rejects(f.applications.updateGitApp(f.app.id), /exit code 23.*container recovery does not undo/);
+  assert.equal(writes, 1);
+  assert.deepEqual(f.runtime.services, f.previousServices);
+  assert.deepEqual(await f.repositories.getServiceUpdates(f.app.id), baseline);
+  assert.equal(await f.repositories.getUpdateRun(f.app.id), undefined);
+  assert.ok(!f.events.some((event) => event.startsWith('swap:')));
+  const app = await f.apps.get(f.app.id);
+  assert.equal(app.source.currentCommit, currentCommit);
+  assert.equal(app.deployment.errorCode, 'initialization_failed');
+  assert.match(app.deployment.message, /persistent data/);
+});
+
+test('build failure never runs a configured migration', async (t) => {
+  const f = await fixture(t);
+  await f.applications.configureServiceUpdateCommand(f.app.id, 'web', ['npm', 'run', 'db:migrate']);
+  f.runtime.runServiceInitializationCommand = () => assert.fail('Migration must wait for all builds');
+  const build = f.runtime.buildImage.bind(f.runtime);
+  t.mock.method(f.runtime, 'buildImage', async (input) => {
+    if (input.recipe.contextPath === 'worker') throw new Error('worker build failed');
+    return build(input);
+  });
+  await assert.rejects(f.applications.updateGitApp(f.app.id), /worker build failed/);
+  assert.deepEqual(f.runtime.services, f.previousServices);
+});
+
+test('readiness rollback preserves migration effects and the saved recurring command', async (t) => {
+  const f = await fixture(t);
+  await f.applications.configureServiceUpdateCommand(f.app.id, 'web', ['npm', 'run', 'db:migrate']);
+  const baseline = await f.repositories.getServiceUpdates(f.app.id);
+  let writes = 0;
+  f.runtime.runServiceInitializationCommand = async () => { writes++; };
+  t.mock.method(f.applications, 'waitForService', async () => { throw new Error('new application is unhealthy'); });
+  await assert.rejects(f.applications.updateGitApp(f.app.id), /unhealthy.*container recovery does not undo/);
+  assert.equal(writes, 1);
+  assert.deepEqual(f.runtime.services, f.previousServices);
+  assert.deepEqual(await f.repositories.getServiceUpdates(f.app.id), baseline);
+  assert.equal(f.runtime.backups.size, 0);
+});
+
+test('interrupted migration recovery restores containers without replaying the command', async (t) => {
+  const f = await fixture(t);
+  await f.applications.configureServiceUpdateCommand(f.app.id, 'web', ['npm', 'run', 'db:migrate']);
+  const updates = await f.repositories.getServiceUpdates(f.app.id);
+  const candidates = updates.map((recipe) => ({ ...recipe, commit: nextCommit, imageId: `sha256:${'f'.repeat(64)}` }));
+  await f.repositories.saveUpdateRun(f.app.id, { phase: 'applying', commit: nextCommit, previousUpdates: updates, updates: candidates, preDeployCommandsStarted: true });
+  f.runtime.runServiceInitializationCommand = () => assert.fail('Recovery must not rerun migrations');
+  const restarted = f.makeApplications(new AppStore(f.directory), new RepositoryService(new AppStore(f.directory), f.repositoriesDir));
+  await restarted.recoverUpdates();
+  assert.equal(await f.repositories.getUpdateRun(f.app.id), undefined);
+  assert.deepEqual(f.runtime.services, f.previousServices);
+  assert.match((await f.apps.get(f.app.id)).deployment.message, /data.*not rolled back/);
+});
+
+test('update commands require verified bounded recipes, survive verification and are omitted from copies', async (t) => {
+  const f = await fixture(t, { verify: false });
+  const command = ['npm', 'run', 'db:migrate'];
+  await assert.rejects(f.applications.configureServiceUpdateCommand(f.app.id, 'web', command), /Verify the Service deployment/);
+  await f.applications.verifyGitDeployment(f.app.id, 'web', '/ready');
+  await assert.rejects(f.applications.configureServiceUpdateCommand(f.app.id, 'redis', command), /Verify the Service deployment/);
+  for (const invalid of [[], [''], ['npm\0'], Array(33).fill('npm')]) {
+    await assert.rejects(f.applications.configureServiceUpdateCommand(f.app.id, 'web', invalid));
+  }
+  await f.applications.configureServiceUpdateCommand(f.app.id, 'web', command);
+  await f.applications.verifyGitDeployment(f.app.id, 'web', '/ready');
+  assert.deepEqual((await f.repositories.getServiceUpdates(f.app.id))[0].preDeployCommand, command);
+  const copy = await f.applications.copyService(f.app.id, 'web', 'web-copy');
+  assert.equal((await f.repositories.getServiceUpdates(f.app.id)).find((recipe) => recipe.serviceId === copy.serviceId).preDeployCommand, undefined);
+  const removed = await f.applications.configureServiceUpdateCommand(f.app.id, 'web', null);
+  assert.equal(removed.configured, false);
+  assert.equal((await f.repositories.getServiceUpdates(f.app.id))[0].preDeployCommand, undefined);
+});
 
 test('first verified deployment records distinct per-Service recipes and images at the same commit', async (t) => {
   const f = await fixture(t, { verify: false });

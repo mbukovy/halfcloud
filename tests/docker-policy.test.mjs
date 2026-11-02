@@ -420,6 +420,36 @@ test('runs Service initialization in an isolated one-shot container with the sam
   assert.equal(createOptions.HostConfig.NetworkMode, 'container:container-source');
   assert.equal(createOptions.NetworkingConfig, undefined);
 
+  const updateImageId = `sha256:${'a'.repeat(64)}`;
+  service.docker.getImage = (id) => {
+    if (id === sourceInspection.Image) return { async inspect() { return { Config: { User: '1000:1000', WorkingDir: '/app' } }; } };
+    assert.equal(id, updateImageId);
+    return { async inspect() { return { Id: updateImageId, Config: { User: '2000:2000', WorkingDir: '/new-app', Env: ['NEW_DEFAULT=yes', 'PORT=4000'] } }; } };
+  };
+  await service.runServiceInitializationCommand(serviceId, ['npm', 'run', 'db:migrate'], 'app', updateImageId);
+  assert.equal(createOptions.Image, updateImageId);
+  assert.equal(createOptions.User, '2000:2000');
+  assert.equal(createOptions.WorkingDir, '/new-app');
+  assert.deepEqual(createOptions.Env, ['NEW_DEFAULT=yes', 'PORT=3000', 'API_KEY=protected-value']);
+  assert.equal(createOptions.HostConfig.NetworkMode, appNetworkName(appId));
+  assert.equal(createOptions.HostConfig.Mounts[1].Source, 'halfcloud-service-data');
+  sourceInspection.Config.User = '3000:3000';
+  sourceInspection.Config.WorkingDir = '/custom';
+  await service.runServiceInitializationCommand(serviceId, ['npm', 'run', 'db:migrate'], 'app', updateImageId);
+  assert.equal(createOptions.User, '3000:3000');
+  assert.equal(createOptions.WorkingDir, '/custom');
+  await assert.rejects(service.runServiceInitializationCommand(serviceId, ['npm'], 'app', 'mutable:latest'), /immutable image/);
+  await assert.rejects(service.runServiceInitializationCommand(serviceId, ['npm'], 'service', updateImageId), /App networking/);
+  service.docker.getImage = () => ({ async inspect() { return { Id: `sha256:${'b'.repeat(64)}` }; } });
+  await assert.rejects(service.runServiceInitializationCommand(serviceId, ['npm'], 'app', updateImageId), /identity does not match/);
+
+  service.docker.listContainers = async () => [
+    { Id: 'container-source', Names: ['/source'], Labels: sourceInspection.Config.Labels },
+    { Id: 'orphan-helper', Names: ['/hopeful_hopper'], State: 'running', Labels: { 'halfcloud.operation': 'service-initialization', 'halfcloud.app.id': appId, 'halfcloud.service.id': serviceId } },
+  ];
+  await assert.rejects(service.runServiceInitializationCommand(serviceId, ['setup']), /already running/);
+  assert.equal(service.initializingServices.size, 0, 'failed admission releases the local guard');
+
   service.initializingServices.add(serviceId);
   await assert.rejects(service.runServiceInitializationCommand(serviceId, ['setup']), /already running/);
   service.initializingServices.delete(serviceId);

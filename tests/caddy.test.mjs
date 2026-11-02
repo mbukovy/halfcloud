@@ -59,6 +59,7 @@ test('routes every domain attached to an application', async (t) => {
   assert.match(body, /n8n\.example\.com \{/);
   assert.match(body, /n8n\.127\.0\.0\.1\.nip\.io \{/);
   assert.match(body, /reverse_proxy 127\.0\.0\.1:10023/);
+  assert.match(body, /stream_close_delay 5m/);
 });
 
 test('configures Basic Auth independently for one route', async (t) => {

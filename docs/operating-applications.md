@@ -60,13 +60,41 @@ Adding a repository-built Service requires starting it and verifying the Git dep
 
 During preparation, `verifyGitDeployment` accepts `serviceHealthPaths` keyed by Service ID or name, so multiple APIs can each save their own readiness endpoint. Docker health-check startup timing is respected within a bounded five-minute readiness window.
 
-An update is one deterministic backend operation, not an AI deployment conversation. HalfCloud fetches the configured branch once and builds each Service from the latest source and its saved recipe in an isolated build context. All candidate images are built before any running container is stopped. Supporting databases and caches are left alone. The App and Service identities, domains and route protection, environment values, ports, and persistent storage are retained.
+An update is one deterministic backend operation, not an AI deployment conversation. HalfCloud fetches the configured branch once and builds each Service from the latest source and its saved recipe in an isolated build context. All candidate images are built before any running container is stopped. Supporting databases and caches are left alone. The App and Service identities, domains and route protection, environment values, and persistent storage are retained. Blue/green deployment allocates new local host ports; recreate deployment preserves existing port mappings.
 
 HalfCloud checks the actual image identity, running/health status, and saved HTTP/HTTPS readiness path repeatedly before accepting the update. If a build fails, the running App is untouched. If replacement or readiness fails, all replaced Services are restored from retained containers. A durable App-wide decision lets server startup finish a committed update or roll back an interrupted one. It does not automatically rewrite a failing Dockerfile or retry builds indefinitely.
 
 Existing environment values take precedence over defaults in the new image. If an update requires changing one of those values, configure it explicitly rather than relying on a changed Dockerfile `ENV` default.
 
-Running application Services briefly restart during replacement; this is not a rolling update. Updates require the existing Services to be running. Container rollback does not undo writes to shared storage or databases. The updater never runs initialization commands or migrations; changes needing new configuration or data migrations require explicit preparation. Saved recipes give a fixed procedure, not bit-for-bit reproducible output: pin base-image digests and dependency versions where reproducibility is required.
+Each Service uses its saved deployment strategy. Existing recipes default to `recreate`, which briefly stops the Service during replacement. HTTP Services can use `blue-green` for a healthy traffic cutover. Updates require the existing Services to be running. Container rollback does not undo writes to shared storage or databases. The updater runs saved pre-deploy migration commands; one-time initialization and new configuration changes require explicit preparation. Saved recipes give a fixed procedure, not bit-for-bit reproducible output: pin base-image digests and dependency versions where reproducibility is required.
+
+### Zero-downtime HTTP deployments
+
+Ask HalfCloud to enable zero-downtime deployment for a verified web/API Service. `configureServiceDeploymentStrategy` saves `strategy: "blue-green"` in its update recipe. Set `strategy: "recreate"` to restore stop/start replacement. Both strategies work with manual, API, CLI and GitHub push updates, and verification preserves the choice.
+
+For blue/green Services, the updater:
+
+1. Builds every candidate image, then creates stopped candidates on spare loopback ports while old containers continue serving.
+2. Runs saved pre-start migration commands with the candidate image and existing environment/storage.
+3. Starts candidates, checks their Docker health and readiness endpoint directly, then enables Service network aliases and rechecks readiness.
+4. Switches all ready HTTP routes for the App in **one atomic Caddy configuration load**, preserving domains and authentication. Concurrent route edits retain the old targets until this cutover.
+5. Checks public readiness, durably commits the update, drains old traffic, then gracefully stops and removes old containers.
+
+Old containers remain available until cutover succeeds. If migration, health or proxy loading fails, HalfCloud restores the previous proxy targets **before** removing candidates. A lost proxy response is treated as a possibly applied cutover. If routing cannot be restored, both generations and the recovery journal are retained. Restart recovery reconciles traffic before container cleanup; it never reruns migrations.
+
+The default drain period is 30 seconds. `HALFCLOUD_DEPLOY_DRAIN_MS` configures 0–300000 milliseconds, followed by Docker's ten-second graceful stop. Caddy delays closing streaming connections on configuration reload. Requests and WebSockets lasting beyond the drain/stop window may still need to reconnect.
+
+Blue/green requires room to run both versions, HTTP readiness, and application/storage support for overlapping instances. Database migrations must be backward-compatible with the old version. Keep workers and single-writer Services on `recreate`. Atomic switching covers HTTP traffic through HalfCloud's domains; direct host-port clients and private Docker DNS are not an atomic App-wide cutover. Local ports change between generations. A private copy of a public Service uses `recreate`.
+
+### Automatic database migrations
+
+After verifying a Service's deployment, ask HalfCloud to save its recurring migration command, for example `npm run db:migrate`. The approval-gated `configureServiceUpdateCommand` tool saves `["npm", "run", "db:migrate"]` in that Service's recipe. Approval covers future updates; GitHub pushes do not require another chat or prompt. Use `command: null` to remove a saved command.
+
+Manual, API, CLI and GitHub push updates all build every candidate image first, then run saved commands sequentially before starting candidate application processes or switching traffic. Blue/green candidates are created stopped before these commands. Each command runs in a disposable container using the **new immutable image**, its user and working directory, the Service's complete environment and existing mounts, and the private App network. Existing environment values override new image defaults. There are no published ports, shell expansion or returned command logs, and execution is bounded to five minutes.
+
+The old application and supporting databases remain running during migration. Use repeatable, backward-compatible migrations, and assign the command to one migration-owner Service. Copying a Service copies its build recipe but omits this command to avoid duplicating migrations. Verification and subsequent updates preserve a configured command.
+
+A failed migration prevents image replacement and is reported as an initialization failure. Later readiness failures restore previous containers, but database and storage writes remain. Interrupted-update recovery restores containers without replaying commands and records that data may have changed. Migration runners should track applied migrations so an explicitly requested later update can resume safely.
 
 Apps created before recipe persistence need one explicit preparation/build and verified deployment before deterministic updates are available. HalfCloud refuses to guess a missing recipe or recreate the App. Existing local checkout conflicts also fail safely. Restart and Recreate alone do not fetch or build Git changes.
 
@@ -144,7 +172,7 @@ Container filesystems are ephemeral. Data that must survive Service recreation n
 
 For an existing Service, ask HalfCloud to add persistent storage for its application data directory. The approved `addServiceStorage` action stops the Service, copies that directory (including files in the original container's writable layer) into a new named volume, and recreates the same Service with its settings and existing storage preserved. A previously stopped Service remains stopped. If copying or recreation fails, the original container is restored and the new volume is retained for inspection. Existing volume names and paths overlapping existing mounts are refused to avoid overwriting data.
 
-Add persistence **before** changing environment variables or deploying another image, because those operations recreate the container and discard unmounted writable-layer files. During explicit Git deployment preparation, configure required directory variables after adding storage, then run documented approved migrations. Ordinary Git updates do not perform this preparation or run migrations.
+Add persistence **before** changing environment variables or deploying another image, because those operations recreate the container and discard unmounted writable-layer files. During explicit Git deployment preparation, configure required directory variables after adding storage, then run documented approved migrations. Ordinary Git updates reuse existing storage and run only their saved pre-deploy commands.
 
 HalfCloud supports:
 

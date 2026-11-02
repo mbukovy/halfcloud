@@ -27,7 +27,7 @@ export class CaddyService {
           const authentication = domain.access.type === 'basic_auth'
             ? `  basic_auth argon2id {\n    ${domain.access.username} ${domain.access.passwordHash}\n  }\n`
             : '';
-          return `${domain.hostname} {\n${authentication}  reverse_proxy 127.0.0.1:${port}\n}`;
+          return `${domain.hostname} {\n${authentication}  reverse_proxy 127.0.0.1:${port} {\n    stream_close_delay 5m\n  }\n}`;
         }).join('\n\n');
       })
       .filter(Boolean);

@@ -47,6 +47,8 @@ Domain changes and password setup begin in chat. Passwords are entered in a dedi
 - Start, stop, restart, recreate, inspect, or remove an individual Service when needed.
 - Read combined App logs with Service prefixes or inspect one Service's logs.
 - Run an approved one-shot initialization, migration, seed, repair, or administrative command using a Service's existing runtime configuration.
+- Save an approved recurring migration command that runs with the new image before manual or automatic Git deployment.
+- Configure blue/green HTTP deployments with candidate health checks, atomic Caddy traffic cutover, and old-container draining.
 - Inspect host CPU, memory, disk use, and uptime.
 - Diagnose common failures through the AI operator using the same bounded tools.
 

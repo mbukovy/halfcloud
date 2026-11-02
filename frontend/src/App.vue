@@ -359,7 +359,7 @@ function toolLabel(part: Record<string, unknown>) {
     updateGitApp: 'Updating App', refreshGitRepository: 'Fetching latest Git changes', deployRepositoryImage: 'Updating Service', copyEnvironmentVariables: 'Copying application environment',
     listApps: 'Inspecting Apps', createApp: 'Creating App', createGitApp: 'Cloning repository', inspectRepository: 'Inspecting repository', listRepositoryDirectory: 'Browsing repository', readRepositoryFile: 'Reading project file', writeRepositoryDeploymentFile: 'Preparing Docker configuration', buildRepositoryImage: 'Building application', addService: 'Adding Service', renameApp: 'Renaming App',
     startApp: 'Starting App', stopApp: 'Stopping App', restartApp: 'Restarting App', recreateApp: 'Recreating App', startService: 'Starting Service', stopService: 'Stopping Service', restartService: 'Restarting Service', recreateService: 'Recreating Service', removeService: 'Removing Service', deleteApp: 'Deleting App',
-    getAppLogs: 'Reading App logs', getServiceLogs: 'Reading Service logs', runServiceInitializationCommand: 'Initializing Service', verifyGitDeployment: 'Verifying application', getApp: 'Inspecting App', getHostStatus: 'Inspecting host',
+    getAppLogs: 'Reading App logs', getServiceLogs: 'Reading Service logs', runServiceInitializationCommand: 'Initializing Service', configureServiceUpdateCommand: 'Configuring deployment command', configureServiceDeploymentStrategy: 'Configuring deployment strategy', verifyGitDeployment: 'Verifying application', getApp: 'Inspecting App', getHostStatus: 'Inspecting host',
     setEnvironmentVariable: 'Updating application environment', listEnvironment: 'Inspecting application environment',
     inspectContainer: 'Inspecting application', requestEnvironmentVariable: 'Requesting an environment variable', generateEnvironmentSecret: 'Generating application secret',
     listManagedVolumes: 'Inspecting managed storage', listDockerVolumes: 'Inspecting all storage', inspectManagedVolume: 'Inspecting managed volume',
@@ -591,7 +591,9 @@ function toolDetails(part: Record<string, unknown>) {
   }
   if (name === 'getApplicationLogs' && typeof input?.tail === 'number') details.push({ text: `Recent lines: ${input.tail}` });
   if (name === 'setEnvironmentVariable' && typeof input?.name === 'string') details.push({ text: `Environment key: ${input.name}` });
-  if (name === 'runServiceInitializationCommand' && Array.isArray(input?.command)) details.push({ text: `Arguments: ${JSON.stringify(input.command)}` });
+  if (['runServiceInitializationCommand', 'configureServiceUpdateCommand'].includes(name) && Array.isArray(input?.command)) details.push({ text: `Arguments: ${JSON.stringify(input.command)}` });
+  if (name === 'configureServiceUpdateCommand') details.push({ text: input?.command === null ? 'Remove saved pre-deploy command' : 'Runs before every future Git deployment, including GitHub pushes' });
+  if (name === 'configureServiceDeploymentStrategy') details.push({ text: input?.strategy === 'blue-green' ? 'Deployment: healthy blue/green HTTP traffic switch' : 'Deployment: stop/start replacement' });
   if (name === 'runServiceInitializationCommand') details.push({ text: input?.networkMode === 'service' ? 'Network: live Service localhost' : 'Network: private App network' });
   if (typeof input?.volumeName === 'string') details.push({ text: `Volume: ${input.volumeName}` });
   if (typeof input?.mountTarget === 'string') details.push({ text: `Mount: ${input.mountTarget}` });
@@ -698,6 +700,16 @@ function approvalCopy(part: Record<string, unknown>) {
       detail: sharesServiceNetwork
         ? 'The command can change persistent data and access the running Service through localhost using configured credentials. It runs in a temporary container and does not restart the original Service.'
         : 'The command can change persistent data and contact private Services using configured credentials. It runs in a temporary container without publishing ports and does not start or stop the original Service.',
+      targets,
+    };
+  }
+  if (name === 'configureServiceUpdateCommand') {
+    const removing = recordValue(part.input)?.command === null;
+    return {
+      title: removing ? 'Remove this deployment command?' : 'Save this command for future deployments?',
+      detail: removing
+        ? 'Future Git updates will no longer run this Service’s saved pre-deploy command.'
+        : 'Approve once to run this command with each new image before manual and automatic Git deployments. It uses existing credentials and storage while the old App remains running. Failures stop deployment; database changes are not rolled back.',
       targets,
     };
   }

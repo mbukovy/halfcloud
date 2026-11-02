@@ -110,6 +110,8 @@ function replacementFixture({ running = true, failure, suffix = '', ownerAppId =
       const value = {
         ...structuredClone(inspection), Id: `new-container${suffix}`, Name: `/${options.name}`, Image: 'sha256:new-image',
         Config: options, State: { Running: false, Status: 'created', Health: { Status: 'starting' } },
+        HostConfig: structuredClone(options.HostConfig),
+        NetworkSettings: { Networks: structuredClone(options.NetworkingConfig.EndpointsConfig) },
       };
       const container = {
         id: value.Id,
@@ -140,6 +142,121 @@ function combineReplacementFixtures(fixtures) {
   };
   return service;
 }
+
+function blueGreenFixture(options) {
+  const f = replacementFixture(options);
+  delete f.inspection.HostConfig.PortBindings['3001/udp'];
+  delete f.inspection.Config.ExposedPorts['3001/udp'];
+  f.service.portConflict = async (port) => port <= 10001 ? 'occupied' : null;
+  const getNetwork = f.service.docker.getNetwork;
+  f.service.docker.getNetwork = (name) => ({
+    async inspect() { return getNetwork(name).inspect(); },
+    async disconnect({ Container }) {
+      f.events.push(`disconnect:${name}`);
+      delete (await f.containers.get(Container).inspect()).NetworkSettings.Networks[name];
+    },
+    async connect({ Container, EndpointConfig }) {
+      f.events.push(`connect:${name}`);
+      (await f.containers.get(Container).inspect()).NetworkSettings.Networks[name] = structuredClone(EndpointConfig);
+    },
+  });
+  return f;
+}
+
+test('blue/green keeps the original running and stages a stopped image on a spare loopback port without Service aliases', async () => {
+  const f = blueGreenFixture();
+  const transaction = await f.service.beginContainerImageReplacement(serviceId, 'halfcloud/web:latest', true);
+  assert.equal(transaction.state, 'exited');
+  assert.equal((await f.containers.get('old-container').inspect()).State.Running, true);
+  assert.ok(!f.events.includes('stop-old'));
+  assert.ok(!f.events.includes('start-new'));
+  const candidate = f.creates[0];
+  assert.deepEqual(candidate.HostConfig.PortBindings, { '3000/tcp': [{ HostIp: '127.0.0.1', HostPort: '10002' }] });
+  assert.equal(candidate.HostConfig.PublishAllPorts, false);
+  assert.equal(candidate.User, '2000');
+  assert.deepEqual(candidate.Env, f.inspection.Config.Env);
+  assert.deepEqual(candidate.HostConfig.Mounts, f.inspection.HostConfig.Mounts);
+  for (const endpoint of Object.values(candidate.NetworkingConfig.EndpointsConfig)) {
+    assert.equal(endpoint.IPAMConfig, undefined);
+    assert.ok(endpoint.Aliases.every((alias) => alias.startsWith('candidate-')));
+  }
+  await f.service.startContainer(transaction.containerId);
+  await f.service.activateStagedContainer(transaction.containerId);
+  const active = await f.containers.get(transaction.containerId).inspect();
+  assert.deepEqual(active.NetworkSettings.Networks[network].Aliases, ['web', 'web-alias']);
+  const connects = f.events.filter((event) => event.startsWith('connect:')).length;
+  await f.service.activateStagedContainer(transaction.containerId);
+  assert.equal(f.events.filter((event) => event.startsWith('connect:')).length, connects, 'activation is idempotent');
+  assert.equal((await f.containers.get('old-container').inspect()).State.Running, true);
+  await transaction.commit();
+  assert.ok(f.events.indexOf('start-new') < f.events.indexOf('stop-old'));
+  assert.ok(f.events.indexOf('stop-old') < f.events.indexOf('remove-old'));
+  assert.deepEqual([...f.containers.keys()], ['new-container']);
+});
+
+for (const failure of ['create', 'create-after']) test(`blue/green ${failure} failure never stops the old container`, async () => {
+  const f = blueGreenFixture({ failure });
+  await assert.rejects(f.service.beginContainerImageReplacement(serviceId, 'halfcloud/web:latest', true), new RegExp(failure));
+  assert.equal((await f.containers.get('old-container').inspect()).State.Running, true);
+  assert.ok(!f.events.includes('stop-old'));
+  assert.deepEqual([...f.containers.keys()], ['old-container']);
+  assert.equal(f.service.reservedStagingPorts.size, 0);
+});
+
+test('blue/green rollback removes a started candidate without restarting the old container', async () => {
+  const f = blueGreenFixture();
+  const transaction = await f.service.beginContainerImageReplacement(serviceId, 'halfcloud/web:latest', true);
+  await f.service.startContainer(transaction.containerId);
+  await transaction.rollback();
+  assert.ok(!f.events.includes('stop-old'));
+  assert.ok(!f.events.includes('start-old'));
+  assert.equal((await f.containers.get('old-container').inspect()).Name, '/app-web');
+});
+
+test('blue/green rejects unsupported ports and exhausted allocations before touching the running container', async () => {
+  const unsupported = replacementFixture();
+  await assert.rejects(unsupported.service.beginContainerImageReplacement(serviceId, 'halfcloud/web:latest', true), /HTTP TCP/);
+  assert.ok(!unsupported.events.includes('backup-name'));
+  const full = blueGreenFixture();
+  full.service.portConflict = async () => 'occupied';
+  await assert.rejects(full.service.beginContainerImageReplacement(serviceId, 'halfcloud/web:latest', true), /No free managed host port/);
+  assert.equal(full.service.reservedStagingPorts.size, 0);
+  assert.ok(!full.events.includes('backup-name'));
+});
+
+test('managed port allocation accounts for stopped staged containers', async () => {
+  const f = replacementFixture({ running: false });
+  assert.match(await f.service.portConflict(10001), /container/);
+});
+
+test('committed blue/green inspection and missing-candidate repair preserve the running backup', async () => {
+  const f = blueGreenFixture();
+  const candidate = await f.service.beginContainerImageReplacement(serviceId, 'halfcloud/web:latest', true);
+  await f.service.startContainer(candidate.containerId);
+  const checked = recoveryPlan(f, 'check');
+  assert.deepEqual(await f.service.recoverContainerReplacements(checked), []);
+  assert.equal(f.containers.size, 2);
+  f.containers.delete(candidate.containerId);
+  const issues = await f.service.recoverContainerReplacements(checked);
+  assert.equal(issues.length, 1);
+  const repaired = await f.service.recreateMissingContainerReplacement(issues[0], 'halfcloud/web:latest', 'sha256:new-image', true);
+  assert.equal((await f.containers.get(repaired.containerId).inspect()).State.Running, true);
+  assert.equal((await f.containers.get('old-container').inspect()).State.Running, true);
+  assert.ok(!f.events.includes('stop-old'));
+  assert.deepEqual(f.creates[1].HostConfig.PortBindings, { '3000/tcp': [{ HostIp: '127.0.0.1', HostPort: '10002' }] });
+  await f.service.activateStagedContainer(repaired.containerId);
+  assert.deepEqual(await f.service.recoverContainerReplacements(recoveryPlan(f)), []);
+  assert.equal(f.containers.size, 1);
+});
+
+test('deferred staged recovery does not remove either generation', async () => {
+  const f = blueGreenFixture();
+  await f.service.beginContainerImageReplacement(serviceId, 'halfcloud/web:latest', true);
+  const before = [...f.events];
+  await f.service.recoverContainerReplacements(recoveryPlan(f, 'defer'));
+  assert.deepEqual(f.events, before);
+  assert.equal(f.containers.size, 2);
+});
 
 function recoveryPlan(fixtures, action = 'commit') {
   const entries = Array.isArray(fixtures) ? fixtures : [fixtures];
