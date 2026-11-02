@@ -267,6 +267,64 @@ test('adding storage to a stopped Service leaves it stopped and initializes a pr
   assert.ok(!f.events.includes('start-new'));
 });
 
+for (const running of [true, false]) {
+  test(`configuration files persist read-only while preserving a ${running ? 'running' : 'stopped'} Service`, async (t) => {
+    const f = storageFixture({ running });
+    f.service.appsDir = await mkdtemp(path.join(tmpdir(), 'halfcloud-config-test-'));
+    t.after(() => rm(f.service.appsDir, { recursive: true, force: true }));
+    const content = 'metadata_dir = "/data/meta"\ndata_dir = "/data/objects"\nreplication_factor = 1\n';
+    const result = await f.service.addContainerConfigurationFile(serviceId, '/etc/garage.toml', content);
+    assert.equal(result.state, running ? 'running' : 'exited');
+    const created = f.creates[0];
+    const mount = created.HostConfig.Mounts.at(-1);
+    assert.equal(mount.Type, 'bind');
+    assert.equal(mount.Target, '/etc/garage.toml');
+    assert.equal(mount.ReadOnly, true);
+    assert.ok(mount.Source.startsWith(path.join(f.service.appsDir, appId) + path.sep));
+    assert.equal(await readFile(mount.Source, 'utf8'), content);
+    assert.deepEqual(created.Env, f.inspection.Config.Env);
+    assert.deepEqual(created.HostConfig.PortBindings, f.inspection.HostConfig.PortBindings);
+    assert.deepEqual(created.HostConfig.Binds, f.inspection.HostConfig.Binds);
+    assert.deepEqual(created.HostConfig.Mounts.slice(0, -1), f.inspection.HostConfig.Mounts);
+    assert.ok(!JSON.stringify(result).includes(content));
+    // The next recreation uses Docker's saved mount rather than rewriting or losing the file.
+    const replacement = f.containers.get(result.containerId);
+    const inspect = replacement.inspect;
+    replacement.inspect = async () => ({ ...await inspect(), HostConfig: created.HostConfig });
+    const prepared = await f.service.prepareContainerReplacement(await replacement.inspect(), 'web', { environment: { NODE_ENV: 'production' } });
+    assert.deepEqual(prepared.hostConfig.Mounts.at(-1), mount);
+  });
+}
+
+test('configuration refuses invalid paths, oversized text, mount overlaps and symbolic-link App directories', async (t) => {
+  const f = storageFixture();
+  f.service.appsDir = await mkdtemp(path.join(tmpdir(), 'halfcloud-config-test-'));
+  t.after(() => rm(f.service.appsDir, { recursive: true, force: true }));
+  for (const target of ['/', 'relative', '/etc/../config', '/etc/', '/data', '/data/config', '/config/file', '/tmp/file', '/etc/a\0b', '/etc/a:b']) {
+    await assert.rejects(f.service.addContainerConfigurationFile(serviceId, target, 'text'), /target|overlaps/);
+  }
+  for (const content of ['', 'a\0b', '🌍'.repeat(32769)]) {
+    await assert.rejects(f.service.addContainerConfigurationFile(serviceId, '/etc/garage.toml', content), /bytes/);
+  }
+  const outside = await mkdtemp(path.join(tmpdir(), 'halfcloud-outside-'));
+  t.after(() => rm(outside, { recursive: true, force: true }));
+  await symlink(outside, path.join(f.service.appsDir, appId));
+  await assert.rejects(f.service.addContainerConfigurationFile(serviceId, '/etc/garage.toml', 'text'), /directories only/);
+  assert.deepEqual(f.events, []);
+});
+
+test('configuration replacement failure restores the original Service and its storage', async (t) => {
+  const f = storageFixture({ failure: 'start' });
+  f.service.appsDir = await mkdtemp(path.join(tmpdir(), 'halfcloud-config-test-'));
+  t.after(() => rm(f.service.appsDir, { recursive: true, force: true }));
+  await assert.rejects(f.service.addContainerConfigurationFile(serviceId, '/etc/garage.toml', 'replication_factor = 1'), /start failed/);
+  const restored = await f.containers.get(f.inspection.Id).inspect();
+  assert.equal(restored.Name, f.inspection.Name);
+  assert.equal(restored.State.Running, true);
+  assert.deepEqual(restored.HostConfig.Mounts, f.inspection.HostConfig.Mounts);
+  assert.equal(f.containers.size, 1);
+});
+
 test('image replacement preserves identity, protected environment and runtime configuration while using new defaults', async () => {
   const { service, inspection, nextConfig, events, creates } = replacementFixture();
   const original = structuredClone(inspection);

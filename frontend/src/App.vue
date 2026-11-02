@@ -365,7 +365,7 @@ function toolLabel(part: Record<string, unknown>) {
     listManagedVolumes: 'Inspecting managed storage', listDockerVolumes: 'Inspecting all storage', inspectManagedVolume: 'Inspecting managed volume',
     reconcileManagedVolume: 'Reconciling managed volume', deleteManagedVolume: 'Deleting managed volume', deleteUnusedVolume: 'Deleting unused volume',
     listUnusedImages: 'Finding removable software', pruneUnusedImages: 'Removing unused software',
-    repairStorageOwnership: 'Repairing storage ownership', addServiceStorage: 'Adding persistent storage',
+    repairStorageOwnership: 'Repairing storage ownership', addServiceStorage: 'Adding persistent storage', addServiceConfigurationFile: 'Preparing configuration file',
     listServiceDomains: 'Inspecting service domains', addServiceDomain: 'Adding service domain',
     removeServiceDomain: 'Removing service domain', setPrimaryServiceDomain: 'Changing primary domain',
     listHostnameRedirects: 'Inspecting hostname redirects', addHostnameRedirect: 'Adding hostname redirect',

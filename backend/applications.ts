@@ -740,6 +740,20 @@ export class ApplicationService {
     await this.deleteContainer(service.id);
     return { appId: app.id, serviceId: service.serviceId, deleted: true };
   }
+  async addServiceConfigurationFile(appIdOrName: string, serviceIdOrName: string, target: string, content: string) {
+    const app = await this.apps.get(appIdOrName);
+    const add = async () => {
+      const service = await this.service(app.id, serviceIdOrName);
+      return this.withEnvironmentOperation(service.serviceId!, async () => {
+        this.assertAppNotUpdating(app.id);
+        const current = await this.service(app.id, service.serviceId!);
+        const result = await this.docker.addContainerConfigurationFile(current.id, target, content);
+        await this.syncRoutes();
+        return { appId: app.id, ...result };
+      });
+    };
+    return app.source ? this.withRepositoryOperation(app.id, add) : add();
+  }
   getContainerLogs(id: string, tail?: number) { return this.docker.getContainerLogs(id, tail); }
   getContainerStats(id: string) { return this.docker.getContainerStats(id); }
   async runServiceInitializationCommand(appIdOrName: string, serviceIdOrName: string, command: string[], networkMode: ServiceCommandNetworkMode = 'app') {
@@ -1018,8 +1032,9 @@ export class ApplicationService {
     };
   }
 
-  async generateEnvironmentSecret(id: string, name: string, additionalTargets: EnvironmentTarget[] = [], bytes = 32, replaceExisting = false) {
+  async generateEnvironmentSecret(id: string, name: string, additionalTargets: EnvironmentTarget[] = [], bytes = 32, replaceExisting = false, encoding: 'base64url' | 'hex' = 'base64url') {
     if (!Number.isInteger(bytes) || bytes < 16 || bytes > 128) throw new Error('Generated secret size must be between 16 and 128 bytes');
+    if (encoding !== 'base64url' && encoding !== 'hex') throw new Error('Generated secret encoding must be base64url or hex');
     if (!replaceExisting) {
       for (const target of [{ serviceId: id, name }, ...additionalTargets]) {
         const existing = (await this.listEnvironment(target.serviceId)).find((variable) => variable.name === target.name);
@@ -1029,7 +1044,7 @@ export class ApplicationService {
       }
     }
     const request = await this.requestEnvironmentVariable(id, name, 'Generated securely by HalfCloud', additionalTargets);
-    const result = await this.completeEnvironmentRequest(id, request.requestId, randomBytes(bytes).toString('base64url'), true);
+    const result = await this.completeEnvironmentRequest(id, request.requestId, randomBytes(bytes).toString(encoding), true);
     return {
       ...result,
       valueLocation: `Open the Service's Environment table, find ${name}, and select Show.`,

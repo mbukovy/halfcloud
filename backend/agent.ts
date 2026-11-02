@@ -249,6 +249,7 @@ Rules:
 - If an application requires privileged host access, explain that it cannot currently be deployed safely by HalfCloud. Never suggest silently elevating it.
 - When application data must survive container recreation, use namedVolumes by default and mount each volume at the path expected by the image. This includes databases, uploads, application state, configuration state, and persistent caches.
 - Use volumes, which are bind mounts inside the application's HalfCloud-managed directory, only for configuration or other files that intentionally need host filesystem access. Do not use a bind mount merely out of habit.
+- For software requiring a configuration file, create the stopped Service first, then use addServiceConfigurationFile with its absolute container file path and complete non-sensitive text. HalfCloud persists and mounts the file read-only, including across recreation and image updates. Do not create a directory volume at that file path or use initialization commands to write files. Existing storage overlaps are refused. Keep secrets out of file content and use the software's supported protected environment variables. For Garage, add /etc/garage.toml this way, persist metadata and object data in named volumes, and generate GARAGE_RPC_SECRET with generateEnvironmentSecret (bytes=32, encoding=hex); GARAGE_ADMIN_TOKEN can also be protected environment configuration. Then complete required setup and verify readiness before reporting success.
 - Never replace persistent data with an ephemeral container directory to work around permissions. Preserve persistence and fix the volume, mount target, ownership, or image configuration instead. Never use chmod 777 as a generic permissions fix.
 - Before changing existing storage, inspect what is already deployed. Do not delete data, replace a volume, or perform a destructive migration without clearly explaining the risk and obtaining the user's approval.
 - To add persistence to an existing Service during requested storage changes or explicit deployment preparation, use addServiceStorage. It stops the Service, copies the target directory from the original container into a new named volume, and recreates the same Service with its configuration and existing mounts preserved. Explain the brief interruption and call the approval-requiring tool. Add storage BEFORE changing environment variables or replacing the image, since those operations recreate the container and discard data in its writable layer. The tool refuses overlapping mounts and existing volume names; inspect retained volumes after a failure and use a fresh name rather than deleting data. Then configure required non-sensitive directory variables and run only documented approved migrations as part of explicit preparation. Do not treat missing storage support as a blocker when this tool is available.
@@ -463,6 +464,11 @@ export async function createChatResponse(
       inputSchema: z.object({ appId, serviceId, localName: z.string().min(1).max(128), target: z.string().startsWith('/').max(4096).describe('Absolute application data directory to preserve') }),
       execute: ({ appId, serviceId, localName, target }) => withProgress(() => docker.addServiceStorage(appId, serviceId, localName, target)),
     }),
+    addServiceConfigurationFile: tool({
+      description: 'Add a persistent read-only UTF-8 configuration file to a managed Service at an absolute container path, such as /etc/garage.toml. Recreates the Service preserving environment, storage and running/stopped state. Use before initial start. Refuses overlapping existing mounts. Never include secrets; configure supported protected environment variables separately.',
+      inputSchema: z.object({ appId, serviceId, target: z.string().startsWith('/').max(4096), content: z.string().min(1).max(131072) }),
+      execute: ({ appId, serviceId, target, content }) => withProgress(() => docker.addServiceConfigurationFile(appId, serviceId, target, content)),
+    }),
     removeService: tool({ description: 'Remove one Service from a multi-Service App while retaining managed data. Requires approval.', inputSchema: z.object({ appId, serviceId }), execute: ({ appId, serviceId }) => docker.removeService(appId, serviceId) }),
     deleteApp: tool({
       description: 'Delete an App and its runtime Services/network. Data is retained unless deleteData is explicitly true. Requires approval.',
@@ -524,9 +530,10 @@ export async function createChatResponse(
         name: z.string().min(1),
         additionalTargets: z.array(z.object({ serviceId, name: z.string().min(1) })).max(19).optional(),
         bytes: z.number().int().min(16).max(128).default(32),
+        encoding: z.enum(['base64url', 'hex']).default('base64url').describe('Use hex when software requires a hexadecimal secret, such as Garage RPC'),
         replaceExisting: z.boolean().default(false).describe('Set true only when the user explicitly requests replacing or regenerating an existing value'),
       }),
-      execute: ({ serviceId, name, additionalTargets, bytes, replaceExisting }) => docker.generateEnvironmentSecret(serviceId, name, additionalTargets, bytes, replaceExisting),
+      execute: ({ serviceId, name, additionalTargets, bytes, replaceExisting, encoding }) => docker.generateEnvironmentSecret(serviceId, name, additionalTargets, bytes, replaceExisting, encoding),
     }),
     listServiceDomains: tool({
       description: 'List all routing domains for a public HalfCloud application, including primary, managed, DNS, and HTTPS state.',

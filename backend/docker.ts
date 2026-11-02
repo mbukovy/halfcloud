@@ -813,6 +813,36 @@ export class DockerService {
     return { serviceId, volumeName, target, containerId: transaction.containerId, state: transaction.state, added: true };
   }
 
+  async addContainerConfigurationFile(id: string, target: string, content: string) {
+    if (!target.startsWith('/') || target.endsWith('/') || target.length > 4096 || path.posix.normalize(target) !== target || /[\x00-\x1f\x7f\\:]/.test(target)) {
+      throw new Error('Configuration target must be a normalized absolute file path');
+    }
+    if (!content || content.includes('\0') || Buffer.byteLength(content, 'utf8') > 131_072) throw new Error('Configuration must contain 1-131072 bytes of text');
+    const inspection = await (await this.managedContainer(id)).inspect();
+    const appId = inspection.Config.Labels?.['halfcloud.app.id'];
+    const serviceId = inspection.Config.Labels?.['halfcloud.service.id'];
+    if (!appId || !serviceId) throw new Error('Managed Service is missing ownership labels');
+    appNetworkName(appId);
+    const existingTargets = [...inspection.Mounts.map((mount) => mount.Destination), ...Object.keys(inspection.HostConfig.Tmpfs ?? {}), ...Object.keys(inspection.Config.Volumes ?? {})];
+    if (existingTargets.some((value) => {
+      const existing = path.posix.normalize(value);
+      return existing === '/' || existing === target || existing.startsWith(`${target}/`) || target.startsWith(`${existing}/`);
+    })) throw new Error('Configuration target overlaps existing storage; existing files must be preserved');
+
+    // This private directory is never mounted into a Service. Only the completed file is mounted read-only.
+    await mkdir(this.appsDir, { recursive: true, mode: 0o700 });
+    const appsRoot = await realpath(this.appsDir);
+    const appDir = path.join(appsRoot, appId);
+    await this.createManagedBindDirectory(appsRoot, appDir);
+    const directory = await mkdtemp(path.join(appDir, '.halfcloud-config-'));
+    const source = path.join(directory, 'config');
+    await writeFile(source, content, { flag: 'wx', mode: 0o644 });
+    // Retain the immutable file on failure too: interrupted replacement recovery may still need it.
+    const transaction = await this.replaceContainer(id, { additionalMount: { Type: 'bind', Source: source, Target: target, ReadOnly: true } });
+    await transaction.commit();
+    return { serviceId, containerId: transaction.containerId, target, state: transaction.state, added: true };
+  }
+
   async deleteContainer(id: string) {
     const container = await this.managedContainer(id);
     const inspection = await container.inspect();
