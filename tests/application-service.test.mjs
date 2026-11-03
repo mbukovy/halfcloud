@@ -17,6 +17,7 @@ class FakeDocker {
   started = [];
   restarted = [];
   initializationCommands = [];
+  commands = [];
   storageAdded = [];
   networksDeleted = [];
   replaced = [];
@@ -97,6 +98,10 @@ class FakeDocker {
     this.initializationCommands.push({ id, command, networkMode });
     return { serviceId: this.services.find((service) => service.id === id)?.serviceId, exitCode: 0, completed: true };
   }
+  async runServiceCommand(id, command, timeoutSeconds, abortSignal) {
+    this.commands.push({ id, command, timeoutSeconds, abortSignal });
+    return { containerId: id, output: 'v22.0.0\n', exitCode: 0, completed: true, running: false };
+  }
   async deleteContainer(id) { this.services = this.services.filter((service) => service.id !== id); }
   async addContainerStorage(id, localName, target) {
     this.storageAdded.push({ id, localName, target });
@@ -154,6 +159,13 @@ test('deploys WordPress and MySQL as Services in one App and adds Redis to it', 
   const initialized = await applications.runServiceInitializationCommand('Company Website', 'redis', ['redis-cli', '--cluster', 'fix'], 'service');
   assert.equal(initialized.completed, true);
   assert.deepEqual(runtime.initializationCommands, [{ id: 'container-3', command: ['redis-cli', '--cluster', 'fix'], networkMode: 'service' }]);
+  const command = await applications.runServiceCommand('Company Website', 'redis', ['node', '--version']);
+  assert.equal(command.appId, app.id);
+  assert.equal(command.serviceId, runtime.services[2].serviceId);
+  assert.equal(command.output, 'v22.0.0\n');
+  assert.deepEqual(runtime.commands, [{ id: 'container-3', command: ['node', '--version'], timeoutSeconds: 60, abortSignal: undefined }]);
+  await assert.rejects(applications.runServiceCommand('Company Website', 'service_foreign', ['node']), /not found/);
+  assert.equal(runtime.commands.length, 1);
   const storage = await applications.addServiceStorage('Company Website', 'redis', 'data', '/data');
   assert.equal(storage.appId, app.id);
   assert.equal(storage.added, true);

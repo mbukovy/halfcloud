@@ -50,7 +50,7 @@ HalfCloud verifies at startup that the Docker daemon reports rootless mode and r
 5. Tool results return to the model so it can verify the operation and explain the outcome.
 6. Selected destructive, command-running, ownership-changing, or exposure-increasing tools pause for approval in the browser before execution.
 
-The model never receives a general shell tool. Docker operations are implemented in application code and reject requests outside the supported policy.
+The model never receives a host shell tool. Docker operations are implemented in application code and reject requests outside the supported policy. A non-interactive command tool can execute inside an existing running managed Service, using its configured user and working directory. It returns bounded stdout/stderr with configured environment values redacted, plus the exit status, for display in chat. A wait timeout or chat cancellation disconnects without killing the command.
 
 For software that requires initialization outside its normal process, an approved tool can run one bounded argument vector in a disposable container. HalfCloud reuses the managed Service's immutable image, environment, user, working directory, and storage while omitting host ports and restart behavior. The command normally joins the App network; for a documented localhost-only administrative interface, it can instead share a running Service's network namespace. Command output is withheld, the original Service is not changed, and the disposable container is removed afterward. This capability can still change persistent data or contact private dependencies, which is why each invocation requires approval.
 

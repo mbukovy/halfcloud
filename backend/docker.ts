@@ -4,7 +4,7 @@ import { constants } from 'node:fs';
 import { cp, lstat, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { Readable } from 'node:stream';
+import { Readable, Writable } from 'node:stream';
 import { isDeepStrictEqual } from 'node:util';
 import Docker from 'dockerode';
 
@@ -657,6 +657,77 @@ export class DockerService {
     const container = await this.managedContainer(id);
     await container.restart({ t: 10 });
     return { containerId: container.id, state: 'running' };
+  }
+
+  async runServiceCommand(id: string, command: string[], timeoutSeconds = 60, abortSignal?: AbortSignal) {
+    if (!command.length || command.length > 32 || !command[0] || command.some((part) => part.length > 4096 || part.includes('\0'))) {
+      throw new Error('Service command must contain 1-32 bounded arguments');
+    }
+    if (!Number.isInteger(timeoutSeconds) || timeoutSeconds < 1 || timeoutSeconds > 300) throw new Error('Command wait timeout must be between 1 and 300 seconds');
+    abortSignal?.throwIfAborted();
+    const container = await this.managedContainer(id);
+    const inspection = await container.inspect();
+    if (!inspection.State.Running || inspection.State.Paused) throw new Error('Command execution requires a running, unpaused Service');
+    const exec = await container.exec({
+      Cmd: command, AttachStdout: true, AttachStderr: true, AttachStdin: false,
+      Tty: false, Privileged: false, User: inspection.Config.User, WorkingDir: inspection.Config.WorkingDir,
+    });
+    const stream = await exec.start({ Detach: false, Tty: false });
+    const limit = 32 * 1024;
+    const chunks: Buffer[] = [];
+    let bytes = 0;
+    let truncated = false;
+    const output = new Writable({ write(chunk: Buffer, _encoding, callback) {
+      const remaining = limit - bytes;
+      if (chunk.length > remaining) truncated = true;
+      if (remaining > 0) {
+        const bounded = Buffer.from(chunk.subarray(0, remaining));
+        chunks.push(bounded);
+        bytes += bounded.length;
+      }
+      callback();
+    } });
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let timedOut = false;
+    let interrupted = false;
+    let cancel = () => {};
+    try {
+      await new Promise<void>((resolve, reject) => {
+        cancel = () => { interrupted = true; resolve(); };
+        stream.once('end', resolve);
+        stream.once('close', resolve);
+        stream.once('error', reject);
+        abortSignal?.addEventListener('abort', cancel, { once: true });
+        timer = setTimeout(() => { timedOut = true; resolve(); }, timeoutSeconds * 1000);
+        this.docker.modem.demuxStream(stream, output, output);
+        if (abortSignal?.aborted) cancel();
+      });
+      const state = await exec.inspect();
+      let text = Buffer.concat(chunks).toString('utf8');
+      if (truncated) text = text.replace(/\uFFFD$/, '');
+      const values = (inspection.Config.Env ?? []).map((entry) => entry.slice(entry.indexOf('=') + 1)).filter(Boolean).sort((a, b) => b.length - a.length);
+      for (const value of values) {
+        text = text.replaceAll(value, '[REDACTED]');
+        if (truncated || timedOut || interrupted) {
+          for (let length = Math.min(value.length - 1, text.length); length > 0; length--) {
+            if (text.endsWith(value.slice(0, length))) {
+              text = `${text.slice(0, -length)}[REDACTED]`;
+              break;
+            }
+          }
+        }
+      }
+      return {
+        containerId: container.id, output: text, exitCode: state.Running ? null : state.ExitCode,
+        completed: !state.Running, running: state.Running, truncated, timedOut, interrupted,
+      };
+    } finally {
+      clearTimeout(timer);
+      abortSignal?.removeEventListener('abort', cancel);
+      // Docker has no exec kill endpoint: disconnecting never stops the Service or claims to kill the command.
+      stream.destroy();
+      output.destroy();
+    }
   }
 
   async runServiceInitializationCommand(id: string, command: string[], networkMode: ServiceCommandNetworkMode = 'app', updateImageId?: string) {

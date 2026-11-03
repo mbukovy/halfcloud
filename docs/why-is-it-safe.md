@@ -30,6 +30,8 @@ The model can call only operations defined by HalfCloud. There is no host shell,
 
 An approval-gated initialization tool can execute one bounded argument vector in a disposable container for a selected managed Service. It receives that Service's image, environment, user, and persistent mounts, but no host ports or restart policy. It normally joins the private App network; an explicit mode can share a running Service's network namespace when a documented administrative CLI requires local access. HalfCloud does not return command output to the model. The tool cannot mount new host paths or address an unmanaged container, but the command can change existing Service data, use configured credentials, and contact dependencies in the same App.
 
+For requested runtime commands and diagnostics, a separate non-interactive tool executes inside an existing running managed Service. It uses the container's configured user and working directory and returns bounded output with configured environment values redacted. It has the Service's existing access to files, storage, credentials and private dependencies. Output is displayed as text in chat and treated as untrusted data by the agent. Timeouts and chat cancellation disconnect without terminating the command.
+
 The deployment API rejects:
 
 - privileged containers;
@@ -47,7 +49,7 @@ These checks are code-enforced. They do not depend only on asking the language m
 
 ## Destructive actions require approval
 
-Running a one-shot Service command, deleting an App, removing a Service, deleting a managed volume, recursively changing storage ownership, and removing password protection from a route pause until the signed-in user approves the exact tool call. If approval is dismissed, the operation is not executed.
+Running a disposable initialization command, deleting an App, removing a Service, deleting a managed volume, recursively changing storage ownership, and removing password protection from a route pause until the signed-in user approves the exact tool call. If approval is dismissed, the operation is not executed.
 
 App deletion preserves named volumes and images by default. Deleting persistent data requires an explicit choice because it cannot be recovered through HalfCloud.
 

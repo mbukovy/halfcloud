@@ -898,6 +898,18 @@ export class ApplicationService {
   }
   getContainerLogs(id: string, tail?: number) { return this.docker.getContainerLogs(id, tail); }
   getContainerStats(id: string) { return this.docker.getContainerStats(id); }
+  async runServiceCommand(appIdOrName: string, serviceIdOrName: string, command: string[], timeoutSeconds = 60, abortSignal?: AbortSignal) {
+    const app = await this.apps.get(appIdOrName);
+    const run = async () => {
+      const service = await this.service(app.id, serviceIdOrName);
+      return this.withEnvironmentOperation(service.serviceId!, async () => {
+        this.assertAppNotUpdating(app.id);
+        const current = await this.service(app.id, service.serviceId!);
+        return { appId: app.id, serviceId: current.serviceId, ...await this.docker.runServiceCommand(current.id, command, timeoutSeconds, abortSignal) };
+      });
+    };
+    return app.source ? this.withRepositoryOperation(app.id, run) : run();
+  }
   async runServiceInitializationCommand(appIdOrName: string, serviceIdOrName: string, command: string[], networkMode: ServiceCommandNetworkMode = 'app') {
     const app = await this.apps.get(appIdOrName);
     this.assertAppNotUpdating(app.id);

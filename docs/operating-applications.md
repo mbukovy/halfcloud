@@ -32,6 +32,18 @@ The new `redis` Service joins WordPress's existing private network. Service name
 
 To run another instance of an existing Service, ask HalfCloud to copy it (for example, "Copy worker as worker-2 in Customer API"). The copy gets the same image and all environment variables, including protected values, without revealing credentials to the agent. It starts stopped so you can adjust its settings before starting it. By default it is private; request a distinct public port if it needs its own public address. Copies share the source's managed bind mounts and named volumes, so web and worker Services can use the same files. This is not a data copy: both Services write to the same storage. Only start copies when the application supports concurrent access; do not scale databases or other single-writer Services this way. Mounts outside the managed App and unmanaged volumes remain blocked.
 
+## Running commands in chat
+
+Ask HalfCloud to run a command in a running Service, for example:
+
+```text
+Run node --version in the web Service of Customer API and show the output.
+```
+
+The command runs inside the existing container using its configured user and working directory. Chat shows the combined standard output and errors, plus the exit code, even when the command fails. Output is limited to 32 KiB and configured environment values are redacted. Commands are non-interactive; shell syntax requires a shell available in the image.
+
+HalfCloud waits up to 60 seconds by default, or up to five minutes when requested. If the wait times out or you cancel the chat, the command may continue running; disconnecting does not stop the Service or kill the command. Required initialization for stopped Services uses the separate temporary-container setup tool.
+
 ## Images and names
 
 HalfCloud deploys images available to the rootless Docker daemon, public HTTPS Git repositories, and private GitHub repositories. For a private repository, HalfCloud generates a dedicated read-only SSH deploy key and gives you the exact GitHub settings link. The private key never leaves the server. Git-backed Apps use a persistent HalfCloud-managed checkout, but their runtime still uses built images and the same managed Service primitives as image-based Apps.
@@ -266,4 +278,4 @@ Review the target and data-retention choice shown in the approval card. Approval
 
 ## Operational limits
 
-HalfCloud 0.1 does not provide Service moves between Apps, cross-App private networking, replicas, rolling deployments, cluster scheduling, image registry login in the UI, shell access, arbitrary Docker options, or per-Service resource limits. It pulls an image only when it is absent locally, so a mutable tag such as `latest` is not an automatic update mechanism.
+HalfCloud 0.1 does not provide Service moves between Apps, cross-App private networking, replicas, rolling deployments, cluster scheduling, image registry login in the UI, interactive shell access, arbitrary Docker options, or per-Service resource limits. It pulls an image only when it is absent locally, so a mutable tag such as `latest` is not an automatic update mechanism.

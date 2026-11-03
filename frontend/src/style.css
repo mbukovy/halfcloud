@@ -425,6 +425,9 @@ input:focus, textarea:focus { border-color: var(--ink); box-shadow: 0 0 0 3px va
 .tool-content li { overflow-wrap: anywhere; }
 .tool-content li::before { content: '↳ '; color: var(--text-decoration); }
 .tool-content a { color: var(--link); text-underline-offset: 2px; }
+.service-command-output { margin-top: 10px; font: 10px/1.6 'DM Mono', monospace; }
+.service-command-output pre { max-height: 360px; overflow: auto; padding: 13px 15px; border-radius: 4px; background: #111b18; color: #d8e2dc; white-space: pre-wrap; overflow-wrap: anywhere; }
+.service-command-output p { color: var(--muted); }
 .approval-widget { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--approval-divider); color: var(--ink); }
 .approval-widget strong { display: block; font-size: 12px; }
 .approval-widget .approval-target { display: block; margin-top: 5px; overflow-wrap: anywhere; color: var(--ink); font: 500 10px 'DM Mono', monospace; }
