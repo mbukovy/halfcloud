@@ -196,6 +196,13 @@ export class ApplicationService {
     });
   }
 
+  async resetGitRepository(appIdOrName: string, onProgress?: (progress: DeploymentProgress) => void) {
+    return this.withRepositoryOperation(appIdOrName, async (app) => {
+      onProgress?.({ phase: 'activity', label: 'Resetting local repository changes' });
+      return this.repositories.reset(app.id);
+    });
+  }
+
   async deployRepositoryImage(appIdOrName: string, serviceIdOrName: string, image: string, healthPath?: string) {
     return this.withRepositoryOperation(appIdOrName, async (app) => {
       if (healthPath !== undefined && (!/^\/[^\x00-\x1f\x7f]*$/.test(healthPath) || healthPath.length > 500)) throw new Error('Invalid readiness path');

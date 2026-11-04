@@ -369,6 +369,7 @@ test('blocks refresh, build, deploy and verify for the same App while a build is
     const gitCalls = git.mock.callCount();
     for (const operation of [
       () => applications.refreshGitRepository(app.name),
+      () => applications.resetGitRepository(app.name),
       () => applications.buildRepositoryImage(app.name),
       () => applications.deployRepositoryImage(app.name, worker.serviceId, oldImage),
       () => applications.verifyGitDeployment(app.name),

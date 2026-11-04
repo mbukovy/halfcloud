@@ -846,7 +846,7 @@ test('delayed startup failure rolls back ALL swapped Services and resyncs old ro
 
 test('a verified same-commit update is a no-op without builds, swaps or plan writes', async (t) => {
   const f = await fixture(t);
-  f.git.mock.mockImplementation(async () => ({ stdout: `${currentCommit}\n`, stderr: '' }));
+  f.git.mock.mockImplementation(async (args) => ({ stdout: args.includes('rev-parse') ? `${currentCommit}\n` : '', stderr: '' }));
   const before = await f.apps.get(f.app.id);
   const result = await f.applications.updateGitApp(f.app.id);
   assert.deepEqual(result, { appId: f.app.id, commit: currentCommit, updated: false, message: 'Already up to date' });
@@ -855,7 +855,8 @@ test('a verified same-commit update is a no-op without builds, swaps or plan wri
   assert.deepEqual(await f.repositories.getServiceUpdates(f.app.id), f.previousUpdates);
   assert.deepEqual(f.runtime.services, f.previousServices);
   assert.deepEqual(f.events, []);
-  assert.equal(f.git.mock.callCount(), 5);
+  assert.equal(f.git.mock.calls.filter(({ arguments: [args] }) => args.includes('fetch')).length, 1);
+  assert.equal(f.git.mock.calls.filter(({ arguments: [args] }) => args.includes('checkout')).length, 1);
 });
 
 test('final group verification rolls back every replacement if an early-ready web or dependency fails during worker warmup', async (t) => {

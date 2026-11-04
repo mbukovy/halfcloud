@@ -638,12 +638,12 @@ export class RepositoryService {
     try {
       await git(['checkout', '--no-overwrite-ignore', '--no-recurse-submodules', '-B', branch, resolvedCommit]);
     } catch (error) {
-      for (const { destination, backup } of archived) {
+      for (const { destination, backup, tracked } of archived) {
         const existing = await lstat(destination).catch((failure: NodeJS.ErrnoException) => {
           if (failure.code !== 'ENOENT') throw failure;
           return undefined;
         });
-        if (!existing) await rename(backup, destination);
+        if (tracked || !existing) await rename(backup, destination);
       }
       throw error;
     }
@@ -656,6 +656,25 @@ export class RepositoryService {
       deployment: { status: 'in_progress', stage: 'inspecting', message: 'Refreshed repository', buildAttempts: 0, updatedAt: new Date().toISOString() },
     }) : app;
     return { appId: app.id, appName: app.name, source: updated.source, checkoutCommit, changed };
+  }
+
+  async reset(appIdOrName: string) {
+    const app = await this.gitApp(appIdOrName);
+    if (await this.getUpdateRun(app.id)) throw new Error('Recover the interrupted App update before resetting its repository');
+    const checkout = await this.checkout(app.id);
+    if (!(await stat(await this.existingPath(checkout, '.git'))).isDirectory()) throw new Error('Repository Git metadata must be inside the managed checkout');
+    const options = ['-c', 'core.hooksPath=/dev/null', '-c', 'protocol.file.allow=never', '-c', 'protocol.ext.allow=never'];
+    const git = (args: string[]) => this.git([...options, ...args], checkout);
+    const recordedCommit = app.source!.resolvedCommit;
+    if (!recordedCommit || !/^[a-f0-9]{40}$/.test(recordedCommit)) throw new Error('Clone the repository before resetting it');
+    const { stdout } = await git(['rev-parse', '--verify', `${recordedCommit}^{commit}`]);
+    const checkoutCommit = stdout.trim().toLowerCase();
+    if (checkoutCommit !== recordedCommit) throw new Error('The recorded source commit could not be verified');
+    await git(['reset', '--hard', '--no-recurse-submodules', checkoutCommit]);
+    // The checkout is disposable; credentials and verified recipes live outside it.
+    await git(['clean', '-ffdx']);
+    await this.writeRecipeJson(await this.appRoot(app.id), 'deployment-writes.json', { version: 1, files: [] }, true);
+    return { appId: app.id, appName: app.name, checkoutCommit, reset: true };
   }
 
   async inspect(appIdOrName: string): Promise<RepositoryInspection> {
@@ -757,32 +776,39 @@ export class RepositoryService {
       add(`${prefix}${recipe.dockerfilePath}`, createHash('sha256').update(recipe.dockerfileContent).digest('hex'));
       add(`${prefix}.dockerignore`, createHash('sha256').update(recipe.dockerignoreContent).digest('hex'));
     }
-    const conflicts: string[] = [];
+    const conflicts: Array<{ relative: string; tracked: boolean }> = [];
     if (!candidates.size) return [];
     const { stdout: tree } = await git(['ls-tree', '-r', '-z', commit]);
     const incomingFiles = new Set(tree.split('\0').filter((entry) => /^100(?:644|755) blob /.test(entry))
       .map((entry) => entry.slice(entry.indexOf('\t') + 1)));
     for (const [relative, hashes] of candidates) {
-      if (!incomingFiles.has(relative)) continue;
       const { stdout: tracked } = await git(['ls-files', '-z', '--', `:(literal)${relative}`]);
-      if (tracked) continue;
+      if (!tracked && !incomingFiles.has(relative)) continue;
+      if (tracked) {
+        // Never discard staged user changes. Only undo exact, unstaged agent writes
+        // when the incoming version differs from the index.
+        const { stdout: staged } = await git(['diff', '--cached', '--name-only', '-z', '--', `:(literal)${relative}`]);
+        const { stdout: incoming } = await git(['diff', '--cached', '--name-only', '-z', commit, '--', `:(literal)${relative}`]);
+        if (staged || !incoming) continue;
+      }
       try {
         const { content, truncated } = await this.readText(checkout, relative, maxReadBytes);
-        if (!truncated && hashes.has(createHash('sha256').update(content).digest('hex'))) conflicts.push(relative);
+        if (!truncated && hashes.has(createHash('sha256').update(content).digest('hex'))) conflicts.push({ relative, tracked: Boolean(tracked) });
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
       }
     }
-    const archived: Array<{ destination: string; backup: string }> = [];
+    const archived: Array<{ destination: string; backup: string; tracked: boolean }> = [];
     if (!conflicts.length) return archived;
     const directory = await mkdtemp(path.join(root, 'deployment-conflicts-'));
     try {
-      for (const relative of conflicts) {
+      for (const { relative, tracked } of conflicts) {
         const destination = path.join(checkout, relative);
         const backup = path.join(directory, relative);
         await mkdir(path.dirname(backup), { recursive: true, mode: 0o700 });
         await rename(destination, backup);
-        archived.push({ destination, backup });
+        archived.push({ destination, backup, tracked });
+        if (tracked) await git(['restore', '--worktree', '--', `:(literal)${relative}`]);
       }
     } catch (error) {
       for (const { destination, backup } of archived) await rename(backup, destination);

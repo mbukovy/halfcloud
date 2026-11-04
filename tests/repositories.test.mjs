@@ -243,6 +243,109 @@ test('restores archived deployment files when another local edit blocks checkout
   assert.deepEqual(await apps.get(app.id), before);
 });
 
+for (const legacy of [false, true]) {
+  test(`refresh archives tracked agent dockerignore edits${legacy ? ' from a legacy saved recipe' : ''}`, async (t) => {
+    const { apps, app, service, commit, remote, root, checkout } = await refreshFixture(t);
+    await writeFile(path.join(remote, '.dockerignore'), 'original\n');
+    await commit('Track ignore');
+    const base = await service.refresh(app.id);
+    const recipe = { contextPath: '.', dockerfilePath: 'Dockerfile.halfcloud', dockerfileContent: 'FROM scratch\n', dockerignoreContent: 'node_modules\n' };
+    await service.saveServiceUpdates(app.id, [{ serviceId: 'web', image: 'halfcloud/web:old', imageId, commit: base.checkoutCommit, healthPath: null, recipe }]);
+    if (legacy) await writeFile(path.join(checkout, '.dockerignore'), recipe.dockerignoreContent);
+    else await service.writeDeploymentFile(app.id, '.dockerignore', recipe.dockerignoreContent);
+    await writeFile(path.join(remote, '.dockerignore'), 'upstream\n');
+    const latest = await commit('Change tracked ignore');
+
+    assert.equal((await service.refresh(app.id)).checkoutCommit, latest);
+    assert.equal(await readFile(path.join(checkout, '.dockerignore'), 'utf8'), 'upstream\n');
+    const archive = (await readdir(root)).find((name) => name.startsWith('deployment-conflicts-'));
+    assert.equal(await readFile(path.join(root, archive, '.dockerignore'), 'utf8'), recipe.dockerignoreContent);
+    assert.deepEqual((await service.getServiceUpdates(app.id))[0].recipe, recipe);
+    assert.equal((await apps.get(app.id)).source.currentCommit, app.source.currentCommit);
+  });
+}
+
+test('restores tracked agent edits if checkout fails and preserves staged or subsequently edited files', async (t) => {
+  const { app, service, commit, remote, checkout } = await refreshFixture(t);
+  await writeFile(path.join(remote, '.dockerignore'), 'original\n');
+  await commit('Track ignore');
+  const base = await service.refresh(app.id);
+  await service.writeDeploymentFile(app.id, '.dockerignore', 'agent\n');
+  await writeFile(path.join(checkout, 'README.md'), 'user edit');
+  await writeFile(path.join(remote, '.dockerignore'), 'upstream\n');
+  await commit('Conflicting update');
+  await assert.rejects(service.refresh(app.id), /overwritten|Aborting/i);
+  assert.equal(await readFile(path.join(checkout, '.dockerignore'), 'utf8'), 'agent\n');
+  assert.equal((await exec('git', ['rev-parse', 'HEAD'], { cwd: checkout })).stdout.trim(), base.checkoutCommit);
+
+  await exec('git', ['restore', 'README.md'], { cwd: checkout });
+  await exec('git', ['add', '.dockerignore'], { cwd: checkout });
+  await assert.rejects(service.refresh(app.id), /overwritten|Aborting/i);
+  assert.equal(await readFile(path.join(checkout, '.dockerignore'), 'utf8'), 'agent\n');
+  await exec('git', ['reset', 'HEAD', '--', '.dockerignore'], { cwd: checkout });
+  await writeFile(path.join(checkout, '.dockerignore'), 'user modification\n');
+  await assert.rejects(service.refresh(app.id), /overwritten|Aborting/i);
+  assert.equal(await readFile(path.join(checkout, '.dockerignore'), 'utf8'), 'user modification\n');
+});
+
+test('reset clears staged, untracked and ignored changes and allows refresh without touching credentials or recipes', async (t) => {
+  const { apps, app, service, commit, remote, root, checkout, previousCommit } = await refreshFixture(t, true);
+  const key = await readFile(path.join(root, 'id_ed25519'), 'utf8');
+  const recipe = { contextPath: '.', dockerfilePath: 'Dockerfile.halfcloud', dockerfileContent: 'FROM scratch\n', dockerignoreContent: '.git\n' };
+  const updates = [{ serviceId: 'web', image: 'halfcloud/web:old', imageId, commit: previousCommit, healthPath: null, recipe }];
+  await service.saveServiceUpdates(app.id, updates);
+  await service.writeDeploymentFile(app.id, '.dockerignore', '.git\n');
+  await writeFile(path.join(checkout, 'README.md'), 'local edit');
+  await writeFile(path.join(checkout, 'staged.txt'), 'staged file');
+  await exec('git', ['add', 'README.md', 'staged.txt'], { cwd: checkout });
+  await writeFile(path.join(checkout, '.git', 'info', 'exclude'), 'worker/.venv\n');
+  await mkdir(path.join(checkout, 'worker', '.venv'), { recursive: true });
+  await writeFile(path.join(checkout, 'worker', '.venv', 'cache'), 'ignored');
+  await exec('git', ['clone', remote, path.join(checkout, 'nested-repo')]);
+  await symlink(remote, path.join(checkout, 'external-link'));
+  const before = await apps.get(app.id);
+  await writeFile(path.join(remote, '.dockerignore'), 'upstream\n');
+  const latest = await commit('Update after reset');
+  await assert.rejects(service.refresh(app.id), /overwritten|Aborting/i);
+
+  assert.deepEqual(await service.reset(app.name), { appId: app.id, appName: app.name, checkoutCommit: previousCommit, reset: true });
+  assert.equal((await exec('git', ['status', '--porcelain', '--ignored'], { cwd: checkout })).stdout, '');
+  assert.equal(await readFile(path.join(checkout, 'README.md'), 'utf8'), 'Initial');
+  assert.deepEqual(await apps.get(app.id), before, 'reset must not alter source metadata or build attempts');
+  assert.equal(await readFile(path.join(root, 'id_ed25519'), 'utf8'), key);
+  assert.deepEqual(await service.getServiceUpdates(app.id), updates);
+  assert.deepEqual(JSON.parse(await readFile(path.join(root, 'deployment-writes.json'), 'utf8')), { version: 1, files: [] });
+  assert.equal(await readFile(path.join(remote, 'README.md'), 'utf8'), 'Update after reset');
+  assert.equal((await service.refresh(app.id)).checkoutCommit, latest);
+});
+
+test('reset restores a stale dirty checkout to its recorded source commit', async (t) => {
+  const { apps, app, service, commit, checkout, previousCommit } = await refreshFixture(t);
+  const latest = await commit('Recorded source');
+  await service.refresh(app.id);
+  await exec('git', ['reset', '--hard', previousCommit], { cwd: checkout });
+  await writeFile(path.join(checkout, 'README.md'), 'stale local edit');
+  const before = await apps.get(app.id);
+
+  assert.equal((await service.reset(app.id)).checkoutCommit, latest);
+  assert.equal((await exec('git', ['rev-parse', 'HEAD'], { cwd: checkout })).stdout.trim(), latest);
+  assert.equal(await readFile(path.join(checkout, 'README.md'), 'utf8'), 'Recorded source');
+  assert.deepEqual(await apps.get(app.id), before);
+});
+
+test('reset refuses an interrupted update and an unmanaged checkout', async (t) => {
+  const { app, service, checkout, previousCommit, remote } = await refreshFixture(t);
+  await writeFile(path.join(checkout, 'README.md'), 'preserve me');
+  await service.saveUpdateRun(app.id, { phase: 'applying', commit: previousCommit, previousUpdates: [], updates: [] });
+  await assert.rejects(service.reset(app.id), /Recover the interrupted/);
+  assert.equal(await readFile(path.join(checkout, 'README.md'), 'utf8'), 'preserve me');
+  await service.clearUpdateRun(app.id);
+  await rm(checkout, { recursive: true });
+  await symlink(remote, checkout);
+  await assert.rejects(service.reset(app.id), /not managed/);
+  assert.equal(await readFile(path.join(remote, 'README.md'), 'utf8'), 'Initial');
+});
+
 test('accepts public HTTPS Git URLs and rejects local or credential-bearing forms', () => {
   assert.equal(validatePublicGitUrl('https://github.com/example/project.git'), 'https://github.com/example/project.git');
   assert.throws(() => validatePublicGitUrl('git@github.com:example/project.git'), /Invalid Git repository URL/);

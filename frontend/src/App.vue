@@ -356,7 +356,7 @@ function toolLabel(part: Record<string, unknown>) {
   }
   const labels: Record<string, string> = {
     searchContainerImages: 'Finding the right software',
-    updateGitApp: 'Updating App', refreshGitRepository: 'Fetching latest Git changes', deployRepositoryImage: 'Updating Service', copyEnvironmentVariables: 'Copying application environment',
+    updateGitApp: 'Updating App', refreshGitRepository: 'Fetching latest Git changes', resetGitRepository: 'Resetting local repository changes', deployRepositoryImage: 'Updating Service', copyEnvironmentVariables: 'Copying application environment',
     listApps: 'Inspecting Apps', createApp: 'Creating App', createGitApp: 'Cloning repository', inspectRepository: 'Inspecting repository', listRepositoryDirectory: 'Browsing repository', readRepositoryFile: 'Reading project file', writeRepositoryDeploymentFile: 'Preparing Docker configuration', buildRepositoryImage: 'Building application', addService: 'Adding Service', renameApp: 'Renaming App',
     startApp: 'Starting App', stopApp: 'Stopping App', restartApp: 'Restarting App', recreateApp: 'Recreating App', startService: 'Starting Service', stopService: 'Stopping Service', restartService: 'Restarting Service', recreateService: 'Recreating Service', removeService: 'Removing Service', deleteApp: 'Deleting App',
     getAppLogs: 'Reading App logs', getServiceLogs: 'Reading Service logs', runServiceCommand: 'Running Service command', runServiceInitializationCommand: 'Initializing Service', configureServiceUpdateCommand: 'Configuring deployment command', configureServiceDeploymentStrategy: 'Configuring deployment strategy', verifyGitDeployment: 'Verifying application', getApp: 'Inspecting App', getHostStatus: 'Inspecting host',
@@ -699,6 +699,7 @@ function approvalCopy(part: Record<string, unknown>) {
   if (name === 'deleteUnusedVolume') return { title: 'Delete this unused volume permanently?', detail: 'All data in this volume will be permanently removed. Unlabeled volumes may not have been created by HalfCloud.', targets };
   if (name === 'pruneUnusedImages') return { title: 'Remove all unused software?', detail: 'Apps and saved data will remain. Removed software will be downloaded again if it is needed later.', targets };
   if (name === 'removeService') return { title: 'Remove this Service?', detail: 'The Service will be removed from its App. Managed persistent data will remain.', targets };
+  if (name === 'resetGitRepository') return { title: 'Discard local repository changes?', detail: 'Local edits and untracked or ignored files in this App’s checkout will be permanently removed. Running Services, persistent storage, deploy keys and saved deployment recipes will remain.', targets };
   if (name === 'repairStorageOwnership') return { title: 'Repair this storage ownership?', detail: 'The application may be briefly stopped while ownership is changed recursively.', targets };
   if (name === 'addServiceStorage') return { title: 'Add persistent storage to this Service?', detail: 'The Service will be briefly stopped while its existing data directory is copied into new persistent storage. Its settings and existing storage will be preserved.', targets };
   if (name === 'runServiceInitializationCommand') {
