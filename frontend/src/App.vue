@@ -1,7 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, shallowRef, watch } from 'vue';
-import { useChat } from '@ai-sdk/vue';
-import { DefaultChatTransport, lastAssistantMessageIsCompleteWithApprovalResponses, type UIMessage } from 'ai';
+import { usePersistentChat, savedConversationId, type TokenUsage, type ConversationSummary, type ConversationRecord } from './persistent-chat';
 import MarkdownIt from 'markdown-it';
 import { api, safeGitHubWebhookSetup, type GitHubWebhookSetup as GitHubWebhookSetupInfo, type AppInfo, type ContainerInfo, type EnvironmentVariable, type LlmProvider, type LlmSettingsResponse, type ModelInfo, type ProviderMetadata, type PublicSettings, type ServerStats, type ServiceDomain } from './api';
 import GitHubWebhookSetup from './components/GitHubWebhookSetup.vue';
@@ -64,18 +63,10 @@ const transcript = ref<HTMLElement>();
 const composerInput = ref<HTMLTextAreaElement>();
 const respondingApprovalId = ref('');
 const continuedRequestIds = reactive(new Set<string>());
-type AgentStatus = { phase: 'pulling-image'; image: string } | { phase: 'activity'; label: string } | { phase: 'working' };
-type AgentErrorDetails = { requestId: string; provider: string; model: string; details: string };
-type TokenUsage = { input: number; output: number; thinking: number; cacheRead: number; cacheWrite: number };
-type HalfCloudMessage = UIMessage<{ tokenUsage: TokenUsage }, { agentStatus: AgentStatus; agentError: AgentErrorDetails }>;
-type ConversationSummary = { id: string; title: string; createdAt: string; updatedAt: string };
-type ConversationRecord = ConversationSummary & { messages: HalfCloudMessage[] };
 const activeConversationId = ref('');
 const recentConversations = ref<ConversationSummary[]>([]);
 const historyMenu = ref<HTMLDetailsElement>();
 const historyLoading = ref(false);
-const agentStatus = ref<AgentStatus | null>(null);
-const agentErrorDetails = ref<AgentErrorDetails | null>(null);
 const activityElapsedSeconds = ref(0);
 const debugCopyState = ref<'idle' | 'copied' | 'failed'>('idle');
 const mobileTab = ref<'operator' | 'apps' | 'server'>('operator');
@@ -83,7 +74,6 @@ let refreshTimer: number | undefined;
 let activityTimer: number | undefined;
 let debugCopyTimer: number | undefined;
 let loginLoadingTimer: number | undefined;
-let persistenceQueue = Promise.resolve();
 
 const instanceHostname = window.location.hostname || 'This server';
 const instanceIp = computed(() => {
@@ -91,20 +81,7 @@ const instanceIp = computed(() => {
   return match?.[1] ?? '';
 });
 
-const authenticatedFetch: typeof fetch = async (input, init) => {
-  const response = await fetch(input, init);
-  if (response.status === 401) window.dispatchEvent(new Event('halfcloud:unauthorized'));
-  return response;
-};
-
-const { messages, sendMessage, status, error: chatError, stop, clearError, addToolApprovalResponse } = useChat<HalfCloudMessage>({
-  transport: new DefaultChatTransport({ api: '/api/chat', fetch: authenticatedFetch }),
-  sendAutomaticallyWhen: lastAssistantMessageIsCompleteWithApprovalResponses,
-  onData(part) {
-    if (part.type === 'data-agentStatus') agentStatus.value = part.data.phase === 'working' ? null : part.data;
-    if (part.type === 'data-agentError') agentErrorDetails.value = part.data;
-  },
-});
+const { messages, sendMessage, status, error: chatError, stop, detach, activate, persistConversation, clearError, addToolApprovalResponse, agentStatus, agentErrorDetails, reconnecting } = usePersistentChat(activeConversationId, updateRecentConversation);
 
 const chatBusy = computed(() => status.value === 'submitted' || status.value === 'streaming');
 const conversationTokenUsage = computed<TokenUsage>(() => messages.value.reduce((total, message) => {
@@ -120,6 +97,7 @@ const conversationTokenUsage = computed<TokenUsage>(() => messages.value.reduce(
 const conversationTokens = computed(() => conversationTokenUsage.value.input + conversationTokenUsage.value.output);
 const agentActivityLabel = computed(() => {
   if (!chatBusy.value) return '';
+  if (reconnecting.value) return 'Reconnecting to conversation';
   if (agentStatus.value?.phase === 'pulling-image') return `Pulling ${agentStatus.value.image}`;
   if (agentStatus.value?.phase === 'activity') return agentStatus.value.label;
   if (status.value === 'submitted') return 'Contacting AI provider';
@@ -190,19 +168,8 @@ function conversationId() {
 }
 
 function updateRecentConversation(summary: ConversationSummary) {
-  recentConversations.value = [summary, ...recentConversations.value.filter((conversation) => conversation.id !== summary.id)].slice(0, 10);
-}
-
-function persistConversation(conversationIdToSave = activeConversationId.value, conversationMessages = messages.value) {
-  if (!conversationIdToSave || !conversationMessages.some((message) => message.role === 'user')) return Promise.resolve();
-  const body = JSON.stringify({ messages: conversationMessages });
-  persistenceQueue = persistenceQueue.then(async () => {
-    const summary = await api<ConversationSummary>(`/api/conversations/${encodeURIComponent(conversationIdToSave)}`, { method: 'PUT', body });
-    updateRecentConversation(summary);
-  }).catch((error: unknown) => {
-    dashboardError.value = error instanceof Error ? `Conversation could not be saved: ${error.message}` : 'Conversation could not be saved';
-  });
-  return persistenceQueue;
+  const { id, title, createdAt, updatedAt } = summary;
+  recentConversations.value = [{ id, title, createdAt, updatedAt }, ...recentConversations.value.filter((conversation) => conversation.id !== id)].slice(0, 10);
 }
 
 async function refreshConversationHistory() {
@@ -218,25 +185,26 @@ async function refreshConversationHistory() {
 
 async function restoreRecentConversation() {
   await refreshConversationHistory();
+  const savedId = savedConversationId();
+  if (savedId) {
+    try {
+      activate(await api<ConversationRecord>(`/api/conversations/${encodeURIComponent(savedId)}`, { cache: 'no-store' }));
+      return;
+    } catch { /* Fall back to the most recent server-side conversation. */ }
+  }
   const mostRecent = recentConversations.value[0];
   if (!mostRecent) return;
   const conversation = await api<ConversationRecord>(`/api/conversations/${encodeURIComponent(mostRecent.id)}`);
-  activeConversationId.value = conversation.id;
-  messages.value = conversation.messages;
+  activate(conversation);
 }
 
 async function loadConversation(id: string) {
   const scope = suspendGitHubWebhookWidgets();
   try {
-    if (chatBusy.value) await stop();
     await persistConversation();
     const conversation = await api<ConversationRecord>(`/api/conversations/${encodeURIComponent(id)}`);
-    activeConversationId.value = conversation.id;
-    messages.value = conversation.messages;
+    activate(conversation);
     prompt.value = '';
-    clearError();
-    agentStatus.value = null;
-    agentErrorDetails.value = null;
     continuedRequestIds.clear();
     historyMenu.value?.removeAttribute('open');
     await nextTick();
@@ -481,6 +449,7 @@ async function verifyRepositorySetup(part: Record<string, unknown>) {
       method: 'POST',
       body: JSON.stringify({}),
     });
+    await persistConversation();
     await refreshDashboard();
   } catch (error) {
     setup.form.error = error instanceof Error ? error.message : 'HalfCloud still cannot access this repository using the deploy key.';
@@ -501,6 +470,7 @@ async function submitBasicAuthRequest(part: Record<string, unknown>) {
     });
     request.form.password = '';
     part.output = result;
+    await persistConversation();
     await refreshDashboard();
   } catch (error) {
     request.form.error = error instanceof Error ? error.message : 'Could not configure password protection';
@@ -668,6 +638,7 @@ async function submitEnvironmentRequest(part: Record<string, unknown>) {
     });
     request.form.value = '';
     part.output = result;
+    await persistConversation();
     await refreshDashboard();
   } catch (error) {
     request.form.error = error instanceof Error ? error.message : 'Could not save environment variable';
@@ -736,7 +707,7 @@ function approvalCopy(part: Record<string, unknown>) {
 
 async function respondToApproval(part: Record<string, unknown>, approved: boolean) {
   const id = approvalRequest(part);
-  if (!id || respondingApprovalId.value) return;
+  if (!id || respondingApprovalId.value || chatBusy.value) return;
   respondingApprovalId.value = id;
   try {
     await addToolApprovalResponse({
@@ -828,7 +799,7 @@ async function logout() {
 
 function clearSession() {
   githubWebhookScope.value.abort();
-  stop();
+  detach();
   authenticated.value = false;
   apps.value = [];
   server.value = null;
@@ -1039,8 +1010,8 @@ async function submitPrompt() {
 async function newConversation() {
   const scope = suspendGitHubWebhookWidgets();
   try {
-    await stop();
     await persistConversation();
+    detach();
     activeConversationId.value = '';
     messages.value = [];
     prompt.value = '';
@@ -1180,8 +1151,6 @@ watch(status, (current, previous) => {
     void refreshDashboard();
     void nextTick(() => composerInput.value?.focus());
   }
-  if (current === 'submitted' && previous !== 'submitted') void persistConversation();
-  if ((current === 'ready' || current === 'error') && (previous === 'submitted' || previous === 'streaming')) void persistConversation();
 });
 watch(agentActivityLabel, (current, previous) => {
   if (current !== previous) activityElapsedSeconds.value = 0;
@@ -1499,7 +1468,7 @@ onBeforeUnmount(() => {
                        <div class="repository-setup-actions">
                          <button class="button" type="button" @click="copyRepositoryPublicKey(part)">{{ repositorySetup(part)!.form.copied ? 'Copied' : 'Copy public key' }}</button>
                          <a v-if="repositorySetup(part)!.settingsUrl" class="button" :href="repositorySetup(part)!.settingsUrl" target="_blank" rel="noopener noreferrer">Open GitHub Deploy Keys</a>
-                         <button class="button primary" type="button" :disabled="repositorySetup(part)!.form.verifying" @click="verifyRepositorySetup(part)">
+                         <button class="button primary" type="button" :disabled="chatBusy || repositorySetup(part)!.form.verifying" @click="verifyRepositorySetup(part)">
                            {{ repositorySetup(part)!.form.verifying ? 'Checking…' : "I've added the key" }}
                          </button>
                        </div>
@@ -1542,7 +1511,7 @@ onBeforeUnmount(() => {
                       </label>
                       <p>This value is submitted directly to HalfCloud and is not included in the AI conversation.</p>
                       <p v-if="environmentRequest(part)!.form.error" class="form-error">{{ environmentRequest(part)!.form.error }}</p>
-                      <button class="button primary" type="submit" :disabled="environmentRequest(part)!.form.saving">
+                      <button class="button primary" type="submit" :disabled="chatBusy || environmentRequest(part)!.form.saving">
                         {{ environmentRequest(part)!.form.saving ? 'Saving…' : 'Save' }}
                       </button>
                     </form>
@@ -1583,7 +1552,7 @@ onBeforeUnmount(() => {
                       >
                       <p>At least 8 characters. The password goes directly to HalfCloud, is immediately hashed, and is never sent to AI.</p>
                       <p v-if="basicAuthRequest(part)!.form.error" class="form-error">{{ basicAuthRequest(part)!.form.error }}</p>
-                      <button class="button primary" type="submit" :disabled="basicAuthRequest(part)!.form.saving">
+                      <button class="button primary" type="submit" :disabled="chatBusy || basicAuthRequest(part)!.form.saving">
                         {{ basicAuthRequest(part)!.form.saving ? 'Applying…' : basicAuthRequest(part)!.changing ? 'Change credentials' : 'Enable protection' }}
                       </button>
                     </form>
@@ -1593,8 +1562,8 @@ onBeforeUnmount(() => {
                     <span v-for="target in approvalCopy(part).targets" :key="target" class="approval-target">{{ target }}</span>
                     <p>{{ approvalCopy(part).detail }}</p>
                     <div>
-                      <button class="confirm" type="button" :disabled="Boolean(respondingApprovalId)" @click="respondToApproval(part, true)">Continue</button>
-                      <button type="button" :disabled="Boolean(respondingApprovalId)" @click="respondToApproval(part, false)">Dismiss</button>
+                      <button class="confirm" type="button" :disabled="chatBusy || Boolean(respondingApprovalId)" @click="respondToApproval(part, true)">Continue</button>
+                      <button type="button" :disabled="chatBusy || Boolean(respondingApprovalId)" @click="respondToApproval(part, false)">Dismiss</button>
                     </div>
                   </div>
                   </template>

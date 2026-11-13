@@ -43,12 +43,14 @@ HalfCloud verifies at startup that the Docker daemon reports rootless mode and r
 
 ## What happens during a chat request
 
-1. The browser sends the conversation to the local HalfCloud API.
-2. HalfCloud sends the messages and its tool definitions to the configured Azure model.
+1. The browser submits the conversation ID, messages, revision, and a unique request ID to the local HalfCloud API. HalfCloud saves the request in SQLite and acknowledges a server-owned background run.
+2. HalfCloud sends the messages and its tool definitions to the configured model, independently of the browser connection.
 3. The model chooses a tool such as listing Apps, creating a multi-service App, adding a Service, or reading logs.
 4. HalfCloud validates the structured tool arguments before executing code against rootless Docker.
 5. Tool results return to the model so it can verify the operation and explain the outcome.
 6. Selected destructive, command-running, ownership-changing, or exposure-increasing tools pause for approval in the browser before execution.
+
+The backend saves partial replies, tool results, and approval requests as the run progresses. The browser polls for the latest conversation snapshot and reconnects on focus, wake, or restored connectivity. Locking a phone, refreshing the page, or opening another conversation lets accepted work continue. The last opened conversation is restored after refresh, including any pending approvals. Only the explicit **Stop** action cancels its run. Request IDs prevent duplicate submissions, and revision checks prevent stale tabs from replacing newer history. Runs execute in the existing Node.js service without a separate worker.
 
 The model never receives a host shell tool. Docker operations are implemented in application code and reject requests outside the supported policy. A non-interactive command tool can execute inside an existing running managed Service, using its configured user and working directory. It returns bounded stdout/stderr with configured environment values redacted, plus the exit status, for display in chat. A wait timeout or chat cancellation disconnects without killing the command.
 

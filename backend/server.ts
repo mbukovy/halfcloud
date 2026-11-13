@@ -1,5 +1,3 @@
-import { Readable } from 'node:stream';
-import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import cookieParser from 'cookie-parser';
@@ -9,7 +7,8 @@ import { AuthService } from './auth.js';
 import { SettingsStore } from './config.js';
 import { DockerService } from './docker.js';
 import { AppBusyError, ApplicationService } from './applications.js';
-import { createChatResponse } from './agent.js';
+import { createChatStream } from './agent.js';
+import { ChatConflictError, ChatRuns } from './chat-runs.js';
 import { GitRepositoryError } from './repositories.js';
 import { GitHubWebhookError } from './github-webhooks.js';
 import { githubWebhookReceiver } from './github-webhook-routes.js';
@@ -24,6 +23,7 @@ const port = Number(process.env.PORT ?? 9000);
 const auth = await AuthService.create();
 const settings = new SettingsStore();
 const conversations = new ConversationStore();
+const chatRuns = new ChatRuns(conversations);
 const docker = new ApplicationService(new DockerService());
 await docker.assertRootless();
 await docker.recoverUpdates();
@@ -250,7 +250,8 @@ app.get('/api/conversations', (request, response) => {
   response.json(conversations.list(limit));
 });
 app.get('/api/conversations/:conversationId', (request, response) => {
-  const conversation = conversations.get(z.string().min(1).max(128).parse(request.params.conversationId));
+  response.setHeader('Cache-Control', 'no-store');
+  const conversation = chatRuns.get(z.string().min(1).max(128).parse(request.params.conversationId));
   if (!conversation) {
     response.status(404).json({ error: 'Conversation not found' });
     return;
@@ -259,12 +260,13 @@ app.get('/api/conversations/:conversationId', (request, response) => {
 });
 app.put('/api/conversations/:conversationId', (request, response) => {
   const id = z.string().regex(/^conversation_[a-f0-9-]{36}$/).parse(request.params.conversationId);
-  const { messages: _messages, ...summary } = conversations.save(id, conversationMessagesSchema.parse(request.body?.messages));
-  response.json(summary);
+  response.json(chatRuns.save(id, conversationMessagesSchema.parse(request.body?.messages), z.number().int().min(-1).parse(request.body?.revision)));
 });
 
 app.post('/api/chat', async (request, response) => {
-  const requestId = randomUUID();
+  const requestId = z.uuid().parse(request.body?.requestId);
+  const conversationId = z.string().regex(/^conversation_[a-f0-9-]{36}$/).parse(request.body?.conversationId);
+  const revision = z.number().int().min(-1).parse(request.body?.revision);
   response.setHeader('x-request-id', requestId);
   const aiSettings = await settings.get();
   if (!aiSettings) {
@@ -272,25 +274,18 @@ app.post('/api/chat', async (request, response) => {
     return;
   }
   const messages = conversationMessagesSchema.parse(request.body?.messages);
-  const abortController = new AbortController();
-  request.once('aborted', () => abortController.abort());
-  response.once('close', () => {
-    if (!response.writableFinished) abortController.abort();
-  });
   console.log(`[chat:${requestId}] Starting LLM request (provider=${aiSettings.provider}, model=${aiSettings.model}, messages=${messages.length})`);
-  const webResponse = await createChatResponse(aiSettings, docker, messages, abortController.signal, requestId);
-  response.status(webResponse.status);
-  webResponse.headers.forEach((value, key) => response.setHeader(key, value));
-  if (!webResponse.body) {
-    response.end();
+  response.status(202).json(chatRuns.start(conversationId, requestId, messages, revision,
+    (history, signal, id) => createChatStream(aiSettings, docker, history, signal, id)));
+});
+app.post('/api/conversations/:conversationId/stop', (request, response) => {
+  const id = z.string().min(1).max(128).parse(request.params.conversationId);
+  const conversation = chatRuns.stop(id, z.uuid().parse(request.body?.requestId));
+  if (!conversation) {
+    response.status(404).json({ error: 'Conversation not found' });
     return;
   }
-  const stream = Readable.fromWeb(webResponse.body as import('node:stream/web').ReadableStream);
-  stream.once('error', (error) => {
-    console.error(`[chat:${requestId}] Response stream failed`, error);
-    abortController.abort();
-  });
-  stream.pipe(response);
+  response.json(conversation);
 });
 
 const publicPath = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../public');
@@ -301,7 +296,7 @@ app.use((error: unknown, _request: Request, response: Response, _next: NextFunct
   const message = error instanceof ZodError ? error.issues[0]?.message ?? 'Invalid request' : error instanceof Error ? error.message : 'Unexpected error';
   console.error(error instanceof Error ? error.message : error);
   const status = error instanceof ZodError ? 400
-    : error instanceof AppBusyError ? 409
+    : error instanceof AppBusyError || error instanceof ChatConflictError ? 409
     : error instanceof GitHubWebhookError ? error.status
     : error instanceof GitRepositoryError
       ? error.code === 'invalid_url' ? 400 : error.code === 'not_found' ? 404 : error.code === 'authentication_required' ? 409 : 502

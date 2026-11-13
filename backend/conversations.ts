@@ -9,7 +9,7 @@ export const conversationMessagesSchema = z.array(z.object({
   id: z.string().min(1),
   role: z.enum(['system', 'user', 'assistant']),
   parts: z.array(z.any()),
-}).passthrough()).min(1).max(100);
+}).passthrough()).min(1);
 
 export interface ConversationSummary {
   id: string;
@@ -20,6 +20,7 @@ export interface ConversationSummary {
 
 export interface Conversation extends ConversationSummary {
   messages: UIMessage[];
+  revision: number;
 }
 
 type ConversationRow = {
@@ -28,6 +29,7 @@ type ConversationRow = {
   messages_json: string;
   created_at: string;
   updated_at: string;
+  revision: number;
 };
 
 function conversationTitle(messages: UIMessage[]) {
@@ -62,6 +64,10 @@ export class ConversationStore {
       ) STRICT;
       CREATE INDEX IF NOT EXISTS conversations_recent ON conversations(updated_at DESC);
     `);
+    const columns = this.database.prepare('PRAGMA table_info(conversations)').all();
+    if (!columns.some((column) => column.name === 'revision')) {
+      this.database.exec('ALTER TABLE conversations ADD COLUMN revision INTEGER NOT NULL DEFAULT 0');
+    }
   }
 
   list(limit = 10): ConversationSummary[] {
@@ -76,13 +82,13 @@ export class ConversationStore {
 
   get(id: string): Conversation | undefined {
     const row = this.database.prepare(`
-      SELECT id, title, messages_json, created_at, updated_at
+      SELECT id, title, messages_json, created_at, updated_at, revision
       FROM conversations
       WHERE id = ?
     `).get(id) as ConversationRow | undefined;
     if (!row) return undefined;
     const messages = sanitizeGitHubWebhookMessages(conversationMessagesSchema.parse(JSON.parse(row.messages_json)) as UIMessage[]);
-    return { id: row.id, title: row.title, messages, createdAt: row.created_at, updatedAt: row.updated_at };
+    return { id: row.id, title: row.title, messages, revision: row.revision, createdAt: row.created_at, updatedAt: row.updated_at };
   }
 
   save(id: string, inputMessages: UIMessage[]): Conversation {
@@ -95,7 +101,8 @@ export class ConversationStore {
       ON CONFLICT(id) DO UPDATE SET
         title = excluded.title,
         messages_json = excluded.messages_json,
-        updated_at = excluded.updated_at
+        updated_at = excluded.updated_at,
+        revision = conversations.revision + 1
     `).run(id, conversationTitle(messages), JSON.stringify(messages), now, now);
     return this.get(id)!;
   }

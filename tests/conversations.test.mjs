@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import test from 'node:test';
 import { ConversationStore } from '../dist/backend/conversations.js';
 
@@ -67,4 +68,25 @@ test('does not create empty conversations', async (t) => {
 
   assert.throws(() => store.save('conversation_00000000-0000-0000-0000-000000000001', []));
   assert.deepEqual(store.list(), []);
+});
+
+test('adds revisions to an existing conversation database without losing history', async (t) => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'halfcloud-conversations-'));
+  const database = new DatabaseSync(path.join(directory, 'halfcloud.sqlite'));
+  database.exec(`CREATE TABLE conversations (
+    id TEXT PRIMARY KEY, title TEXT NOT NULL, messages_json TEXT NOT NULL,
+    created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+  ) STRICT`);
+  const id = 'conversation_00000000-0000-0000-0000-000000000001';
+  const messages = [userMessage('user-1', 'Existing history')];
+  database.prepare('INSERT INTO conversations VALUES (?, ?, ?, ?, ?)').run(id, 'Existing history', JSON.stringify(messages), '2026-01-01', '2026-01-01');
+  database.close();
+  const store = new ConversationStore(directory);
+  t.after(() => {
+    store.close();
+    return rm(directory, { recursive: true, force: true });
+  });
+  assert.deepEqual(store.get(id).messages, messages);
+  assert.equal(store.get(id).revision, 0);
+  assert.equal(store.save(id, messages).revision, 1);
 });

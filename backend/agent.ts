@@ -1,4 +1,4 @@
-import { APICallError, EmptyResponseBodyError, InvalidResponseDataError, LoadAPIKeyError, LoadSettingError, NoSuchModelError, NoSuchProviderReferenceError, RetryError, ToolLoopAgent, createAgentUIStream, createUIMessageStream, createUIMessageStreamResponse, tool, type UIMessage, type UIMessageStreamWriter } from 'ai';
+import { APICallError, EmptyResponseBodyError, InvalidResponseDataError, LoadAPIKeyError, LoadSettingError, NoSuchModelError, NoSuchProviderReferenceError, RetryError, ToolLoopAgent, createAgentUIStream, createUIMessageStream, tool, type UIMessage, type UIMessageStreamWriter } from 'ai';
 import { z } from 'zod';
 import type { AiSettings } from './config.js';
 import type { ApplicationService } from './applications.js';
@@ -290,7 +290,7 @@ Rules:
 - After a successful Git deployment, briefly describe the main application, supporting Services, persistent storage, which Services remain private, which web Service is public, and the final HTTPS URL. Do not expose container IDs, internal passwords, raw environment values, network IDs, Docker commands, or repository storage paths.
 - Keep responses concise and operational. After creating a public App, state its name and public HTTPS URL. For a private Service, state its Service name and internal port instead.`;
 
-export async function createChatResponse(
+export async function createChatStream(
   settings: AiSettings,
   docker: ApplicationService,
   messages: UIMessage[],
@@ -710,12 +710,14 @@ export async function createChatResponse(
     : { input: 0, output: 0, thinking: 0, cacheRead: 0, cacheWrite: 0 };
   let currentUsage: TokenUsage = { input: 0, output: 0, thinking: 0, cacheRead: 0, cacheWrite: 0 };
   const stream = createUIMessageStream<AgentMessage>({
+    originalMessages: messages as AgentMessage[],
     onError,
     execute: async ({ writer }) => {
       progressWriter = writer;
       const agentStream = await createAgentUIStream({
         agent,
-        uiMessages: sanitizeAgentMessages(messages),
+        // Bound provider context without discarding the persisted conversation history.
+        uiMessages: sanitizeAgentMessages(messages.slice(-100)),
         abortSignal,
         onError,
         messageMetadata: ({ part }) => {
@@ -729,5 +731,5 @@ export async function createChatResponse(
       writer.merge(agentStream as unknown as Parameters<typeof writer.merge>[0]);
     },
   });
-  return createUIMessageStreamResponse({ stream });
+  return stream;
 }
