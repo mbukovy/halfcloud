@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { mkdir, readFile, readdir, rm, stat, symlink, truncate, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, readdir, rm, stat, symlink, truncate, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -338,12 +338,58 @@ test('reset refuses an interrupted update and an unmanaged checkout', async (t) 
   await writeFile(path.join(checkout, 'README.md'), 'preserve me');
   await service.saveUpdateRun(app.id, { phase: 'applying', commit: previousCommit, previousUpdates: [], updates: [] });
   await assert.rejects(service.reset(app.id), /Recover the interrupted/);
+  await assert.rejects(service.clearStaleLocks(app.id), /Recover the interrupted/);
   assert.equal(await readFile(path.join(checkout, 'README.md'), 'utf8'), 'preserve me');
   await service.clearUpdateRun(app.id);
   await rm(checkout, { recursive: true });
   await symlink(remote, checkout);
   await assert.rejects(service.reset(app.id), /not managed/);
+  await assert.rejects(service.clearStaleLocks(app.id), /not managed/);
   assert.equal(await readFile(path.join(remote, 'README.md'), 'utf8'), 'Initial');
+});
+
+test('clears a stale shallow-fetch lock that survives reset so the App can fetch the latest commit', async (t) => {
+  const { apps, app, service, commit, checkout } = await refreshFixture(t, true);
+  const latest = await commit('Fresh source');
+  const lock = path.join(checkout, '.git', 'shallow.lock');
+  const old = new Date(Date.now() - 10 * 60_000);
+  await writeFile(lock, 'abandoned');
+  await utimes(lock, old, old);
+  assert.equal((await service.reset(app.id)).reset, true);
+  await assert.rejects(service.refresh(app.id), /shallow\.lock.*File exists/i);
+  await writeFile(path.join(checkout, 'local.txt'), 'keep this');
+  const before = await apps.get(app.id);
+
+  assert.deepEqual(await service.clearStaleLocks(app.name), {
+    appId: app.id, appName: app.name, removedLocks: ['.git/shallow.lock'], blockedLocks: [],
+  });
+  assert.deepEqual(await apps.get(app.id), before);
+  assert.equal((await service.refresh(app.id)).checkoutCommit, latest);
+  assert.equal(await readFile(path.join(checkout, 'local.txt'), 'utf8'), 'keep this');
+  assert.deepEqual((await service.clearStaleLocks(app.id)).removedLocks, []);
+});
+
+test('reports Git lock conflicts and leaves recent, symlinked and out-of-scope locks untouched', async (t) => {
+  const { apps, app, service, checkout, root, repositories } = await refreshFixture(t);
+  const gitDir = path.join(checkout, '.git');
+  const recent = path.join(gitDir, 'index.lock');
+  const outside = path.join(root, 'HEAD.lock');
+  const unrelated = path.join(gitDir, 'unrelated.lock');
+  const old = new Date(Date.now() - 10 * 60_000);
+  await writeFile(recent, 'recent');
+  await writeFile(outside, 'outside');
+  await symlink(outside, path.join(gitDir, 'HEAD.lock'));
+  await writeFile(unrelated, 'unrelated');
+  await utimes(unrelated, old, old);
+  const realGit = new RepositoryService(apps, repositories);
+  await assert.rejects(realGit.reset(app.id), { code: 'lock_conflict' });
+
+  const result = await service.clearStaleLocks(app.id);
+  assert.deepEqual(result.removedLocks, []);
+  assert.deepEqual(result.blockedLocks.map(({ lock }) => lock), ['.git/index.lock', '.git/HEAD.lock']);
+  assert.equal(await readFile(recent, 'utf8'), 'recent');
+  assert.equal(await readFile(path.join(gitDir, 'HEAD.lock'), 'utf8'), 'outside');
+  assert.equal(await readFile(unrelated, 'utf8'), 'unrelated');
 });
 
 test('accepts public HTTPS Git URLs and rejects local or credential-bearing forms', () => {

@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { lookup } from 'node:dns/promises';
 import { constants } from 'node:fs';
-import { chmod, lstat, mkdir, mkdtemp, open, opendir, readFile, readdir, realpath, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { chmod, lstat, mkdir, mkdtemp, open, opendir, readFile, readdir, realpath, rename, rm, stat, unlink, writeFile } from 'node:fs/promises';
 import net from 'node:net';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
@@ -42,6 +42,7 @@ const maxTreeEntries = 250;
 const maxBuildFiles = 20_000;
 const maxBuildBytes = 1024 * 1024 * 1024;
 const maxRecipeJsonBytes = 8 * 1024 * 1024;
+const minGitLockAgeMs = 5 * 60_000; // Longer than a managed Git command's two-minute timeout.
 const blockedAddresses = new net.BlockList();
 for (const [network, prefix] of [
   ['0.0.0.0', 8], ['10.0.0.0', 8], ['100.64.0.0', 10], ['127.0.0.0', 8], ['169.254.0.0', 16], ['172.16.0.0', 12],
@@ -159,7 +160,7 @@ const updateRunFileSchema = z.union([
 
 const githubEd25519HostKey = 'github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl';
 
-export type GitRepositoryErrorCode = 'invalid_url' | 'not_found' | 'not_public' | 'authentication_required' | 'host_verification_failed' | 'dns_failure' | 'network_failure' | 'clone_failed';
+export type GitRepositoryErrorCode = 'invalid_url' | 'not_found' | 'not_public' | 'authentication_required' | 'host_verification_failed' | 'dns_failure' | 'network_failure' | 'lock_conflict' | 'clone_failed';
 
 export interface RepositoryLocation {
   originalUrl: string;
@@ -297,6 +298,9 @@ function isSensitiveBuildPath(relativePath: string) {
 }
 
 function gitFailure(stderr: string) {
+  if (/^(?:fatal|error): .*\bunable to create '[^\r\n]+\.lock': File exists\b/im.test(stderr)) {
+    return new GitRepositoryError('lock_conflict', 'A Git lock file is blocking this operation. Wait for any Git operation to finish. If the lock is left over, ask HalfCloud to clear stale Git locks for this App, then retry.');
+  }
   const detail = stderr.trim().split('\n').slice(-3).join(' ').replace(/https:\/\/[^\s/@]+:[^\s/@]+@/g, 'https://[credentials]@');
   if (/repository .* not found|not found/i.test(detail)) return new GitRepositoryError('not_found', 'Git repository was not found');
   if (/authentication failed|could not read username|permission denied|access denied/i.test(detail)) return new GitRepositoryError('not_public', 'Git repository is not publicly accessible');
@@ -675,6 +679,57 @@ export class RepositoryService {
     await git(['clean', '-ffdx']);
     await this.writeRecipeJson(await this.appRoot(app.id), 'deployment-writes.json', { version: 1, files: [] }, true);
     return { appId: app.id, appName: app.name, checkoutCommit, reset: true };
+  }
+
+  async clearStaleLocks(appIdOrName: string) {
+    const app = await this.gitApp(appIdOrName);
+    if (await this.getUpdateRun(app.id)) throw new Error('Recover the interrupted App update before clearing its Git locks');
+    const branch = validateBranch(app.source!.branch);
+    if (!branch || !app.source!.resolvedCommit) throw new Error('Clone the repository before clearing its Git locks');
+    const checkout = await this.checkout(app.id);
+    const gitDir = path.join(checkout, '.git');
+    const metadata = await lstat(gitDir);
+    if (!metadata.isDirectory()) throw new Error('Repository Git metadata must be inside the managed checkout');
+
+    const supported = ['index.lock', 'HEAD.lock', 'shallow.lock', 'FETCH_HEAD.lock', 'ORIG_HEAD.lock', 'packed-refs.lock', `refs/heads/${branch}.lock`];
+    const removedLocks: string[] = [];
+    const blockedLocks: Array<{ lock: string; reason: string }> = [];
+    const missing = (error: NodeJS.ErrnoException) => {
+      if (error.code !== 'ENOENT') throw error;
+      return undefined;
+    };
+    // The caller holds the App's repository-operation guard. Approval also asks
+    // the operator to stop any Git commands they launched outside HalfCloud.
+    for (const lock of supported) {
+      const display = `.git/${lock}`;
+      const target = path.join(gitDir, lock);
+      const expectedParent = path.dirname(target);
+      const parent = await realpath(expectedParent).catch(missing);
+      if (!parent) continue;
+      if (parent !== expectedParent) {
+        blockedLocks.push({ lock: display, reason: 'Git lock path contains a symbolic link' });
+        continue;
+      }
+      const file = await lstat(target).catch(missing);
+      if (!file) continue;
+      if (!file.isFile() || file.nlink !== 1 || file.uid !== metadata.uid) {
+        blockedLocks.push({ lock: display, reason: 'Expected a regular, unshared lock file owned by the checkout owner' });
+        continue;
+      }
+      if (Date.now() - file.mtimeMs < minGitLockAgeMs) {
+        blockedLocks.push({ lock: display, reason: 'Lock was modified less than five minutes ago' });
+        continue;
+      }
+      const current = await lstat(target).catch(missing);
+      if (!current) continue;
+      if (current.dev !== file.dev || current.ino !== file.ino || current.ctimeMs !== file.ctimeMs || await realpath(expectedParent).catch(missing) !== expectedParent) {
+        blockedLocks.push({ lock: display, reason: 'Lock changed while being checked' });
+        continue;
+      }
+      await unlink(target);
+      removedLocks.push(display);
+    }
+    return { appId: app.id, appName: app.name, removedLocks, blockedLocks };
   }
 
   async inspect(appIdOrName: string): Promise<RepositoryInspection> {

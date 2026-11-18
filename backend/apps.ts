@@ -25,7 +25,7 @@ const appSchema = z.object({
     status: z.enum(['in_progress', 'running', 'failed']),
     stage: z.enum(['cloning', 'awaiting_deploy_key', 'inspecting', 'planning', 'preparing', 'building', 'deploying', 'initializing', 'verifying', 'running', 'failed']),
     message: z.string().max(500).optional(),
-    errorCode: z.enum(['invalid_url', 'not_found', 'not_public', 'authentication_required', 'host_verification_failed', 'dns_failure', 'network_failure', 'clone_failed', 'inspection_failed', 'build_failed', 'deployment_failed', 'initialization_failed', 'verification_failed']).optional(),
+    errorCode: z.enum(['invalid_url', 'not_found', 'not_public', 'authentication_required', 'host_verification_failed', 'dns_failure', 'network_failure', 'lock_conflict', 'clone_failed', 'inspection_failed', 'build_failed', 'deployment_failed', 'initialization_failed', 'verification_failed']).optional(),
     buildAttempts: z.number().int().min(0).optional(),
     initializationAttempts: z.number().int().min(0).optional(),
     image: z.string().max(255).optional(),

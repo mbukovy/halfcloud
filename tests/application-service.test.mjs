@@ -370,6 +370,7 @@ test('blocks refresh, build, deploy and verify for the same App while a build is
     for (const operation of [
       () => applications.refreshGitRepository(app.name),
       () => applications.resetGitRepository(app.name),
+      () => applications.clearStaleGitLocks(app.name),
       () => applications.buildRepositoryImage(app.name),
       () => applications.deployRepositoryImage(app.name, worker.serviceId, oldImage),
       () => applications.verifyGitDeployment(app.name),

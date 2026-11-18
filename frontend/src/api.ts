@@ -62,7 +62,7 @@ export interface AppInfo {
     status: 'in_progress' | 'running' | 'failed';
     stage: 'cloning' | 'awaiting_deploy_key' | 'inspecting' | 'planning' | 'preparing' | 'building' | 'deploying' | 'initializing' | 'verifying' | 'running' | 'failed';
     message?: string;
-    errorCode?: 'invalid_url' | 'not_found' | 'not_public' | 'authentication_required' | 'host_verification_failed' | 'dns_failure' | 'network_failure' | 'clone_failed' | 'inspection_failed' | 'build_failed' | 'deployment_failed' | 'initialization_failed' | 'verification_failed';
+    errorCode?: 'invalid_url' | 'not_found' | 'not_public' | 'authentication_required' | 'host_verification_failed' | 'dns_failure' | 'network_failure' | 'lock_conflict' | 'clone_failed' | 'inspection_failed' | 'build_failed' | 'deployment_failed' | 'initialization_failed' | 'verification_failed';
     buildAttempts?: number;
     initializationAttempts?: number;
     image?: string;

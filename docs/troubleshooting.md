@@ -110,6 +110,12 @@ sudo -u halfcloudrunner docker ps -a
 sudo -u halfcloudrunner docker logs --tail 200 <runtime-container-name>
 ```
 
+## A Git lock blocks an App update
+
+Wait for any Git command using the App’s checkout to finish. If the lock is left over, ask HalfCloud to **clear stale Git locks for `<app>` and retry the update**. Approve once any Git commands you started manually in that checkout have finished.
+
+HalfCloud checks only known Git metadata locks in that App’s checkout and skips locks modified within the last five minutes. It reports which locks were removed or could not be cleared. Clearing locks preserves local checkout changes and running Services. If HalfCloud reports an interrupted App update, recover that update first.
+
 ## A Service cannot reach a database
 
 Use the database Service name and internal port, for example `postgres:5432`. Do not use `localhost` from another Service. Both Services must belong to the same App and be attached to that App's private network.

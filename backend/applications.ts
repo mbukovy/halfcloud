@@ -166,17 +166,18 @@ export class ApplicationService {
   verifyRepositoryDeployKey(appIdOrName: string) { return this.repositories.verifyPrivateAccess(appIdOrName); }
 
   async resumePrivateGitApp(appIdOrName: string, onProgress?: (progress: DeploymentProgress) => void) {
-    const app = await this.apps.get(appIdOrName);
-    if (app.source?.authentication !== 'ssh-deploy-key') throw new Error('This App is not waiting for private repository access');
-    onProgress?.({ phase: 'activity', label: 'Cloning private repository' });
-    const result = await this.repositories.clonePrivate(app.id, app.source.branch);
-    onProgress?.({ phase: 'activity', label: 'Inspecting repository' });
-    try {
-      return { ...result, inspection: await this.repositories.inspect(app.id) };
-    } catch (error) {
-      await this.repositories.fail(app.id, 'inspecting', error).catch(() => undefined);
-      throw error;
-    }
+    return this.withRepositoryOperation(appIdOrName, async (app) => {
+      if (app.source?.authentication !== 'ssh-deploy-key') throw new Error('This App is not waiting for private repository access');
+      onProgress?.({ phase: 'activity', label: 'Cloning private repository' });
+      const result = await this.repositories.clonePrivate(app.id, app.source.branch);
+      onProgress?.({ phase: 'activity', label: 'Inspecting repository' });
+      try {
+        return { ...result, inspection: await this.repositories.inspect(app.id) };
+      } catch (error) {
+        await this.repositories.fail(app.id, 'inspecting', error).catch(() => undefined);
+        throw error;
+      }
+    });
   }
 
   async inspectRepository(appIdOrName: string) {
@@ -200,6 +201,13 @@ export class ApplicationService {
     return this.withRepositoryOperation(appIdOrName, async (app) => {
       onProgress?.({ phase: 'activity', label: 'Resetting local repository changes' });
       return this.repositories.reset(app.id);
+    });
+  }
+
+  async clearStaleGitLocks(appIdOrName: string, onProgress?: (progress: DeploymentProgress) => void) {
+    return this.withRepositoryOperation(appIdOrName, async (app) => {
+      onProgress?.({ phase: 'activity', label: 'Checking for stale Git locks' });
+      return this.repositories.clearStaleLocks(app.id);
     });
   }
 
